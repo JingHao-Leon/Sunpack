@@ -60,7 +60,7 @@ impl ValidationError {
     }
 }
 
-type ValidationResult<T> = Result<T, ValidationError>;
+pub(crate) type ValidationResult<T> = Result<T, ValidationError>;
 
 fn invalid<T>(code: &'static str) -> ValidationResult<T> {
     Err(ValidationError::Invalid(code))
@@ -834,6 +834,7 @@ fn walk_gzip_structure(
     offset: u64,
     limit: u64,
     integrity_limit: Option<u64>,
+    mut visit: impl FnMut(u64) -> ValidationResult<()>,
 ) -> ValidationResult<GzipAnalysis> {
     let mut cursor = ByteCursor::new(reader, offset, limit);
     let mut members = 0usize;
@@ -845,6 +846,7 @@ fn walk_gzip_structure(
     let mut first_member = None;
 
     loop {
+        visit(cursor.position())?;
         gzip_header(&mut cursor)?;
         let deflate_start = cursor.position();
         let mut output = match remaining_integrity {
@@ -949,7 +951,7 @@ pub(crate) fn analyze_gzip_structure(
     limit: u64,
     integrity_limit: u64,
 ) -> ValidationResult<GzipAnalysis> {
-    walk_gzip_structure(reader, offset, limit, Some(integrity_limit))
+    walk_gzip_structure(reader, offset, limit, Some(integrity_limit), |_| Ok(()))
 }
 
 pub(crate) fn validate_gzip_structure(
@@ -957,7 +959,16 @@ pub(crate) fn validate_gzip_structure(
     offset: u64,
     limit: u64,
 ) -> ValidationResult<StructureValidation> {
-    Ok(walk_gzip_structure(reader, offset, limit, None)?.structure)
+    validate_gzip_structure_observed(reader, offset, limit, |_| Ok(()))
+}
+
+pub(crate) fn validate_gzip_structure_observed(
+    reader: &ManagedReader,
+    offset: u64,
+    limit: u64,
+    visit: impl FnMut(u64) -> ValidationResult<()>,
+) -> ValidationResult<StructureValidation> {
+    Ok(walk_gzip_structure(reader, offset, limit, None, visit)?.structure)
 }
 
 fn next_bzip_symbol(
@@ -984,10 +995,20 @@ pub(crate) fn validate_bzip2_structure(
     offset: u64,
     limit: u64,
 ) -> ValidationResult<StructureValidation> {
+    validate_bzip2_structure_observed(reader, offset, limit, |_| Ok(()))
+}
+
+pub(crate) fn validate_bzip2_structure_observed(
+    reader: &ManagedReader,
+    offset: u64,
+    limit: u64,
+    mut visit: impl FnMut(u64) -> ValidationResult<()>,
+) -> ValidationResult<StructureValidation> {
     let mut cursor = ByteCursor::new(reader, offset, limit);
     let mut streams = 0usize;
     let mut total_blocks = 0usize;
     loop {
+        visit(cursor.position())?;
         let header = cursor.read_exact(4)?;
         if !header.starts_with(BZIP2_MAGIC) || !(b'1'..=b'9').contains(&header[3]) {
             return invalid("bzip2_magic_not_found");
@@ -1481,11 +1502,21 @@ pub(crate) fn validate_zstd_structure(
     offset: u64,
     limit: u64,
 ) -> ValidationResult<StructureValidation> {
+    validate_zstd_structure_observed(reader, offset, limit, |_| Ok(()))
+}
+
+pub(crate) fn validate_zstd_structure_observed(
+    reader: &ManagedReader,
+    offset: u64,
+    limit: u64,
+    mut visit: impl FnMut(u64) -> ValidationResult<()>,
+) -> ValidationResult<StructureValidation> {
     let mut cursor = offset;
     let mut frames = 0usize;
     let mut blocks = 0usize;
     let mut checksum_present = false;
     loop {
+        visit(cursor)?;
         let magic = read_u32(reader, cursor, limit)?;
         if (0x184d2a50..=0x184d2a5f).contains(&magic) {
             let size = u64::from(read_u32(reader, cursor + 4, limit)?);

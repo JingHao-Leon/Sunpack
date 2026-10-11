@@ -2,15 +2,15 @@
 use crate::io::iocp;
 use crate::io::reader::{CachedBytes, ManagedReader};
 use crate::scan::compression_stream::{
-    resolve_xz_stream_start, validate_bzip2_structure, validate_gzip_structure,
-    validate_zstd_structure, ValidationError,
+    resolve_xz_stream_start, validate_bzip2_structure_observed, validate_gzip_structure_observed,
+    validate_zstd_structure_observed, ValidationError, ValidationResult,
 };
 use aho_corasick::{packed, AhoCorasick};
 use crc32fast::hash as crc32;
 use memchr::memmem;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::sync::OnceLock;
 
@@ -376,6 +376,7 @@ fn validate_raw_hits(
     raw_hits: &[RawHit],
     xz_footer_ends: &[u64],
 ) -> io::Result<Vec<EmbeddedCandidate>> {
+    let mut suffixes: [FailedSuffixEvidence; 5] = std::array::from_fn(|_| Default::default());
     let mut xz_footers = XzFooterEvidence {
         ends: xz_footer_ends,
         next_unchecked: 0,
@@ -387,7 +388,15 @@ fn validate_raw_hits(
         .collect::<Vec<_>>();
     let mut candidates = zip_eocd_hits
         .par_iter()
-        .map(|hit| validate_candidate(reader, file_size, hit.kind, hit.offset))
+        .map(|hit| {
+            validate_candidate(
+                reader,
+                file_size,
+                hit.kind,
+                hit.offset,
+                &mut Default::default(),
+            )
+        })
         .collect::<io::Result<Vec<_>>>()?
         .into_iter()
         .flatten()
@@ -419,7 +428,20 @@ fn validate_raw_hits(
         let resolved = if hit.kind == "xz" {
             validate_xz(reader, file_size, hit.offset, &mut xz_footers)?
         } else {
-            validate_candidate(reader, file_size, hit.kind, hit.offset)?
+            let suffix_index = match hit.kind {
+                "gzip" => 0,
+                "bzip2" => 1,
+                "zstd" => 2,
+                "tar" => 3,
+                _ => 4,
+            };
+            validate_candidate(
+                reader,
+                file_size,
+                hit.kind,
+                hit.offset,
+                &mut suffixes[suffix_index],
+            )?
         };
         let Some(candidate) = resolved else {
             continue;
@@ -724,6 +746,7 @@ fn validate_candidate(
     file_size: u64,
     kind: &str,
     offset: u64,
+    suffixes: &mut FailedSuffixEvidence,
 ) -> std::io::Result<Option<EmbeddedCandidate>> {
     match kind {
         "zip" => validate_zip(file, file_size, offset),
@@ -731,10 +754,10 @@ fn validate_candidate(
         "7z" => validate_seven_zip(file, file_size, offset),
         "rar4" => validate_rar4(file, file_size, offset),
         "rar5" => validate_rar5(file, file_size, offset),
-        "gzip" => validate_gzip(file, file_size, offset),
-        "bzip2" => validate_bzip2(file, file_size, offset),
-        "zstd" => validate_zstd(file, file_size, offset),
-        "tar" => validate_tar(file, file_size, offset),
+        "gzip" => validate_gzip(file, file_size, offset, suffixes),
+        "bzip2" => validate_bzip2(file, file_size, offset, suffixes),
+        "zstd" => validate_zstd(file, file_size, offset, suffixes),
+        "tar" => validate_tar(file, file_size, offset, suffixes),
         "lz4" | "lz4_skippable" => {
             if kind == "lz4_skippable" {
                 let magic = read_at(file, offset, 4)?;
@@ -1311,15 +1334,68 @@ fn validate_rar5(
     )))
 }
 
+// Owned only by this physical-order scan. Facts refer to exact parser-visited
+// nodes, never the intervening payload (which may contain independent archives).
+#[derive(Default)]
+struct FailedSuffixEvidence {
+    failed: BTreeSet<u64>,
+}
+
+impl FailedSuffixEvidence {
+    fn validate<T>(
+        &mut self,
+        offset: u64,
+        join_suffix: bool,
+        parse: impl FnOnce(&mut dyn FnMut(u64) -> ValidationResult<()>) -> ValidationResult<T>,
+    ) -> io::Result<Option<T>> {
+        while self.failed.first().is_some_and(|&node| node < offset) {
+            self.failed.pop_first();
+        }
+        if self.failed.remove(&offset) {
+            return Ok(None);
+        }
+        let mut visited = Vec::new();
+        let result = parse(&mut |node| {
+            if join_suffix && self.failed.contains(&node) {
+                return Err(ValidationError::Invalid("known_failed_suffix"));
+            }
+            if node > offset {
+                visited.push(node);
+            }
+            Ok(())
+        });
+        match result {
+            Ok(value) => Ok(Some(value)),
+            Err(ValidationError::Io(error)) => Err(error),
+            Err(ValidationError::Invalid(code)) => {
+                // These failures depend on accumulation from the caller's
+                // root. A shorter suffix may stay within its own limit.
+                if !matches!(
+                    code,
+                    "bzip2_block_count_exceeded"
+                        | "zstd_block_count_exceeded"
+                        | "decoded_size_overflow"
+                        | "deflate_block_count_overflow"
+                ) {
+                    self.failed.extend(visited);
+                }
+                Ok(None)
+            }
+        }
+    }
+}
+
 fn validate_gzip(
     file: &ManagedReader,
     size: u64,
     offset: u64,
+    suffixes: &mut FailedSuffixEvidence,
 ) -> std::io::Result<Option<EmbeddedCandidate>> {
-    let structure = match validate_gzip_structure(file, offset, size) {
-        Ok(value) => value,
-        Err(ValidationError::Invalid(_)) => return Ok(None),
-        Err(ValidationError::Io(error)) => return Err(error),
+    let Some(structure) = suffixes.validate(offset, true, |visit| {
+        validate_gzip_structure_observed(file, offset, size, visit)
+    })?
+    else {
+        return Ok(None);
     };
     Ok(Some(candidate(
         "gzip",
@@ -1338,11 +1414,13 @@ fn validate_bzip2(
     file: &ManagedReader,
     size: u64,
     offset: u64,
+    suffixes: &mut FailedSuffixEvidence,
 ) -> std::io::Result<Option<EmbeddedCandidate>> {
-    let structure = match validate_bzip2_structure(file, offset, size) {
-        Ok(value) => value,
-        Err(ValidationError::Invalid(_)) => return Ok(None),
-        Err(ValidationError::Io(error)) => return Err(error),
+    let Some(structure) = suffixes.validate(offset, true, |visit| {
+        validate_bzip2_structure_observed(file, offset, size, visit)
+    })?
+    else {
+        return Ok(None);
     };
     Ok(Some(candidate(
         "bzip2",
@@ -1433,11 +1511,13 @@ fn validate_zstd(
     file: &ManagedReader,
     size: u64,
     offset: u64,
+    suffixes: &mut FailedSuffixEvidence,
 ) -> std::io::Result<Option<EmbeddedCandidate>> {
-    let structure = match validate_zstd_structure(file, offset, size) {
-        Ok(value) => value,
-        Err(ValidationError::Invalid(_)) => return Ok(None),
-        Err(ValidationError::Io(error)) => return Err(error),
+    let Some(structure) = suffixes.validate(offset, true, |visit| {
+        validate_zstd_structure_observed(file, offset, size, visit)
+    })?
+    else {
+        return Ok(None);
     };
     Ok(Some(candidate(
         "zstd",
@@ -1534,63 +1614,78 @@ fn validate_tar(
     file: &ManagedReader,
     size: u64,
     offset: u64,
+    suffixes: &mut FailedSuffixEvidence,
 ) -> std::io::Result<Option<EmbeddedCandidate>> {
+    // TAR's walk cap accepts an unresolved logical archive. Do not shortcut a
+    // joined suffix inside the walk: its failure could be beyond that cap.
+    suffixes.validate(offset, false, |visit| {
+        walk_tar_candidate(file, size, offset, visit)
+    })
+}
+
+fn walk_tar_candidate(
+    file: &ManagedReader,
+    size: u64,
+    offset: u64,
+    mut visit: impl FnMut(u64) -> ValidationResult<()>,
+) -> ValidationResult<EmbeddedCandidate> {
     if offset + 512 > size {
-        return Ok(None);
+        return Err(ValidationError::Invalid("tar_header_missing"));
     }
     let header = read_at(file, offset, 512)?;
     if header.len() < 512 || &header[257..262] != TAR_USTAR {
-        return Ok(None);
+        return Err(ValidationError::Invalid("tar_header_invalid"));
     }
     if !valid_tar_header(&header) {
-        return Ok(None);
+        return Err(ValidationError::Invalid("tar_header_invalid"));
     }
     let mut cursor = offset;
     for _ in 0..MAX_ARCHIVE_METADATA_RECORDS {
+        visit(cursor)?;
         let current = read_at(file, cursor, 512)?;
         if current.len() != 512 {
-            return Ok(None);
+            return Err(ValidationError::Invalid("tar_header_missing"));
         }
         if current.iter().all(|byte| *byte == 0) {
             let second = read_at(file, cursor + 512, 512)?;
             if second.len() != 512 || !second.iter().all(|byte| *byte == 0) {
-                return Ok(None);
+                return Err(ValidationError::Invalid("tar_end_blocks_missing"));
             }
-            return Ok(Some(candidate(
+            return Ok(candidate(
                 "tar",
                 offset,
                 Some(cursor + 1024),
                 1.0,
                 "member_walk_checksums_and_end_blocks",
-            )));
+            ));
         }
         if !valid_tar_header(&current) {
-            return Ok(None);
+            return Err(ValidationError::Invalid("tar_header_invalid"));
         }
         let Some(payload_size) = parse_tar_number(&current[124..136]) else {
-            return Ok(None);
+            return Err(ValidationError::Invalid("tar_member_size_invalid"));
         };
         let Some(padded) = payload_size.checked_add(511).map(|value| value & !511) else {
-            return Ok(None);
+            return Err(ValidationError::Invalid("tar_member_size_invalid"));
         };
         let Some(next) = cursor
             .checked_add(512)
             .and_then(|value| value.checked_add(padded))
         else {
-            return Ok(None);
+            return Err(ValidationError::Invalid("tar_member_size_invalid"));
         };
         if next > size {
-            return Ok(None);
+            return Err(ValidationError::Invalid("tar_member_size_invalid"));
         }
         cursor = next;
     }
-    Ok(Some(logical_candidate(
+    Ok(logical_candidate(
         "tar",
         offset,
         None,
         0.90,
         "tar_member_walk_limit_reached",
-    )))
+    ))
 }
 
 fn valid_tar_header(header: &[u8]) -> bool {
@@ -1997,6 +2092,134 @@ mod tests {
         data.extend_from_slice(&header);
         data.extend_from_slice(payload);
         data.resize(member_start + 512 + payload.len().next_multiple_of(512), 0);
+    }
+
+    // Failed outer walks must share only their visited heads. Same-format
+    // archives inside skipped payload remain independent carrier candidates.
+    #[test]
+    fn failed_suffixes_keep_inner_archives_under_read_budget_and_propagate_io() {
+        use crate::io::reader::ReaderConfig;
+        let mut gz = GzEncoder::new(Vec::new(), Compression::none());
+        gz.write_all(b"inner gzip").unwrap();
+        let inner_gz = gz.finish().unwrap();
+        let mut empty = GzEncoder::new(Vec::new(), Compression::fast());
+        empty.write_all(b"").unwrap();
+        let empty_gz = empty.finish().unwrap();
+        let mut outer = GzEncoder::new(Vec::new(), Compression::none());
+        outer.write_all(&inner_gz).unwrap();
+        let mut bad_gz = outer.finish().unwrap();
+        let last = bad_gz.len() - 1;
+        bad_gz[last] ^= 1;
+        let mut gz_data = empty_gz.repeat(32);
+        gz_data.extend_from_slice(&bad_gz);
+
+        let mut bz = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::fast());
+        bz.write_all(b"").unwrap();
+        let empty_bz = bz.finish().unwrap();
+        let mut bz_data = empty_bz.repeat(32);
+        bz_data.extend_from_slice(b"BZh9broken-block");
+        bz_data.extend_from_slice(&empty_bz);
+
+        let empty_zs = [0x28, 0xb5, 0x2f, 0xfd, 0x20, 0, 1, 0, 0];
+        let mut zs_data = empty_zs.repeat(32);
+        zs_data.extend_from_slice(&[0x28, 0xb5, 0x2f, 0xfd, 0x20, 9, 72, 0, 0]);
+        zs_data.extend_from_slice(&empty_zs); // raw block containing a real frame
+        zs_data.extend_from_slice(&[7, 0, 0]); // reserved next block type
+
+        // The outer frame skips all inner heads, but visits the bad suffix.
+        // The first inner walk must join that evidence and publish its own
+        // heads, otherwise all later inner candidates rewalk the same tail.
+        let payload = empty_zs.repeat(32);
+        let mut zs_join = vec![0x28, 0xb5, 0x2f, 0xfd, 0x60];
+        zs_join.extend_from_slice(&((payload.len() - 256) as u16).to_le_bytes());
+        let block = ((payload.len() as u32) << 3) | 1;
+        zs_join.extend_from_slice(&block.to_le_bytes()[..3]);
+        zs_join.extend_from_slice(&payload);
+        zs_join.extend_from_slice(&[0x28, 0xb5, 0x2f, 0xfd, 0x20, 0, 7, 0, 0]);
+
+        let mut inner_tar = Vec::new();
+        append_tar_member(&mut inner_tar, "inner", b"payload");
+        inner_tar.extend_from_slice(&[0; 1024]);
+        let mut tar_data = Vec::new();
+        for _ in 0..32 {
+            append_tar_member(&mut tar_data, "prefix", b"");
+        }
+        append_tar_member(&mut tar_data, "outer", &inner_tar);
+
+        for (kind, data, expected_count) in [
+            ("gzip", gz_data, 1),
+            ("bzip2", bz_data, 1),
+            ("zstd", zs_data, 1),
+            ("tar", tar_data, 1),
+            ("zstd", zs_join, 0),
+        ] {
+            let mut hits = scan_sample(&data, 0, 0);
+            hits.retain(|hit| hit.kind == kind);
+            hits.sort_by_key(|hit| hit.offset);
+            let reference = ManagedReader::from_bytes(data.clone(), ReaderConfig::default());
+            let mut expected = Vec::new();
+            for hit in &hits {
+                if let Some(candidate) = validate_candidate(
+                    &reference,
+                    reference.len(),
+                    kind,
+                    hit.offset,
+                    &mut Default::default(),
+                )
+                .unwrap()
+                {
+                    expected.push(candidate);
+                }
+            }
+            assert_eq!(expected.len(), expected_count, "{kind}");
+            let source = ManagedReader::from_bytes(
+                data.clone(),
+                ReaderConfig {
+                    max_read_bytes: Some((data.len() as u64 * 3).max(8192)),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(
+                validate_raw_hits(&source, source.len(), &hits, &[])
+                    .unwrap_or_else(|error| panic!("{kind}: {error}")),
+                expected,
+                "{kind}"
+            );
+            let source = ManagedReader::from_bytes(
+                data,
+                ReaderConfig {
+                    max_read_bytes: Some(1),
+                    ..Default::default()
+                },
+            );
+            assert!(
+                validate_raw_hits(&source, source.len(), &hits, &[]).is_err(),
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn failed_suffixes_do_not_share_accumulated_zstd_block_limits() {
+        use crate::io::reader::ReaderConfig;
+        // Each frame is within the real production limit. The concatenation
+        // exceeds it, but its second root must still survive.
+        let mut frame = vec![0x28, 0xb5, 0x2f, 0xfd, 0x20, 0];
+        frame.extend(std::iter::repeat([0, 0, 0]).take(500_000).flatten());
+        frame.extend_from_slice(&[1, 0, 0]);
+        let second = frame.len() as u64;
+        let source = ManagedReader::from_bytes(frame.repeat(2), ReaderConfig::default());
+        let hits = [0, second].map(|offset| RawHit {
+            kind: "zstd",
+            hit_name: "zstd",
+            offset,
+        });
+        let candidates = validate_raw_hits(&source, source.len(), &hits, &[]).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            (candidates[0].offset, candidates[0].end_offset),
+            (second, Some(source.len()))
+        );
     }
 
     fn append_zip64_archive(data: &mut Vec<u8>) -> (u64, u64) {
@@ -2440,7 +2663,7 @@ mod tests {
 
         let path = temp_file("embedded_zstd_maximum_header", &data);
         let reader = ManagedReader::open(&path).unwrap();
-        let candidate = validate_zstd(&reader, data.len() as u64, 0)
+        let candidate = validate_zstd(&reader, data.len() as u64, 0, &mut Default::default())
             .unwrap()
             .expect("the full 14-byte RFC frame header must be accepted");
         assert_eq!(candidate.validation, "rfc8878_complete_frame_block_walk");
@@ -2452,9 +2675,11 @@ mod tests {
         let data = [0x28, 0xb5, 0x2f, 0xfd, 0x24, 0x01, 0x09, 0x00, 0x00, b'x'];
         let path = temp_file("embedded_zstd_missing_checksum", &data);
         let reader = ManagedReader::open(&path).unwrap();
-        assert!(validate_zstd(&reader, data.len() as u64, 0)
-            .unwrap()
-            .is_none());
+        assert!(
+            validate_zstd(&reader, data.len() as u64, 0, &mut Default::default())
+                .unwrap()
+                .is_none()
+        );
         let _ = fs::remove_file(path);
     }
 
@@ -2463,9 +2688,11 @@ mod tests {
         let data = [0x28, 0xb5, 0x2f, 0xfd, 0x20, 0x00, 0x03, 0x00, 0x00];
         let path = temp_file("embedded_zstd_empty_rle", &data);
         let reader = ManagedReader::open(&path).unwrap();
-        assert!(validate_zstd(&reader, data.len() as u64, 0)
-            .unwrap()
-            .is_none());
+        assert!(
+            validate_zstd(&reader, data.len() as u64, 0, &mut Default::default())
+                .unwrap()
+                .is_none()
+        );
         let _ = fs::remove_file(path);
     }
 

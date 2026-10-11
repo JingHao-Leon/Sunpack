@@ -61,32 +61,28 @@ fn collect_signature_hits(target: &mut Vec<(&'static str, u64)>, base: u64, data
     if data.is_empty() {
         return;
     }
-    for (index, byte) in data.iter().enumerate() {
-        let candidates = signatures_for_first_byte(*byte);
-        if candidates.is_empty() {
-            continue;
-        }
-        for (name, signature) in candidates {
-            let end = index + signature.len();
-            if end <= data.len() && &data[index..end] == *signature {
-                target.push((*name, base + index as u64));
+    for signatures in [
+        ANALYSIS_SIGNATURES_P,
+        ANALYSIS_SIGNATURES_R,
+        ANALYSIS_SIGNATURES_7,
+        ANALYSIS_SIGNATURES_GZIP,
+        ANALYSIS_SIGNATURES_BZIP2,
+        ANALYSIS_SIGNATURES_XZ,
+        ANALYSIS_SIGNATURES_ZSTD,
+        ANALYSIS_SIGNATURES_LZ4,
+        ANALYSIS_SIGNATURES_TAR,
+    ] {
+        for &(name, signature) in signatures {
+            let finder = memchr::memmem::Finder::new(signature);
+            let mut start = 0;
+            while let Some(index) = finder.find(&data[start..]) {
+                let index = start + index;
+                target.push((name, base + index as u64));
+                // Preserve overlapping signatures. The caller orders and
+                // deduplicates both windows once after collection.
+                start = index + 1;
             }
         }
-    }
-}
-
-fn signatures_for_first_byte(byte: u8) -> &'static [(&'static str, &'static [u8])] {
-    match byte {
-        b'P' => ANALYSIS_SIGNATURES_P,
-        b'R' => ANALYSIS_SIGNATURES_R,
-        b'7' => ANALYSIS_SIGNATURES_7,
-        0x1f => ANALYSIS_SIGNATURES_GZIP,
-        b'B' => ANALYSIS_SIGNATURES_BZIP2,
-        0xfd => ANALYSIS_SIGNATURES_XZ,
-        b'(' => ANALYSIS_SIGNATURES_ZSTD,
-        4 => ANALYSIS_SIGNATURES_LZ4,
-        b'u' => ANALYSIS_SIGNATURES_TAR,
-        _ => &[],
     }
 }
 
@@ -111,5 +107,43 @@ fn format_for_hit(name: &str) -> &'static str {
         "lz4"
     } else {
         ""
+    }
+}
+
+#[cfg(test)]
+mod signature_search_tests {
+    use super::*;
+
+    // Public window tests cover only some signatures. Check every name/offset
+    // against a byte-by-byte oracle, including short and truncated edges.
+    #[test]
+    fn signature_byte_search_keeps_all_names_offsets_and_short_edges() {
+        let patterns = [
+            ANALYSIS_SIGNATURES_P, ANALYSIS_SIGNATURES_R, ANALYSIS_SIGNATURES_7,
+            ANALYSIS_SIGNATURES_GZIP, ANALYSIS_SIGNATURES_BZIP2, ANALYSIS_SIGNATURES_XZ,
+            ANALYSIS_SIGNATURES_ZSTD, ANALYSIS_SIGNATURES_LZ4, ANALYSIS_SIGNATURES_TAR,
+        ].into_iter().flatten().copied().collect::<Vec<_>>();
+        let mut data = (0..65536usize).map(|i| (i * 73 + 19) as u8).collect::<Vec<_>>();
+        for (index, (_, signature)) in patterns.iter().enumerate() {
+            let start = index * 13;
+            data[start..start + signature.len()].copy_from_slice(signature);
+        }
+        data.extend_from_slice(b"ustarustarPK\x03\x04PK\x05\x06");
+        for len in (0..=160).chain([data.len() - 1, data.len()]) {
+            let sample = &data[..len];
+            let mut expected = Vec::new();
+            for index in 0..sample.len() {
+                for &(name, signature) in &patterns {
+                    if sample.get(index..index + signature.len()) == Some(signature) {
+                        expected.push((name, 37 + index as u64));
+                    }
+                }
+            }
+            let mut actual = Vec::new();
+            collect_signature_hits(&mut actual, 37, sample);
+            actual.sort_unstable_by_key(|&(name, offset)| (offset, name));
+            expected.sort_unstable_by_key(|&(name, offset)| (offset, name));
+            assert_eq!(actual, expected);
+        }
     }
 }

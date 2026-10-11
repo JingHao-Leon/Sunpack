@@ -116,7 +116,7 @@ impl<'a> ByteCursor<'a> {
         Ok(value)
     }
 
-    fn read_exact(&mut self, count: usize) -> ValidationResult<Vec<u8>> {
+    fn check_read_len(&self, count: usize) -> ValidationResult<()> {
         let end = self
             .pos
             .checked_add(count as u64)
@@ -124,17 +124,67 @@ impl<'a> ByteCursor<'a> {
         if end > self.limit {
             return invalid("unexpected_end_of_stream");
         }
-        let mut output = Vec::with_capacity(count);
-        while output.len() < count {
-            // Reuse read_byte's refill/EOF handling, then consume the rest of
-            // this window as a slice instead of checking every stored byte.
-            output.push(self.read_byte()?);
-            let start = (self.pos - self.buffer_start) as usize;
-            let available = (count - output.len()).min(self.buffer.len() - start);
-            output.extend_from_slice(&self.buffer[start..start + available]);
-            self.pos += available as u64;
+        Ok(())
+    }
+
+    fn read_chunks(&mut self, count: usize, mut append: impl FnMut(&[u8])) -> ValidationResult<()> {
+        self.check_read_len(count)?;
+        let mut remaining = count;
+        while remaining > 0 {
+            // Keep the existing refill/EOF path and consume each window in
+            // bulk. Both heap-backed payloads and fixed fields use this loop.
+            self.read_byte()?;
+            // Include the byte that triggered refill in the same slice;
+            // successful read_byte guarantees at least one available byte.
+            let start = (self.pos - self.buffer_start - 1) as usize;
+            let available = remaining.min(self.buffer.len() - start);
+            append(&self.buffer[start..start + available]);
+            self.pos += available as u64 - 1;
+            remaining -= available;
         }
+        Ok(())
+    }
+
+    fn read_exact(&mut self, count: usize) -> ValidationResult<Vec<u8>> {
+        // Reject out-of-range lengths before allocating the payload buffer.
+        self.check_read_len(count)?;
+        let mut output = Vec::with_capacity(count);
+        self.read_chunks(count, |chunk| output.extend_from_slice(chunk))?;
         Ok(output)
+    }
+
+    fn read_array<const N: usize>(&mut self) -> ValidationResult<[u8; N]> {
+        let mut output = [0; N];
+        let mut filled = 0;
+        self.read_chunks(N, |chunk| {
+            output[filled..filled + chunk.len()].copy_from_slice(chunk);
+            filled += chunk.len();
+        })?;
+        Ok(output)
+    }
+
+    fn skip_header_string(&mut self, mut crc: Option<&mut Hasher>) -> ValidationResult<()> {
+        loop {
+            let byte = self.read_byte()?;
+            if let Some(hasher) = crc.as_mut() {
+                hasher.update(&[byte]);
+            }
+            if byte == 0 {
+                return Ok(());
+            }
+            let start = (self.pos - self.buffer_start) as usize;
+            let tail = &self.buffer[start..];
+            let terminator = memchr::memchr(0, tail);
+            let consumed = terminator.map_or(tail.len(), |index| index + 1);
+            if let Some(hasher) = crc.as_mut() {
+                // The terminating NUL belongs to the RFC 1952 header CRC.
+                hasher.update(&tail[..consumed]);
+            }
+            self.pos += consumed as u64;
+            if terminator.is_some() {
+                return Ok(());
+            }
+        }
     }
 
     fn skip(&mut self, count: u64) -> ValidationResult<()> {
@@ -780,7 +830,7 @@ fn parse_deflate(
 }
 
 fn gzip_header(cursor: &mut ByteCursor<'_>) -> ValidationResult<()> {
-    let fixed = cursor.read_exact(10)?;
+    let fixed = cursor.read_array::<10>()?;
     if !fixed.starts_with(GZIP_MAGIC) {
         return invalid("gzip_magic_not_found");
     }
@@ -788,28 +838,29 @@ fn gzip_header(cursor: &mut ByteCursor<'_>) -> ValidationResult<()> {
     if flags & 0xe0 != 0 {
         return invalid("gzip_reserved_flags_set");
     }
+    let has_crc = flags & 0x02 != 0;
     let mut hasher = Hasher::new();
-    hasher.update(&fixed);
+    if has_crc {
+        hasher.update(&fixed);
+    }
     if flags & 0x04 != 0 {
-        let length_bytes = cursor.read_exact(2)?;
-        hasher.update(&length_bytes);
+        let length_bytes = cursor.read_array::<2>()?;
+        if has_crc {
+            hasher.update(&length_bytes);
+        }
         let length = u16::from_le_bytes([length_bytes[0], length_bytes[1]]) as usize;
         let extra = cursor.read_exact(length)?;
-        hasher.update(&extra);
+        if has_crc {
+            hasher.update(&extra);
+        }
     }
     for flag in [0x08, 0x10] {
         if flags & flag != 0 {
-            loop {
-                let byte = cursor.read_byte()?;
-                hasher.update(&[byte]);
-                if byte == 0 {
-                    break;
-                }
-            }
+            cursor.skip_header_string(has_crc.then_some(&mut hasher))?;
         }
     }
-    if flags & 0x02 != 0 {
-        let stored = cursor.read_exact(2)?;
+    if has_crc {
+        let stored = cursor.read_array::<2>()?;
         if u16::from_le_bytes([stored[0], stored[1]]) != (hasher.finalize() & 0xffff) as u16 {
             return invalid("gzip_header_crc_bad");
         }
@@ -860,7 +911,7 @@ fn walk_gzip_structure(
         let deflate_end = cursor.position();
         let member_size = output.decoded_size();
         let computed_crc = output.finish_checksum();
-        let trailer = cursor.read_exact(8)?;
+        let trailer = cursor.read_array::<8>()?;
         let stored_crc = u32::from_le_bytes(trailer[0..4].try_into().unwrap());
         let stored_size = u32::from_le_bytes(trailer[4..8].try_into().unwrap());
         if stored_size != member_size as u32 {
@@ -1009,7 +1060,7 @@ pub(crate) fn validate_bzip2_structure_observed(
     let mut total_blocks = 0usize;
     loop {
         visit(cursor.position())?;
-        let header = cursor.read_exact(4)?;
+        let header = cursor.read_array::<4>()?;
         if !header.starts_with(BZIP2_MAGIC) || !(b'1'..=b'9').contains(&header[3]) {
             return invalid("bzip2_magic_not_found");
         }
@@ -1316,7 +1367,7 @@ fn read_xz_index_boundary(
     if index_cursor.position() != index_crc_pos {
         return invalid("xz_index_size_mismatch");
     }
-    let stored_index_crc = index_cursor.read_exact(4)?;
+    let stored_index_crc = index_cursor.read_array::<4>()?;
     if u32::from_le_bytes(stored_index_crc.try_into().unwrap()) != index_hasher.finalize() {
         return invalid("xz_index_crc_bad");
     }
@@ -1578,7 +1629,7 @@ pub(crate) fn validate_zstd_structure_observed(
                 window_size.unwrap()
             };
             loop {
-                let header = bytes.read_exact(3)?;
+                let header = bytes.read_array::<3>()?;
                 let value = u32::from(header[0])
                     | (u32::from(header[1]) << 8)
                     | (u32::from(header[2]) << 16);
@@ -1638,6 +1689,138 @@ mod tests {
 
     fn reader(data: Vec<u8>) -> ManagedReader {
         ManagedReader::from_bytes(data, ReaderConfig::default())
+    }
+
+    // Codec fixtures do not place fixed fields at both cursor refill edges.
+    // Cover byte ownership, short fields and IO errors in one small matrix.
+    #[test]
+    fn fixed_fields_preserve_refill_edges_eof_and_io_errors() {
+        let data = (0..INITIAL_PROBE_BYTES + BUFFER_SIZE + 32)
+            .map(|index| (index * 73 + 19) as u8)
+            .collect::<Vec<_>>();
+        for start in [
+            0,
+            INITIAL_PROBE_BYTES - 2,
+            INITIAL_PROBE_BYTES - 1,
+            INITIAL_PROBE_BYTES,
+            INITIAL_PROBE_BYTES + BUFFER_SIZE - 2,
+            INITIAL_PROBE_BYTES + BUFFER_SIZE - 1,
+        ] {
+            let source = reader(data.clone());
+            let mut cursor = ByteCursor::new(&source, 0, source.len());
+            assert_eq!(cursor.read_exact(start).unwrap(), data[..start]);
+            assert_eq!(cursor.read_array::<3>().unwrap(), data[start..start + 3]);
+            assert_eq!(
+                cursor.read_array::<8>().unwrap(),
+                data[start + 3..start + 11]
+            );
+            assert_eq!(cursor.position(), (start + 11) as u64);
+            assert_eq!(cursor.read_byte().unwrap(), data[start + 11]);
+        }
+        let source = reader(vec![1, 2]);
+        let mut cursor = ByteCursor::new(&source, 0, source.len());
+        assert_eq!(
+            cursor.read_array::<3>().unwrap_err().code(),
+            "unexpected_end_of_stream"
+        );
+        assert_eq!(cursor.position(), 0);
+        assert_eq!(
+            cursor.read_exact(usize::MAX).unwrap_err().code(),
+            "unexpected_end_of_stream"
+        );
+        let source = ManagedReader::from_bytes(
+            vec![0; INITIAL_PROBE_BYTES],
+            ReaderConfig {
+                max_read_bytes: Some(1),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(
+            ByteCursor::new(&source, 0, source.len()).read_array::<3>(),
+            Err(ValidationError::Io(_))
+        ));
+    }
+
+    // Encoders normally omit optional headers. Exercise CRC byte coverage,
+    // NUL ownership and both refill boundaries through the actual stream walk.
+    #[test]
+    fn gzip_optional_headers_keep_crc_terminators_and_concatenated_boundaries() {
+        for flags in [0u8, 0x04, 0x08, 0x10, 0x1c] {
+            for crc in [false, true] {
+                for terminator in [255, 256, 65791, 65792] {
+                    if flags & 0x18 == 0 && terminator != 255 {
+                        continue;
+                    }
+                    let mut header = vec![
+                        0x1f,
+                        0x8b,
+                        8,
+                        flags | if crc { 2 } else { 0 },
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                    ];
+                    if flags & 0x04 != 0 {
+                        header.extend_from_slice(&[3, 0, 1, 0, 255]);
+                    }
+                    let mut string_end = None;
+                    for flag in [0x08, 0x10] {
+                        if flags & flag != 0 {
+                            if string_end.is_none() {
+                                header.resize(terminator, b'n');
+                                string_end = Some(header.len());
+                            } else {
+                                header.extend_from_slice(b"comment");
+                            }
+                            header.push(0);
+                        }
+                    }
+                    if crc {
+                        let checksum = crc32(&header) as u16;
+                        header.extend_from_slice(&checksum.to_le_bytes());
+                    }
+                    let header_len = header.len();
+                    // Empty fixed DEFLATE block followed by CRC32/ISIZE.
+                    let mut member = header;
+                    member.extend_from_slice(&[3, 0]);
+                    member.extend_from_slice(&[0; 8]);
+                    let data = member.repeat(2);
+                    let source = reader(data.clone());
+                    let result = analyze_gzip_structure(&source, 0, source.len(), 1024).unwrap();
+                    assert_eq!(result.structure.end_offset, data.len() as u64);
+                    assert_eq!(result.structure.stream_count, 2);
+                    assert_eq!(result.structure.integrity, IntegrityStatus::Verified);
+                    assert_eq!(result.first_member_end, member.len() as u64);
+                    if crc {
+                        let mut damaged = member.clone();
+                        damaged[header_len - 1] ^= 1;
+                        let source = reader(damaged);
+                        assert_eq!(
+                            validate_gzip_structure(&source, 0, source.len())
+                                .unwrap_err()
+                                .code(),
+                            "gzip_header_crc_bad"
+                        );
+                    }
+                    for end in [
+                        string_end.unwrap_or(header_len),
+                        header_len.saturating_sub(1),
+                        member.len() - 1,
+                    ] {
+                        let source = reader(member[..end].to_vec());
+                        assert_eq!(
+                            validate_gzip_structure(&source, 0, source.len())
+                                .unwrap_err()
+                                .code(),
+                            "unexpected_end_of_stream"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     // Independent of archive codecs: cover every fixed symbol, bit alignment,

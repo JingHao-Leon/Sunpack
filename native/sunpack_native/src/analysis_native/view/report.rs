@@ -874,6 +874,8 @@ impl<'a, 'py> ReportContext<'a, 'py> {
         if !logical.is_empty() {
             return combine_candidates(py, "zip", logical, true);
         }
+        // Resolve only on recovery, once per analysis, including an absent local header.
+        let mut earliest_local = None::<Option<u64>>;
         let mut eocd_hits = Vec::new();
         for hit in &hits {
             if str_of(hit, "name")? == "zip_eocd" {
@@ -889,7 +891,7 @@ impl<'a, 'py> ReportContext<'a, 'py> {
             {
                 continue;
             }
-            evidences.push(match zip_local_header_recovery(&native, &hits)? {
+            evidences.push(match zip_local_header_recovery(&native, &hits, &mut earliest_local)? {
                 Some(recovered) => recovered,
                 None => zip_from_native(native, &hits, self.view.reader.len())?,
             });
@@ -1548,18 +1550,22 @@ fn zip_from_native<'py>(
 fn zip_local_header_recovery<'py>(
     native: &Bound<'py, PyDict>,
     hits: &[Bound<'py, PyDict>],
+    earliest_local: &mut Option<Option<u64>>,
 ) -> PyResult<Option<Evidence<'py>>> {
     if !ZIP_LOCAL_RECOVERY_ERRORS.contains(&str_of(native, "error")?.as_str()) {
         return Ok(None);
     }
-    let mut start = None::<u64>;
-    for hit in hits {
-        if str_of(hit, "name")? == "zip_local" {
-            let offset = u64_of(hit, "offset")?;
-            start = Some(start.map_or(offset, |current| current.min(offset)));
+    if earliest_local.is_none() {
+        let mut start = None::<u64>;
+        for hit in hits {
+            if str_of(hit, "name")? == "zip_local" {
+                let offset = u64_of(hit, "offset")?;
+                start = Some(start.map_or(offset, |current| current.min(offset)));
+            }
         }
+        *earliest_local = Some(start);
     }
-    let Some(start) = start else {
+    let Some(start) = (*earliest_local).flatten() else {
         return Ok(None);
     };
     let details = native.copy()?;

@@ -2,14 +2,15 @@
 use crate::io::iocp;
 use crate::io::reader::{CachedBytes, ManagedReader};
 use crate::scan::compression_stream::{
-    read_xz_footer, resolve_xz_boundary_exact, validate_bzip2_structure, validate_gzip_structure,
-    validate_zstd_structure, ValidationError, XzFooter,
+    resolve_xz_stream_start, validate_bzip2_structure, validate_gzip_structure,
+    validate_zstd_structure, ValidationError,
 };
 use aho_corasick::{packed, AhoCorasick};
 use crc32fast::hash as crc32;
 use memchr::memmem;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
+use std::collections::BTreeMap;
 use std::io;
 use std::sync::OnceLock;
 
@@ -378,7 +379,7 @@ fn validate_raw_hits(
     let mut xz_footers = XzFooterEvidence {
         ends: xz_footer_ends,
         next_unchecked: 0,
-        valid: Vec::new(),
+        valid: BTreeMap::new(),
     };
     let zip_eocd_hits = raw_hits
         .iter()
@@ -1356,13 +1357,13 @@ fn validate_bzip2(
     )))
 }
 
-// One physical-order analysis owns these facts. Invalid footers are discarded
-// by advancing the cursor; only independently valid metadata is retained, and
-// nothing survives this scan. Read lazily to preserve the existing I/O order.
+// One physical-order analysis owns these facts. Invalid footers and indexes
+// are discarded by advancing the cursor; only proven future roots are retained.
+// Nothing survives this scan. Read lazily to preserve the existing I/O order.
 struct XzFooterEvidence<'a> {
     ends: &'a [u64],
     next_unchecked: usize,
-    valid: Vec<XzFooter>,
+    valid: BTreeMap<u64, u64>,
 }
 
 fn validate_xz(
@@ -1389,35 +1390,38 @@ fn validate_xz(
     footers.next_unchecked = footers
         .next_unchecked
         .max(footers.ends.partition_point(|end| *end < offset + 24));
-    let mut next_valid = footers
+    while footers
         .valid
-        .partition_point(|footer| footer.end < offset + 24);
+        .first_key_value()
+        .is_some_and(|(&start, _)| start < offset)
+    {
+        footers.valid.pop_first();
+    }
+    let mut matched_end = footers.valid.remove(&offset);
     loop {
-        while next_valid == footers.valid.len() {
-            let Some(&end) = footers.ends.get(footers.next_unchecked) else {
-                return Ok(None);
-            };
-            footers.next_unchecked += 1;
-            if end > size {
-                return Ok(None);
-            }
-            match read_xz_footer(file, end) {
-                Ok(footer) => footers.valid.push(footer),
-                Err(ValidationError::Invalid(_)) => continue,
-                Err(ValidationError::Io(error)) => return Err(error),
-            }
+        if let Some(end) = matched_end {
+            return Ok(Some(candidate(
+                "xz",
+                offset,
+                Some(end),
+                0.99,
+                "xz_header_index_footer_boundary",
+            )));
         }
-        let end = footers.valid[next_valid].end;
-        next_valid += 1;
-        match resolve_xz_boundary_exact(file, offset, end, &footers.valid) {
-            Ok(structure) => {
-                return Ok(Some(candidate(
-                    "xz",
-                    offset,
-                    Some(structure.end_offset),
-                    0.99,
-                    "xz_header_index_footer_boundary",
-                )));
+        let Some(&end) = footers.ends.get(footers.next_unchecked) else {
+            return Ok(None);
+        };
+        footers.next_unchecked += 1;
+        if end > size {
+            return Ok(None);
+        }
+        // Every YZ marker was collected by the scan. The earliest matching
+        // footer proves the first stream, including in a concatenation; there
+        // is no need to walk preceding streams for each unrelated header.
+        match resolve_xz_stream_start(file, offset, end) {
+            Ok(start) if start == offset => matched_end = Some(end),
+            Ok(start) => {
+                footers.valid.entry(start).or_insert(end);
             }
             Err(ValidationError::Invalid(_)) => {}
             Err(ValidationError::Io(error)) => return Err(error),
@@ -1765,12 +1769,76 @@ mod tests {
         let mut facts = XzFooterEvidence {
             ends: &ends,
             next_unchecked: 0,
-            valid: Vec::new(),
+            valid: BTreeMap::new(),
         };
         let matched = validate_xz(&source, source.len(), 0, &mut facts)
             .unwrap()
             .unwrap();
         assert_eq!(matched.end_offset, Some(stream.len() as u64));
+    }
+
+    // Ordinary peers do not exercise future roots discovered by an earlier
+    // false header, or the finite reader budget consumed by corrupt indexes.
+    #[test]
+    fn xz_index_evidence_keeps_future_roots_under_read_budget_and_propagates_io() {
+        use crate::io::reader::ReaderConfig;
+        let mut encoder = XzEncoder::new(Vec::new(), 1);
+        encoder.write_all(b"future xz root").unwrap();
+        let stream = encoder.finish().unwrap();
+        let mut data = b"carrier-prefix".to_vec();
+        let mut footer = 1u32.to_le_bytes().to_vec();
+        footer.extend_from_slice(&stream[6..8]);
+        for _ in 0..64 {
+            data.extend_from_slice(&stream[..12]);
+            data.extend_from_slice(&[0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]);
+            data.extend_from_slice(&crc32(&footer).to_le_bytes());
+            data.extend_from_slice(&footer);
+            data.extend_from_slice(b"YZ");
+        }
+        let mut expected = Vec::new();
+        for gap in [&[0; 8][..], &b"independent peer"[..], &[][..]] {
+            expected.push((data.len() as u64, (data.len() + stream.len()) as u64));
+            data.extend_from_slice(&stream);
+            data.extend_from_slice(gap);
+        }
+        let mut hits = scan_sample(&data, 0, 0);
+        let mut ends = hits
+            .iter()
+            .filter(|hit| hit.kind == "xz_footer")
+            .map(|hit| hit.offset + 2)
+            .collect::<Vec<_>>();
+        ends.sort_unstable();
+        hits.retain(|hit| hit.kind != "xz_footer");
+        hits.sort_by_key(|hit| hit.offset);
+        let source = ManagedReader::from_bytes(
+            data,
+            ReaderConfig {
+                max_read_bytes: Some(8192),
+                ..ReaderConfig::default()
+            },
+        );
+        let candidates = validate_raw_hits(&source, source.len(), &hits, &ends).unwrap();
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|item| (item.offset, item.end_offset.unwrap()))
+                .collect::<Vec<_>>(),
+            expected
+        );
+
+        let source = ManagedReader::from_bytes(
+            stream.clone(),
+            ReaderConfig {
+                max_read_bytes: Some(12),
+                ..ReaderConfig::default()
+            },
+        );
+        let mut facts = XzFooterEvidence {
+            ends: &[stream.len() as u64],
+            next_unchecked: 0,
+            valid: BTreeMap::new(),
+        };
+        assert!(validate_xz(&source, source.len(), 0, &mut facts).is_err());
     }
 
     // Equal starts, crossing/removed ranges, anchors and zero-width endpoints

@@ -1091,13 +1091,37 @@ impl<'a> BitReader<'a> {
 
 fn marker_positions(data: &[u8], marker: u64) -> Vec<usize> {
     let mut output = Vec::new();
-    let mut window = 0u64;
-    for bit in 0..data.len() * 8 {
-        window = ((window << 1) | ((data[bit / 8] >> (7 - bit % 8)) & 1) as u64) & 0xffff_ffff_ffff;
-        if bit >= 47 && window == marker {
-            output.push(bit + 1 - 48);
+    let aligned = marker.to_be_bytes();
+    let finder = memchr::memmem::Finder::new(&aligned[2..]);
+    let mut start = 0;
+    while let Some(index) = finder.find(&data[start..]) {
+        let index = start + index;
+        output.push(index * 8);
+        start = index + 1;
+    }
+    if data.len() < 7 {
+        return output;
+    }
+    // A non-byte-aligned 48-bit marker spans seven bytes. Search its five
+    // complete middle bytes, then check the two partial bytes. Searching all
+    // eight alignments retains markers crossing block and stream boundaries.
+    for shift in 1usize..8 {
+        let pattern = (marker << (8 - shift)).to_be_bytes();
+        let finder = memchr::memmem::Finder::new(&pattern[2..7]);
+        let mut start = 1;
+        while let Some(index) = finder.find(&data[start..]) {
+            let index = start + index;
+            if index + 5 < data.len()
+                && data[index - 1] & ((1u8 << (8 - shift)) - 1) == pattern[1]
+                && data[index + 5] & (u8::MAX << (8 - shift)) == pattern[7]
+            {
+                output.push((index - 1) * 8 + shift);
+            }
+            // Preserve overlapping matches too; callers receive bit order.
+            start = index + 1;
         }
     }
+    output.sort_unstable();
     output
 }
 
@@ -1324,6 +1348,45 @@ mod xz_bounds_tests {
     use super::*;
     use std::io::Write;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn bzip_markers_preserve_bit_alignments_and_truncated_edges() {
+        let mut data = (0..65544usize).map(|i| (i * 73 + 19) as u8).collect::<Vec<_>>();
+        for (marker, base) in [(0x314159265359u64, 32), (0x177245385090, 1024)] {
+            for shift in 0..8 {
+                let start = base + shift * 128 + shift;
+                for bit in 0..48 {
+                    let mask = 1u8 << (7 - (start + bit) % 8);
+                    let byte = &mut data[(start + bit) / 8];
+                    *byte = (*byte & !mask) | (((marker >> (47 - bit)) as u8 & 1) * mask);
+                }
+            }
+        }
+        // A marker straddling a common read window must keep its physical bit offset.
+        let edge = 65536 * 8 - 3;
+        for bit in 0..48 {
+            let mask = 1u8 << (7 - (edge + bit) % 8);
+            let byte = &mut data[(edge + bit) / 8];
+            *byte = (*byte & !mask) | (((0x314159265359u64 >> (47 - bit)) as u8 & 1) * mask);
+        }
+        for length in (0..=32).chain([edge / 8 + 6, edge / 8 + 7, data.len()]) {
+            for marker in [0x314159265359, 0x177245385090] {
+                let sample = &data[..length];
+                let mut expected = Vec::new();
+                let mut window = 0u64;
+                for bit in 0..sample.len() * 8 {
+                    window = ((window << 1)
+                        | u64::from((sample[bit / 8] >> (7 - bit % 8)) & 1))
+                        & 0xffff_ffff_ffff;
+                    if bit >= 47 && window == marker {
+                        expected.push(bit + 1 - 48);
+                    }
+                }
+                assert_eq!(marker_positions(sample, marker), expected);
+            }
+        }
+        assert!(marker_positions(&data, 0x314159265359).contains(&edge));
+    }
 
     #[test]
     fn index_count_and_records_are_bounded_by_available_bytes() {

@@ -598,6 +598,15 @@ fn derive_seven_zip_aes_key(cycles: u32, salt: &[u8], password: &[u8]) -> [u8; 3
     let mut sha = sha2_11::Sha256::default();
     let record_len = salt.len() + password.len() + 8;
     let mut records = vec![0u8; record_len * KDF_RECORDS_PER_UPDATE];
+    // Salt and password are identical in every round. Keep those bytes in
+    // the existing batch buffer and rewrite only the counter on each update.
+    for record in records
+        .chunks_exact_mut(record_len)
+        .take((cycles as usize).min(KDF_RECORDS_PER_UPDATE))
+    {
+        record[..salt.len()].copy_from_slice(salt);
+        record[salt.len()..salt.len() + password.len()].copy_from_slice(password);
+    }
     let mut counter = 0u64;
     while counter < u64::from(cycles) {
         let remaining = u64::from(cycles) - counter;
@@ -605,8 +614,6 @@ fn derive_seven_zip_aes_key(cycles: u32, salt: &[u8], password: &[u8]) -> [u8; 3
             .expect("7z KDF record count is bounded");
         for record_index in 0..record_count {
             let record = &mut records[record_index * record_len..(record_index + 1) * record_len];
-            record[..salt.len()].copy_from_slice(salt);
-            record[salt.len()..salt.len() + password.len()].copy_from_slice(password);
             record[record_len - 8..]
                 .copy_from_slice(&(counter + record_index as u64).to_le_bytes());
         }
@@ -735,8 +742,12 @@ mod encoded_folder_graph_tests {
         let b1 = properties.get(1).copied().unwrap_or(0);
         let salt_size = usize::from(((b0 >> 7) & 1) + (b1 >> 4));
         let salt = properties.get(2..2 + salt_size).unwrap_or_default();
+        reference_aes_key_bytes(1u64 << (b0 & 63), salt, password)
+    }
+
+    fn reference_aes_key_bytes(cycles: u64, salt: &[u8], password: &[u8]) -> [u8; 32] {
         let mut sha = sha2_11::Sha256::default();
-        for counter in 0..(1u64 << (b0 & 63)) {
+        for counter in 0..cycles {
             sha2_11::Digest::update(&mut sha, salt);
             sha2_11::Digest::update(&mut sha, password);
             sha2_11::Digest::update(&mut sha, counter.to_le_bytes());
@@ -759,6 +770,18 @@ mod encoded_folder_graph_tests {
                 seven_zip_aes_key_iv(&with_salt_and_iv, password).unwrap().0,
                 reference_aes_key(&with_salt_and_iv, password)
             );
+        }
+        // Whole batches do not expose stale counters in a partial last batch,
+        // nor accidental overlap between long passwords and the counter field.
+        for password in [b"p\0a\0s\0s\0".to_vec(), vec![0xa5; 300]] {
+            for salt in [&[][..], &[0x5a; 16][..]] {
+                for cycles in [0, 3, 63, 65, 129] {
+                    assert_eq!(
+                        derive_seven_zip_aes_key(cycles, salt, &password),
+                        reference_aes_key_bytes(u64::from(cycles), salt, &password)
+                    );
+                }
+            }
         }
     }
 

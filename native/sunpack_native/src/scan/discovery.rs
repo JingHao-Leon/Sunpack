@@ -8,7 +8,7 @@ use crate::scan::directory::{
     filesystem_logical_name, filesystem_route_name, DirectorySnapshotTable,
     NativeDirectorySnapshot, FILE_ROUTE_DETECTION, FILE_ROUTE_RELATIONS, FILE_ROUTE_RESIDUAL,
 };
-use crate::scan::embedded::{scan_embedded_path, NativeScanResult};
+use crate::scan::embedded::{scan_detected_path, scan_embedded_path, NativeScanResult};
 use crate::scan::pe_overlay::{inspect_pe_image_native, PeProbe, PeState};
 use pyo3::exceptions::PyIndexError;
 use pyo3::prelude::*;
@@ -33,6 +33,7 @@ pub(crate) struct NativeCandidateTable {
 #[pyclass(module = "sunpack_native")]
 #[derive(Default)]
 pub(crate) struct NativeDiscoveryRoutes {
+    scans: HashMap<usize, Result<Arc<NativeScanResult>, &'static str>>,
     #[pyo3(get)]
     pub(crate) relation_events: Vec<(usize, u8)>,
     #[pyo3(get)]
@@ -53,11 +54,12 @@ pub(crate) struct NativeDiscoveryRoutes {
 
 enum EmbeddedOutcome {
     Residual(&'static str),
-    Scan(NativeScanResult),
+    Scan(Arc<NativeScanResult>),
 }
 
 #[pyclass(module = "sunpack_native")]
 pub(crate) struct NativeEmbeddedBatch {
+    scans: HashMap<usize, Result<Arc<NativeScanResult>, &'static str>>,
     ids: Vec<usize>,
     selected: HashSet<usize>,
     select_all: bool,
@@ -67,12 +69,22 @@ pub(crate) struct NativeEmbeddedBatch {
 }
 
 #[pymethods]
+impl NativeDiscoveryRoutes {
+    fn primary_analysis(&self, py: Python<'_>, index: usize) -> PyResult<Option<Py<PyDict>>> {
+        self.scans
+            .get(&index)
+            .and_then(|scan| scan.as_ref().ok())
+            .map_or(Ok(None), |scan| scan.primary_analysis(py))
+    }
+}
+
+#[pymethods]
 impl NativeEmbeddedBatch {
     fn __len__(&self) -> usize {
         self.ids.len()
     }
 
-    /// Scan this page against the current files. Repeating a page repeats I/O.
+    /// Reuse detection facts; unresolved files are scanned on demand per page.
     #[pyo3(signature = (table, offset=0, limit=256))]
     fn scan_page(
         &self,
@@ -83,35 +95,65 @@ impl NativeEmbeddedBatch {
     ) -> PyResult<Vec<(usize, u8, &'static str, Option<Py<PyDict>>)>> {
         let rows = &table.rows;
         let outcomes = py.detach(|| {
-            self.ids
-                .iter()
-                .skip(offset)
-                .take(limit)
-                .filter_map(|&index| {
-                    if !self.select_all && !self.selected.contains(&index) {
-                        return self
-                            .include_residual_details
-                            .then_some((index, EmbeddedOutcome::Residual(self.skipped_reason)));
-                    }
-                    let (path, pe_state) = match &rows[index] {
-                        Candidate::File(table, row) => (
-                            table.paths[*row].as_str(),
-                            table.relation_anchors[*row].as_ref().map(|a| a.pe_state),
-                        ),
-                        Candidate::Relation(group) => {
-                            let data = group.candidate_data();
-                            let pe_state = group.entry_anchor().map(|a| a.pe_state);
-                            let outcome =
-                                scan_embedded_candidate(data.entry_path, self.force_scan, pe_state);
-                            return (self.include_residual_details
+            let end = offset.saturating_add(limit).min(self.ids.len());
+            let ids = &self.ids[offset.min(end)..end];
+            let parallel_files = ids.len().min(rayon::current_num_threads()).clamp(1, 8);
+            // Split into at most eight file jobs. Per-file IOCP buffers and
+            // native metadata stay bounded, independently of machine core count.
+            ids.par_chunks(ids.len().div_ceil(parallel_files).max(1))
+                .map(|chunk| {
+                    chunk
+                        .iter()
+                        .filter_map(|&index| {
+                            if !self.select_all && !self.selected.contains(&index) {
+                                return self.include_residual_details.then_some((
+                                    index,
+                                    EmbeddedOutcome::Residual(self.skipped_reason),
+                                ));
+                            }
+                            if let Some(scan) = self.scans.get(&index) {
+                                let outcome = match scan {
+                                    Ok(scan) => EmbeddedOutcome::Scan(Arc::clone(scan)),
+                                    Err(reason) => EmbeddedOutcome::Residual(reason),
+                                };
+                                return (self.include_residual_details
+                                    || matches!(outcome, EmbeddedOutcome::Scan(_)))
+                                .then_some((index, outcome));
+                            }
+                            let (path, pe_state) = match &rows[index] {
+                                Candidate::File(table, row) => (
+                                    table.paths[*row].as_str(),
+                                    table.relation_anchors[*row].as_ref().map(|a| a.pe_state),
+                                ),
+                                Candidate::Relation(group) => {
+                                    let data = group.candidate_data();
+                                    let pe_state = group.entry_anchor().map(|a| a.pe_state);
+                                    let outcome = scan_embedded_candidate(
+                                        data.entry_path,
+                                        self.force_scan,
+                                        pe_state,
+                                        parallel_files,
+                                    );
+                                    return (self.include_residual_details
+                                        || matches!(outcome, EmbeddedOutcome::Scan(_)))
+                                    .then_some((index, outcome));
+                                }
+                            };
+                            let outcome = scan_embedded_candidate(
+                                path,
+                                self.force_scan,
+                                pe_state,
+                                parallel_files,
+                            );
+                            (self.include_residual_details
                                 || matches!(outcome, EmbeddedOutcome::Scan(_)))
-                            .then_some((index, outcome));
-                        }
-                    };
-                    let outcome = scan_embedded_candidate(path, self.force_scan, pe_state);
-                    (self.include_residual_details || matches!(outcome, EmbeddedOutcome::Scan(_)))
-                        .then_some((index, outcome))
+                            .then_some((index, outcome))
+                        })
+                        .collect::<Vec<_>>()
                 })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .flatten()
                 .collect::<Vec<_>>()
         });
         outcomes
@@ -482,8 +524,10 @@ impl NativeCandidateTable {
             .collect::<Vec<_>>();
         py.detach(|| {
             for batch in detection_indices.chunks(1024) {
+                let parallel_files = batch.len().min(rayon::current_num_threads()).clamp(1, 8);
                 let decisions = batch
                     .par_iter()
+                    .with_min_len(batch.len().div_ceil(parallel_files))
                     .map(|&index| {
                         let Candidate::File(table, file_index) = &self.rows[index] else {
                             return None;
@@ -503,12 +547,35 @@ impl NativeCandidateTable {
                                 "tar" | "gzip" | "bzip2" | "xz" | "zstd" | "lz4" | "enc"
                             )
                             && confirm_format_identity_native(path, format);
-                        Some((index, key, accepted))
+                        let scan = if accepted && format != "enc" {
+                            Some(
+                                scan_detected_path(path, format, parallel_files)
+                                    .map(Arc::new)
+                                    .map_err(|_| "embedded_scan_io_error"),
+                            )
+                        } else {
+                            None
+                        };
+                        let accepted = accepted
+                            && (format == "enc"
+                                || scan
+                                    .as_ref()
+                                    .and_then(|scan| scan.as_ref().ok())
+                                    .is_some_and(|scan| scan.is_primary(format)));
+                        Some((
+                            index,
+                            key,
+                            accepted,
+                            scan.filter(|_| !accepted || format == "lz4"),
+                        ))
                     })
                     .collect::<Vec<_>>();
-                for (index, key, accepted) in decisions.into_iter().flatten() {
+                for (index, key, accepted, scan) in decisions.into_iter().flatten() {
                     if claimed.contains(&key) {
                         continue;
+                    }
+                    if let Some(scan) = scan {
+                        routes.scans.insert(index, scan);
                     }
                     if accepted {
                         claimed.insert(key);
@@ -620,6 +687,10 @@ impl NativeCandidateTable {
             "recursive_candidate_ratio"
         };
         NativeEmbeddedBatch {
+            scans: ids
+                .iter()
+                .filter_map(|index| routes.scans.get(index).map(|scan| (*index, scan.clone())))
+                .collect(),
             ids,
             selected,
             select_all,
@@ -634,6 +705,7 @@ fn scan_embedded_candidate(
     path: &str,
     force_scan: bool,
     pe_state: Option<PeState>,
+    parallel_files: usize,
 ) -> EmbeddedOutcome {
     if path.is_empty() {
         return EmbeddedOutcome::Residual("missing_or_empty_file");
@@ -660,8 +732,8 @@ fn scan_embedded_candidate(
     if !metadata.is_file() || metadata.len() == 0 {
         return EmbeddedOutcome::Residual("missing_or_empty_file");
     }
-    match scan_embedded_path(path) {
-        Ok(scan) if scan.has_candidates() => EmbeddedOutcome::Scan(scan),
+    match scan_embedded_path(path, parallel_files) {
+        Ok(scan) if scan.has_candidates() => EmbeddedOutcome::Scan(Arc::new(scan)),
         Ok(_) => EmbeddedOutcome::Residual("no_complete_embedded_archive"),
         Err(_) => EmbeddedOutcome::Residual("embedded_scan_io_error"),
     }

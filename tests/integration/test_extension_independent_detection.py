@@ -69,6 +69,18 @@ def test_header_encrypted_rar4_primary_uses_relations_identity(tmp_path):
     assert resolved.knowledge().get("discovery.evidence.needs_password") is True
     assert resolved.knowledge().get("discovery.evidence.relation_confirmed") is True
 
+    # Identity-only gzip dispatch must not hide a password-blocked RAR peer.
+    # This reuses the CRC-valid header fixture; ordinary encrypted archive
+    # tests have no false primary stream, and a second fixture adds no coverage.
+    carrier = tmp_path / "gzip_decoy_with_encrypted_rar.bin"
+    carrier.write_bytes(
+        b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\x03"
+        + b"\xff" * 16 + path.read_bytes()
+    )
+    blocked = ArchiveTaskProvider(detection_pipeline_config()).discover_targets([str(carrier)])
+    assert not blocked.resolved_tasks
+    assert any(finding.format == "rar" for finding in blocked.findings)
+
 
 def test_signature_bytes_without_valid_structure_are_not_accepted(tmp_path):
     fake = tmp_path / "random.payload"

@@ -8,3 +8,17 @@ pub(crate) mod reader;
 pub(crate) mod resource_lifecycle;
 pub(crate) mod runtime_binary;
 pub(crate) mod util;
+
+pub(crate) struct ScanBatch<T> {
+    pub(crate) results: Vec<T>,
+    pub(crate) discarded_results: usize,
+}
+
+impl<T> Default for ScanBatch<T> {
+    fn default() -> Self {
+        Self {
+            results: Vec::new(),
+            discarded_results: 0,
+        }
+    }
+}

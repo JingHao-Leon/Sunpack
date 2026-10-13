@@ -6,13 +6,14 @@
 //! to scoped scan workers, and immediately reissues the next sequential read with a
 //! separate pooled buffer.
 
+use super::ScanBatch;
 use std::collections::{HashMap, VecDeque};
 use std::ffi::c_void;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr::null_mut;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, OnceLock};
 
 type Handle = *mut c_void;
 
@@ -102,8 +103,20 @@ unsafe impl Send for IocpSlot {}
 
 pub(crate) struct IocpScanOutput<T> {
     pub(crate) results: Vec<T>,
+    pub(crate) discarded_results: usize,
     pub(crate) read_bytes: u64,
     pub(crate) read_operations: u64,
+}
+
+fn scan_pool() -> &'static rayon::ThreadPool {
+    static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+    POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(rayon::current_num_threads().clamp(1, 8))
+            .thread_name(|index| format!("sunpack-embedded-scan-{index}"))
+            .build()
+            .expect("embedded scan thread pool can start")
+    })
 }
 
 impl IocpSlot {
@@ -332,11 +345,12 @@ pub(crate) fn scan_file<T, F>(
 ) -> io::Result<IocpScanOutput<T>>
 where
     T: Send,
-    F: Fn(&[u8], usize, u64) -> Vec<T> + Send + Sync,
+    F: Fn(&[u8], usize, u64) -> ScanBatch<T> + Send + Sync,
 {
     if file_size == 0 {
         return Ok(IocpScanOutput {
             results: Vec::new(),
+            discarded_results: 0,
             read_bytes: 0,
             read_operations: 0,
         });
@@ -362,53 +376,15 @@ where
     let handles = Arc::new(open_handles(path)?);
     let scan = &scan;
 
-    // These workers block on native queues. Keeping them outside Rayon also
-    // keeps the IOCP producer runnable when its caller occupies a Rayon worker.
-    let result = std::thread::scope(|scope| -> io::Result<IocpScanOutput<T>> {
+    // Producers stay on their calling threads. A separate shared pool runs
+    // finite matching jobs, so concurrent Rayon producers cannot starve them.
+    let result = scan_pool().in_place_scope(|scope| -> io::Result<IocpScanOutput<T>> {
         // Read slots stay owned by the IOCP producer. Completed bytes move to
         // independent scan jobs, so the slot can issue its next predicted
         // sequential read without waiting for matching to finish.
         let job_capacity = buffer_count;
-        let slot_capacity = chunk_bytes.saturating_add(overlap);
-        let (job_tx, job_rx) = mpsc::sync_channel::<ScanJob>(job_capacity);
-        let job_rx = Arc::new(Mutex::new(job_rx));
-        let (done_tx, done_rx) = mpsc::channel::<(Vec<u8>, Vec<T>)>();
-
-        for _ in 0..worker_count {
-            let job_rx = Arc::clone(&job_rx);
-            let done_tx = done_tx.clone();
-            let worker_handles = Arc::clone(&handles);
-            std::thread::Builder::new()
-                .name("sunpack-embedded-scan".into())
-                .spawn_scoped(scope, move || loop {
-                    let job = {
-                        let receiver = job_rx
-                            .lock()
-                            .expect("IOCP scan job receiver lock is not poisoned");
-                        receiver.recv()
-                    };
-                    let Ok(job) = job else {
-                        break;
-                    };
-                    let hits = scan(
-                        &job.buffer[..job.bytes_read],
-                        job.leading_overlap,
-                        job.read_start,
-                    );
-                    if done_tx.send((job.buffer, hits)).is_err() {
-                        break;
-                    }
-                    unsafe {
-                        let _ = PostQueuedCompletionStatus(
-                            worker_handles.port,
-                            0,
-                            WORKER_COMPLETION_KEY,
-                            null_mut(),
-                        );
-                    }
-                })?;
-        }
-        drop(done_tx);
+        let slot_capacity = chunk_bytes.saturating_add(overlap).min(file_size as usize);
+        let (done_tx, done_rx) = mpsc::channel::<(Vec<u8>, ScanBatch<T>)>();
 
         let mut pending = HashMap::<usize, Box<IocpSlot>>::new();
         let mut completed_slots = VecDeque::<Box<IocpSlot>>::new();
@@ -419,6 +395,7 @@ where
         let mut next_base = 0u64;
         let mut scan_jobs = 0usize;
         let mut all_results = Vec::new();
+        let mut discarded_results = 0;
         let mut initial_error = None;
         for _ in 0..buffer_count {
             match submit_next_slot(
@@ -440,7 +417,6 @@ where
         }
         if let Some(error) = initial_error {
             cancel_pending(&handles, &mut pending);
-            drop(job_tx);
             return Err(error);
         }
 
@@ -454,7 +430,8 @@ where
                 match done_rx.try_recv() {
                     Ok((buffer, hits)) => {
                         scan_jobs = scan_jobs.saturating_sub(1);
-                        all_results.extend(hits);
+                        discarded_results += hits.discarded_results;
+                        all_results.extend(hits.results);
                         available_buffers.push(buffer);
                     }
                     Err(mpsc::TryRecvError::Empty) => break,
@@ -512,17 +489,38 @@ where
             }
 
             while let Some(job) = ready_jobs.pop_front() {
-                match job_tx.try_send(job) {
-                    Ok(()) => scan_jobs += 1,
-                    Err(mpsc::TrySendError::Full(job)) => {
-                        ready_jobs.push_front(job);
-                        break;
-                    }
-                    Err(mpsc::TrySendError::Disconnected(_)) => {
-                        fatal_error = Some(io::Error::other("IOCP scanner workers stopped"));
-                        break;
-                    }
+                // One-chunk files already run on the batch's Rayon workers;
+                // matching inline avoids a second scheduling round entirely.
+                if expected_read_operations == 1 {
+                    let hits = scan(
+                        &job.buffer[..job.bytes_read],
+                        job.leading_overlap,
+                        job.read_start,
+                    );
+                    discarded_results += hits.discarded_results;
+                    all_results.extend(hits.results);
+                    available_buffers.push(job.buffer);
+                    continue;
                 }
+                let done_tx = done_tx.clone();
+                let worker_handles = Arc::clone(&handles);
+                scan_jobs += 1;
+                scope.spawn(move |_| {
+                    let hits = scan(
+                        &job.buffer[..job.bytes_read],
+                        job.leading_overlap,
+                        job.read_start,
+                    );
+                    let _ = done_tx.send((job.buffer, hits));
+                    unsafe {
+                        let _ = PostQueuedCompletionStatus(
+                            worker_handles.port,
+                            0,
+                            WORKER_COMPLETION_KEY,
+                            null_mut(),
+                        );
+                    }
+                });
             }
             if fatal_error.is_some() {
                 break;
@@ -573,13 +571,12 @@ where
 
         if fatal_error.is_some() {
             cancel_pending(&handles, &mut pending);
-            drop(job_tx);
             return Err(fatal_error.expect("IOCP fatal error should be present"));
         }
 
-        drop(job_tx);
         Ok(IocpScanOutput {
             results: all_results,
+            discarded_results,
             read_bytes: expected_read_bytes,
             read_operations: expected_read_operations,
         })
@@ -630,7 +627,10 @@ mod tests {
                     0,
                     |_, _, base_offset| {
                         std::thread::sleep(std::time::Duration::from_millis(1));
-                        vec![base_offset]
+                        ScanBatch {
+                            results: vec![base_offset],
+                            discarded_results: 0,
+                        }
                     },
                 )
             })

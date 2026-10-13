@@ -57,6 +57,7 @@ class ArchiveDiscoveryPipeline:
         for index, status in routes.detection_events:
             if status == 1:
                 candidate = session.project_native_candidate(table, index)
+                candidate.archive_input.analysis.update(routes.primary_analysis(index) or {})
                 result.add_resolved(
                     ArchiveTask.from_archive_input(
                         candidate.archive_input,

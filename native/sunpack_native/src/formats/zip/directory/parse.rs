@@ -118,6 +118,17 @@ struct CentralDirectoryRecord<'a> {
     local_header_offset: u32,
 }
 
+pub(crate) fn central_directory_record_len(header: &[u8]) -> Option<usize> {
+    if header.len() < 46 || !header.starts_with(CD_SIG) {
+        return None;
+    }
+    Some(
+        46 + u16_le(header, 28) as usize
+            + u16_le(header, 30) as usize
+            + u16_le(header, 32) as usize,
+    )
+}
+
 fn parse_central_directory_record(
     data: &[u8],
     offset: usize,
@@ -131,11 +142,10 @@ fn parse_central_directory_record(
     }
     let name_len = u16_le(data, offset + 28);
     let extra_len = u16_le(data, offset + 30);
-    let comment_len = u16_le(data, offset + 32) as usize;
     let name_start = offset.checked_add(46)?;
     let extra_start = name_start.checked_add(name_len as usize)?;
     let comment_start = extra_start.checked_add(extra_len as usize)?;
-    let record_end = comment_start.checked_add(comment_len)?;
+    let record_end = offset.checked_add(central_directory_record_len(&data[offset..])?)?;
     if record_end > data.len() || record_end > expected_end {
         return None;
     }

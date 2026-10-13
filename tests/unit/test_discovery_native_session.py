@@ -2,6 +2,7 @@ import tarfile
 import lzma
 import os
 import subprocess
+import struct
 import sys
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -17,9 +18,10 @@ from tests.helpers.config_factory import make_config
 def test_static_noisy_carrier_extracts_nested_and_cross_chunk_xz_with_one_rayon_worker(tmp_path):
     """Catch lost outputs across scanner/discovery/extraction boundaries.
 
-    Existing pipeline fixtures do not combine the former hit limit, one Rayon
-    worker and a split XZ footer. Native matcher tests cannot catch projection
-    or routing losses. One small carrier/child process covers both origins.
+    Existing fixtures do not combine noisy hits, a false primary stream, forged
+    ZIP ownership, extended ZIP64 and a split XZ footer with one Rayon worker.
+    Removing this case leaves no end-to-end check for those routing losses;
+    one small carrier/child process covers both origins without extra processes.
     """
     nested = BytesIO()
     with zipfile.ZipFile(nested, "w") as writer:
@@ -27,13 +29,38 @@ def test_static_noisy_carrier_extracts_nested_and_cross_chunk_xz_with_one_rayon_
     outer = BytesIO()
     with zipfile.ZipFile(outer, "w") as writer:
         writer.writestr("inner.opaque", nested.getvalue())
-    data = b"PK\x03\x04" * 1_000_001 + outer.getvalue()
+        writer.writestr("keep.txt", b"ordinary output")
+    outer_bytes = outer.getvalue()
+    data = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\x03" + b"\xff" * 16
+    data += b"PK\x03\x04" * 1_000_001
+    outer_start = len(data)
+    data += outer_bytes
     xz = lzma.compress(b"xz payload", format=lzma.FORMAT_XZ)
     chunk = 2 * 1024 * 1024
     # Place Y before the IOCP boundary and Z after it; its CRC/flags are in carry.
     end = ((len(data) + len(xz)) // chunk + 1) * chunk + 1
     carrier = tmp_path / "carrier.opaque"
-    carrier.write_bytes(data + b"x" * (end - len(data) - len(xz)) + xz + b"trailer")
+    data += b"x" * (end - len(data) - len(xz)) + xz + b"trailer"
+    # This plausible EOCD reuses the real directory, but falsely extends it
+    # across the XZ peer. It must never acquire ownership of that peer.
+    eocd = outer_bytes.rfind(b"PK\x05\x06")
+    fields = list(struct.unpack("<4s4H2IH", outer_bytes[eocd:eocd + 22]))
+    fields[5] = len(data) - outer_start - fields[6]
+    data += struct.pack("<4s4H2IH", *fields)
+    extended = BytesIO()
+    with zipfile.ZipFile(extended, "w") as writer:
+        writer.writestr("zip64.txt", b"ZIP64 payload")
+    archive = extended.getvalue()
+    eocd = archive.rfind(b"PK\x05\x06")
+    fields = list(struct.unpack("<4s4H2IH", archive[eocd:eocd + 22]))
+    extension = b"\0" * 70000 + b"PK\x06\x06" + b"\0" * 64
+    record = struct.pack("<4sQ2H2I4Q", b"PK\x06\x06", 44 + len(extension),
+                         45, 45, 0, 0, fields[4], fields[4], fields[5], fields[6])
+    locator = struct.pack("<4sIQI", b"PK\x06\x07", 0, eocd, 1)
+    fields[3] = fields[4] = 65535
+    fields[5] = fields[6] = 4294967295
+    data += archive[:eocd] + record + extension + locator + struct.pack("<4s4H2IH", *fields)
+    carrier.write_bytes(data + b"trailer")
     completed = subprocess.run(
         [sys.executable, "-c", """
 import asyncio, sys
@@ -53,7 +80,7 @@ async def run():
         assert not response.summary.failed_tasks, response.summary.failed_tasks
         assert response.summary.success_count == 2, response.summary
         payloads = [p.read_bytes() for p in root.rglob('*') if p.is_file()]
-        assert b'nested payload' in payloads and b'xz payload' in payloads
+        assert b'nested payload' in payloads and b'xz payload' in payloads and b'ZIP64 payload' in payloads
 asyncio.run(run())
 """, str(carrier), str(tmp_path / "output")],
         env={**os.environ, "RAYON_NUM_THREADS": "1"},

@@ -16,8 +16,6 @@ class PasswordJob:
     fingerprint: ArchiveFingerprint | None = None
     candidates: Iterable[PasswordCandidate | str] | None = None
     batch_size: int | None = None
-    max_attempts: int | None = None
-    timeout_seconds: float | None = None
     progress_callback: Callable[[object], None] | None = None
     metadata: dict[str, object] = field(default_factory=dict)
 

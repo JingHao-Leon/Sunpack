@@ -153,41 +153,6 @@ def test_password_attempt_cache_bounds_successes_and_negative_attempts():
     assert cache.has_negative("fingerprint", f"password-{MAX_CACHED_NEGATIVE_ATTEMPTS}") is True
 
 
-def test_password_scheduler_caps_batch_to_max_attempts(tmp_path):
-    archive = tmp_path / "sample.7z"
-    archive.write_bytes(b"archive")
-    verifier = FakeVerifier("secret")
-    scheduler = PasswordScheduler(verifier, default_batch_size=10)
-
-    result = scheduler.run(PasswordJob(
-        archive_path=str(archive),
-        candidates=PasswordCandidatePipeline.from_values(["bad1", "bad2", "secret"]),
-        max_attempts=2,
-    ))
-
-    assert result.password is None
-    assert result.attempts == 2
-    assert result.stopped_reason == "max_attempts"
-    assert verifier.batches == [["bad1", "bad2"]]
-
-
-def test_password_scheduler_honors_timeout_before_verifying_more_candidates(tmp_path):
-    archive = tmp_path / "sample.7z"
-    archive.write_bytes(b"archive")
-    verifier = FakeVerifier("secret")
-    scheduler = PasswordScheduler(verifier, default_batch_size=1)
-
-    result = scheduler.run(PasswordJob(
-        archive_path=str(archive),
-        candidates=PasswordCandidatePipeline.from_values(["bad", "secret"]),
-        timeout_seconds=0,
-    ))
-
-    assert result.password is None
-    assert result.stopped_reason == "timeout"
-    assert verifier.batches == []
-
-
 def test_password_scheduler_does_not_cache_weak_fast_match_as_success(tmp_path):
     archive = tmp_path / "encrypted.zip"
     archive.write_bytes(b"archive")

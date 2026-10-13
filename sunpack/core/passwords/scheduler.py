@@ -25,7 +25,6 @@ class PasswordSearchStatus(str, Enum):
     UNSUPPORTED = "unsupported"
     BACKEND_UNAVAILABLE = "backend_unavailable"
     NEEDS_VOLUME_OR_TAIL_DAMAGED = "needs_volume_or_tail_damaged"
-    STOPPED = "stopped"
 
 
 # Verdicts about the archive/backend rather than the tried passwords. Trying
@@ -115,18 +114,6 @@ class PasswordScheduler:
         batch: list[str] = []
 
         for candidate in job.candidate_pipeline():
-            stop_reason = self._stop_reason(job, attempts, started_at)
-            if stop_reason:
-                result = PasswordSearchResult(
-                    password=None,
-                    status=PasswordSearchStatus.STOPPED,
-                    test_result=last_result,
-                    error_text=last_error or "password search stopped",
-                    attempts=attempts,
-                    stopped_reason=stop_reason,
-                )
-                self._emit_finished(job, result, started_at, candidates_seen, skipped)
-                return result
             password = _candidate_value(candidate)
             candidates_seen += 1
             if self.cache.has_negative(fingerprint.key, password):
@@ -140,7 +127,7 @@ class PasswordScheduler:
                 ))
                 continue
             batch.append(password)
-            if len(batch) >= self._allowed_batch_size(job, attempts, batch_size):
+            if len(batch) >= batch_size:
                 outcome = self._verify_batch(job, fingerprint.key, batch, attempts, started_at, candidates_seen, skipped)
                 attempts = outcome.attempts
                 last_result = outcome.test_result
@@ -379,15 +366,6 @@ class PasswordScheduler:
         candidates_seen: int,
         skipped: int,
     ) -> PasswordSearchResult:
-        batch = batch[: self._allowed_batch_size(job, previous_attempts, len(batch))]
-        if not batch:
-            return PasswordSearchResult(
-                password=None,
-                status=PasswordSearchStatus.STOPPED,
-                attempts=previous_attempts,
-                error_text="password attempt limit reached",
-                stopped_reason="max_attempts",
-            )
         self._emit_progress(job, PasswordProgressEvent(
             stage="batch_started",
             attempts=previous_attempts,
@@ -470,21 +448,6 @@ class PasswordScheduler:
             attempts=total_attempts,
             stopped_reason="terminal" if verification.terminal else "",
         )
-
-    @staticmethod
-    def _stop_reason(job: PasswordJob, attempts: int, started_at: float) -> str:
-        if job.max_attempts is not None and attempts >= job.max_attempts:
-            return "max_attempts"
-        if job.timeout_seconds is not None and time.monotonic() - started_at >= job.timeout_seconds:
-            return "timeout"
-        return ""
-
-    @staticmethod
-    def _allowed_batch_size(job: PasswordJob, attempts: int, requested_batch_size: int) -> int:
-        requested_batch_size = max(1, int(requested_batch_size))
-        if job.max_attempts is None:
-            return requested_batch_size
-        return max(0, min(requested_batch_size, job.max_attempts - attempts))
 
     @staticmethod
     def _emit_progress(job: PasswordJob, event: PasswordProgressEvent) -> None:

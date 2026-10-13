@@ -409,7 +409,6 @@ class PasswordResolver:
             PasswordSearchStatus.BACKEND_UNAVAILABLE: PasswordResolutionStatus.BACKEND_ERROR,
             PasswordSearchStatus.NEEDS_VOLUME_OR_TAIL_DAMAGED: PasswordResolutionStatus.NEEDS_VOLUME_OR_TAIL_DAMAGED,
             PasswordSearchStatus.INCONCLUSIVE: PasswordResolutionStatus.INCONCLUSIVE,
-            PasswordSearchStatus.STOPPED: PasswordResolutionStatus.INCONCLUSIVE,
         }[search.status]
         return self._remember(
             archive_key,

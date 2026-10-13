@@ -21,9 +21,7 @@ from tests.helpers.archive_tasks import make_archive_task
 @pytest.mark.parametrize("with_zero_file", [False, True])
 def test_cleanup_removes_failed_output_with_no_payload_bytes(tmp_path, with_zero_file):
     output = tmp_path / "output"
-    metadata = output / ".sunpack"
-    metadata.mkdir(parents=True)
-    (metadata / "diagnostic.json").write_text('{"error": true}', encoding="utf-8")
+    output.mkdir()
     if with_zero_file:
         (output / "empty.txt").write_bytes(b"")
 
@@ -66,7 +64,8 @@ def test_cleanup_preserves_output_when_gate_is_not_satisfied(
 def test_cleanup_preserves_failed_output_with_nonzero_payload(tmp_path):
     output = tmp_path / "output"
     output.mkdir()
-    (output / "payload.bin").write_bytes(b"x")
+    (output / ".sunpack").mkdir()
+    (output / ".sunpack" / "payload.bin").write_bytes(b"x")
 
     result = cleanup_failed_output_if_eligible(
         str(output),

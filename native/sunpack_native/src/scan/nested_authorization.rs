@@ -115,7 +115,7 @@ pub(crate) fn authorize_nested_candidates(
         let Some(relative) = relative_key(&key, &root_key) else {
             continue;
         };
-        if relative.is_empty() || relative_contains_internal_metadata(relative) {
+        if relative.is_empty() {
             continue;
         }
         let (scope_key, root_branch_key, local_branch_key) =
@@ -446,12 +446,6 @@ fn relative_key<'a>(path: &'a str, root: &str) -> Option<&'a str> {
     path.strip_prefix(root)?.strip_prefix('\\')
 }
 
-fn relative_contains_internal_metadata(relative: &str) -> bool {
-    relative
-        .split('\\')
-        .any(|component| component.eq_ignore_ascii_case(".sunpack"))
-}
-
 fn ratio(value: u64, total: u64) -> f64 {
     if total == 0 {
         0.0
@@ -509,13 +503,5 @@ mod tests {
             immediate_branch(Path::new("C:\\out\\wrapper\\a.zip"), root, false),
             Some(PathBuf::from("C:\\out\\wrapper"))
         );
-    }
-
-    #[test]
-    fn internal_sunpack_metadata_is_not_user_context() {
-        assert!(relative_contains_internal_metadata(
-            ".sunpack\\metadata.json"
-        ));
-        assert!(!relative_contains_internal_metadata("game\\readme.txt"));
     }
 }

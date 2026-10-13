@@ -66,7 +66,6 @@ class ExtractionExitSignalMethod:
                             path=evidence.archive_path,
                             actual={
                                 "partial_outputs": True,
-                                "progress_manifest": result.progress_manifest,
                             },
                         )
                     ],

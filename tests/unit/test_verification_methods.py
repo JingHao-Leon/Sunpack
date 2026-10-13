@@ -12,7 +12,7 @@ from tests.helpers.archive_tasks import make_archive_task
 from tests.helpers.config_factory import make_config
 from tests.helpers.worker_events import worker_trace_item
 from sunpack.pipeline.extraction.internal.sevenzip.worker_diagnostics import parse_worker_json_line
-from sunpack.pipeline.extraction.progress import write_extraction_progress_manifest_payload
+from sunpack.pipeline.extraction.progress import build_extraction_progress_manifest
 
 
 @pytest.mark.parametrize(
@@ -64,6 +64,32 @@ def test_output_presence_reports_missing_or_empty_output_as_unusable(tmp_path):
 
     assert empty.decision_hint == "fail"
     assert empty.issues[0].code == "fail.output_empty"
+
+
+def test_manifest_named_payload_is_not_loaded_as_verification_state(tmp_path):
+    # Cached-manifest tests cannot detect disk fallback: ordinary archive content
+    # must not supply completeness when this extraction has no native manifest.
+    from sunpack.pipeline.verification.evidence import build_verification_evidence
+
+    task = _task(tmp_path)
+    out_dir = tmp_path / "out"
+    payload = out_dir / ".sunpack" / "extraction_manifest.json"
+    payload.parent.mkdir(parents=True)
+    payload.write_text(json.dumps({
+        "archive": str(task.main_path), "out_dir": str(out_dir),
+        "partial_outputs": False, "failure_stage": "", "failure_kind": "",
+        "worker_status": "ok", "native_status": "", "files_written": 1,
+        "bytes_written": 1,
+        "summary": {"complete": 1, "partial": 0, "failed": 0,
+                    "skipped": 0, "unverified": 0, "total": 1},
+        "files": [],
+    }), encoding="utf-8")
+    result = ExtractionResult(success=True, out_dir=str(out_dir))
+
+    assert build_verification_evidence(task, result).progress_manifest is None
+    verification = _scheduler([{"name": "output_presence"}]).verify(task, result)
+    assert verification.output_file_count == 1
+    assert verification.output_total_bytes == payload.stat().st_size
 
 
 def test_manifest_size_match_reports_complete_when_expected_size_matches(tmp_path):
@@ -218,10 +244,9 @@ def test_output_presence_uses_worker_manifest_progress_as_completeness(tmp_path)
     partial = out_dir / "partial.bin"
     complete.write_text("ok", encoding="utf-8")
     partial.write_bytes(b"12345")
-    manifest, _ = write_extraction_progress_manifest_payload(
+    manifest = build_extraction_progress_manifest(
         archive=str(archive),
         out_dir=str(out_dir),
-        write_file=True,
         diagnostics={
             "result": parse_worker_json_line(json.dumps({
                 "status": "failed",
@@ -262,7 +287,7 @@ def test_output_presence_uses_worker_manifest_progress_as_completeness(tmp_path)
 
         out_dir=str(out_dir),
 
-        progress_manifest=str(manifest),
+        progress_manifest_payload=manifest,
     )
 
     verification = _scheduler([{"name": "output_presence"}]).verify(task, result)

@@ -1,5 +1,6 @@
 from pathlib import Path
 import asyncio
+import io
 
 import sunpack.pipeline.coordinator.engine as engine_module
 from sunpack.pipeline.coordinator.engine import PipelineEngine
@@ -7,6 +8,48 @@ from sunpack.core.config.schema import normalize_config
 from sunpack.core.contracts.extraction import ExtractionResult
 from tests.helpers.detection_config import with_detection_pipeline
 from tests.helpers.fs_builder import make_zip
+
+
+def test_sunpack_payload_recurses_across_concurrent_origins(tmp_path):
+    # One real pipeline case covers scan, matching, nested authorization and
+    # generated-output ownership together; individual inventory tests cannot.
+    payload = b"nested payload" * 1024
+    inner = make_zip({"payload.bin": payload})
+    archives = []
+    for origin in ("foreground", "watch"):
+        archive = tmp_path / f"{origin}.dat"
+        archive.write_bytes(make_zip({
+            ".sunpack/inner.dat": inner,
+            ".sunpack/extraction_manifest.json": b"ordinary user content",
+            "assets.sunpack/cache.bin": b"cache",
+        }))
+        archives.append((origin, archive))
+    config = normalize_config(with_detection_pipeline({
+        "recursive_extract": "2",
+        "output": {"root": str(tmp_path / "out")},
+        "post_extract": {"archive_cleanup_mode": "k", "flatten_single_directory": False},
+    }))
+
+    async def run():
+        async with PipelineEngine(config) as engine:
+            return await asyncio.gather(*(
+                engine.run([str(archive)], origin=origin,
+                           stdout=io.StringIO(), stderr=io.StringIO())
+                for origin, archive in archives
+            ))
+
+    responses = asyncio.run(run())
+    for response in responses:
+        assert not response.summary.failed_tasks
+        assert response.summary.success_count == 2
+        outer = next(item for item in response.summary.target_results
+                     if Path(item.input_path).parent == tmp_path)
+        output = Path(outer.output_dir)
+        assert (output / ".sunpack" / "extraction_manifest.json").read_bytes() == b"ordinary user content"
+        assert (output / "assets.sunpack" / "cache.bin").read_bytes() == b"cache"
+        leaf = next(item for item in response.summary.target_results if item is not outer)
+        assert (Path(leaf.output_dir) / "payload.bin").read_bytes() == payload
+        assert not (Path(leaf.output_dir) / ".sunpack").exists()
 
 
 def _configure_request_runtime(engine, callback):

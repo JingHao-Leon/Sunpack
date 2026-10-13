@@ -2066,9 +2066,6 @@ fn walk_output_tree(root: &Path, current: &Path, stats: &mut OutputTreeStats) {
             }
         };
         if metadata.is_dir() {
-            if file_name == ".sunpack" {
-                continue;
-            }
             stats.dir_count += 1;
             walk_output_tree(root, &path, stats);
             continue;

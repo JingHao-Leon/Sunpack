@@ -81,7 +81,6 @@ python sunpack.py extract [options] <paths...>
 | `-o OUTPUT_DIR`, `--out-dir OUTPUT_DIR` | 指定输出根目录；相对路径按当前命令目录解析。 |
 | `-f`, `--flatten` | 解压后提升单一顶层目录的内容。 |
 | `-F`, `--no-flatten` | 保留解压目录结构。 |
-| `--write-manifest`, `--manifest` | 把解压进度清单写入输出目录。 |
 | `-k`, `--allow-partial`, `--ap` | 允许把部分恢复结果作为可接受结果。 |
 | `--direct-file`, `--direct` | 将每个输入路径直接作为归档尝试，跳过目录扫描和自动候选发现。 |
 

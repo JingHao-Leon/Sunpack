@@ -14,8 +14,10 @@ def test_native_manifest_and_inventory_can_be_shared_across_concurrent_matches(t
 
     source = tmp_path / "source"
     source.mkdir()
-    names = ["é.txt", "e\u0301.txt", "A.txt", "a-other.txt", "nested.txt"]
+    names = ["é.txt", "e\u0301.txt", "A.txt", "a-other.txt", "nested.txt",
+             ".sunpack/cache.bin", "assets.sunpack/cache.bin", "dir/.SUNPACK/data.bin"]
     for name in names:
+        (source / name).parent.mkdir(parents=True, exist_ok=True)
         (source / name).write_text("abc", encoding="utf-8")
     archive = tmp_path / "source.disguised"
     subprocess.run(

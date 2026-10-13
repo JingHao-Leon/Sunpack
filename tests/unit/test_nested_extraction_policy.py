@@ -76,7 +76,8 @@ def test_second_depth_root_child_has_no_special_privilege(tmp_path):
     archive = tmp_path / "nested.zip"
     entries = [
         FileEntry(archive, False, 10),
-        *[FileEntry(tmp_path / f"asset_{index}", False, 100) for index in range(10)],
+        FileEntry(tmp_path / ".sunpack", True),
+        *[FileEntry(tmp_path / ".sunpack" / f"asset_{index}", False, 100) for index in range(10)],
     ]
 
     result = _authorize(tmp_path, entries, [archive], depth=2)

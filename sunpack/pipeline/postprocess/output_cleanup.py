@@ -12,7 +12,6 @@ from sunpack.core.support.resource_lifecycle import promotion_barrier, task_walk
 
 
 LOGGER = logging.getLogger(__name__)
-INTERNAL_METADATA_DIR = ".sunpack"
 
 
 class OutputCleanupEvent(str, Enum):
@@ -280,8 +279,6 @@ def _payload_inventory(root: str) -> tuple[int, int] | None:
             followlinks=False,
             onerror=_raise_walk_error,
         ):
-            if _same_path(current, root):
-                directories[:] = [name for name in directories if name != INTERNAL_METADATA_DIR]
             for name in [*directories, *files]:
                 path = os.path.join(current, name)
                 if not os.path.islink(path):

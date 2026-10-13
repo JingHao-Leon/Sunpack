@@ -269,58 +269,12 @@ class ExtractionExecutionTests(unittest.TestCase):
             self.assertTrue(result.partial_outputs)
             self.assertTrue(good_path.exists())
             self.assertTrue(partial_path.exists())
-            self.assertEqual(result.progress_manifest, "")
             self.assertFalse((out_dir / ".sunpack" / "extraction_manifest.json").exists())
             manifest = result.progress_manifest_payload
             by_archive_path = {item["archive_path"]: item for item in manifest.file_page(0, 100)}
             self.assertEqual(by_archive_path["good.txt"]["status"], "complete")
             self.assertEqual(by_archive_path["bad.bin"]["status"], "partial")
             self.assertEqual(manifest.summary["partial"], 1)
-
-    def test_extractor_can_write_progress_manifest_when_enabled(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            archive_path = Path(tmp) / "partial.zip"
-            archive_path.write_bytes(b"zip")
-            out_dir = Path(tmp) / "out"
-            good_path = out_dir / "good.txt"
-
-            extractor = ExtractionScheduler(max_retries=1, extraction_config={"write_progress_manifest": True})
-            extractor.password_resolver = FakePasswordResolver()
-            extractor.metadata_scanner = FakeMetadataScanner()
-
-            def fake_extract(**_kwargs):
-                good_path.parent.mkdir(parents=True, exist_ok=True)
-                good_path.write_text("ok", encoding="utf-8")
-                diagnostics = {
-                    "result": {
-                        "status": "error",
-                        "failure_stage": "item_extract",
-                        "failure_kind": "checksum_error",
-                        "diagnostics": {
-                            "output_trace": {
-                                "items": [
-                                    worker_trace_item(
-                                        path="good.txt",
-                                        output_path=str(good_path),
-                                        bytes_written=2,
-                                        expected_size=2,
-                                    ),
-                                ],
-                            }
-                        },
-                    }
-                }
-                diagnostics["result"] = parse_worker_json_line(json.dumps(diagnostics["result"]))
-                return _completed(returncode=2, stdout="", stderr="CRC Failed", worker_diagnostics=diagnostics)
-
-            task = make_archive_task(archive_path)
-            extractor.sevenzip_runner.extract_attempt = fake_extract
-
-            result = extractor.extract(task, str(out_dir))
-
-            self.assertTrue(Path(result.progress_manifest).is_file())
-            manifest = json.loads(Path(result.progress_manifest).read_text(encoding="utf-8"))
-            self.assertEqual(manifest["summary"]["total"], 1)
 
     def test_extractor_reports_retry_count_after_transient_failures_are_exhausted(self):
         with tempfile.TemporaryDirectory() as tmp:

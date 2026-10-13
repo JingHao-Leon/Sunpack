@@ -148,7 +148,6 @@
     "directory_passwords_max_password_length": 512
   },
   "extraction": {
-    "write_progress_manifest": false,
     "content_requirement": "complete"
   },
   "embedded_scan": {

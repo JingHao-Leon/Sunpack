@@ -42,9 +42,9 @@ def test_command_help_exposes_public_options(subtests, capsys):
         "scan": ((), ("--min-size",)),
         "inspect": (("--archives-only", "--analyze"), ()),
         "extract": (
-            ("--recur", "--cleanup", "--out-dir", "--write-manifest",
+            ("--recur", "--cleanup", "--out-dir",
              "--direct-file", "--process-mode"),
-            ("--color", "--worker-profile", "--min-size"),
+            ("--color", "--worker-profile", "--min-size", "--write-manifest", "--manifest"),
         ),
         "watch": (("add", "start", "list", "startup"), ("--process-mode",)),
         "passwords": (

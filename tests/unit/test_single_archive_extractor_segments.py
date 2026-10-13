@@ -320,7 +320,6 @@ def test_extractor_fills_success_output_counts_when_worker_omits_them(tmp_path):
         retry_policy=_FakeRetryPolicy(),
         sevenzip_runner=runner,
         best_effort=True,
-        write_progress_manifest=True,
     )
 
     result = extractor.extract(task, str(tmp_path / "out"), allow_embedded_segments=False)

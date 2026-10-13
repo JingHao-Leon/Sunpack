@@ -187,7 +187,7 @@ impl<'a> OutputIndex<'a> {
         let mut by_path = HashMap::with_capacity(snapshot.files.len());
         for (index, item) in snapshot.files.iter().enumerate() {
             let path = output_relative_path(item);
-            if path.is_empty() || path.contains(".sunpack/") {
+            if path.is_empty() {
                 continue;
             }
             insert_unique_output(&mut by_path, path, index);
@@ -219,7 +219,7 @@ impl<'a> OutputIndex<'a> {
                 // The common exact-path case never builds fallback indexes.
                 for (output, item) in self.files.iter().enumerate() {
                     let path = output_relative_path(item);
-                    if path.is_empty() || path.contains(".sunpack/") {
+                    if path.is_empty() {
                         continue;
                     }
                     let folded = normalize_match_path(&path);

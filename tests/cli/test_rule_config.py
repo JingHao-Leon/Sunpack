@@ -46,18 +46,10 @@ def test_config_validate_checks_verification_methods_are_registered():
     assert any("Unknown verification method" in error for error in result["errors"])
 
 
-def test_write_manifest_override_enables_extraction_manifest_files():
-    class Args:
-        recursive_extract = None
-        archive_cleanup_mode = None
-        flatten_single_directory = None
-        write_progress_manifest = True
+def test_legacy_manifest_setting_is_removed_from_effective_config():
+    config = make_config({"extraction": {"write_progress_manifest": True}})
 
-    config = {}
-    overrides = apply_runtime_config_overrides(config, Args())
-
-    assert overrides["write_progress_manifest"] is True
-    assert config["extraction"]["write_progress_manifest"] is True
+    assert "write_progress_manifest" not in config["extraction"]
 
 
 def test_output_dir_override_is_relative_to_the_request_cwd(tmp_path):
@@ -66,7 +58,6 @@ def test_output_dir_override_is_relative_to_the_request_cwd(tmp_path):
         archive_cleanup_mode = None
         output_dir = "output"
         flatten_single_directory = None
-        write_progress_manifest = False
         allow_partial = False
         directory_passwords = None
 
@@ -83,7 +74,6 @@ def test_omitted_output_dir_keeps_default_beside_archive_behavior(tmp_path):
         archive_cleanup_mode = None
         output_dir = None
         flatten_single_directory = None
-        write_progress_manifest = False
         allow_partial = False
         directory_passwords = None
 

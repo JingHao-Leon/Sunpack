@@ -49,7 +49,6 @@ def test_command_aliases_preserve_handler_inputs(parser, short, full):
     (["-k"], ["--allow-partial"]),
     (["--no-bpw"], ["--no-builtin-pw"]),
     (["--no-dpw"], ["--no-dir-pw"]),
-    (["--manifest"], ["--write-manifest"]),
     (["--direct"], ["--direct-file"]),
 ])
 def test_extract_aliases_preserve_handler_inputs(parser, short, full):

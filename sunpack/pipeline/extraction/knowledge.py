@@ -56,7 +56,6 @@ def _result_payload(task: ArchiveTask, result: ExtractionResult) -> dict[str, An
         "password_used": result.password_used,
         "selected_codepage": result.selected_codepage,
         "partial_outputs": bool(result.partial_outputs),
-        "progress_manifest": result.progress_manifest,
         "files_written": int(getattr(result, "files_written", 0) or 0),
         "bytes_written": int(getattr(result, "bytes_written", 0) or 0),
     }

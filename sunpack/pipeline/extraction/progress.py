@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from sunpack_native import (
@@ -37,6 +36,13 @@ def build_extraction_progress_manifest(
     diagnostics: dict[str, Any],
     round_index: int = 1,
 ) -> NativeProgressManifest:
+    compact = _compact_complete_progress_manifest(
+        archive=archive,
+        out_dir=out_dir,
+        diagnostics=diagnostics,
+    )
+    if compact is not None:
+        return compact
     result = _worker_result(diagnostics)
     output_trace = _output_trace(result)
     return _native_build_progress_manifest(
@@ -53,36 +59,6 @@ def build_extraction_progress_manifest(
         int(result.get("files_written", 0) or output_trace.get("files_written", 0) or 0),
         int(result.get("bytes_written", 0) or output_trace.get("total_bytes_written", 0) or 0),
     )
-
-
-def write_extraction_progress_manifest_payload(
-    *,
-    archive: str,
-    out_dir: str,
-    diagnostics: dict[str, Any],
-    round_index: int = 1,
-    pretty: bool = False,
-    write_file: bool = False,
-) -> tuple[str, NativeProgressManifest]:
-    if not write_file:
-        compact = _compact_complete_progress_manifest(
-            archive=archive,
-            out_dir=out_dir,
-            diagnostics=diagnostics,
-        )
-        if compact is not None:
-            return "", compact
-    manifest = build_extraction_progress_manifest(
-        archive=archive,
-        out_dir=out_dir,
-        diagnostics=diagnostics,
-        round_index=round_index,
-    )
-    if not write_file:
-        return "", manifest
-    target = Path(out_dir) / ".sunpack" / "extraction_manifest.json"
-    manifest.write_json(str(target), pretty)
-    return str(target), manifest
 
 
 def _compact_complete_progress_manifest(

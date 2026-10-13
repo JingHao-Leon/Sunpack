@@ -17,7 +17,7 @@ from sunpack.pipeline.extraction.internal.workflow.retry_policy import ExtractRe
 from sunpack.pipeline.extraction.internal.sevenzip.metadata import ArchiveMetadataScanner
 from sunpack.pipeline.extraction.internal.sevenzip.sevenzip_runner import SevenZipRunner
 from sunpack.pipeline.extraction.internal.sevenzip.worker_diagnostics import compact_success_worker_diagnostics, worker_result_payload
-from sunpack.pipeline.extraction.progress import has_recoverable_partial_outputs, write_extraction_progress_manifest_payload
+from sunpack.pipeline.extraction.progress import build_extraction_progress_manifest, has_recoverable_partial_outputs
 from sunpack.core.contracts.extraction import ExtractionResult
 from sunpack.core.passwords.result import PasswordResolution, PasswordResolutionStatus
 from sunpack.core.passwords.internal.local_files import directory_password_context_from_task
@@ -45,7 +45,6 @@ class SingleArchiveExtractor:
         retry_policy: ExtractRetryPolicy,
         sevenzip_runner: SevenZipRunner,
         best_effort: bool = True,
-        write_progress_manifest: bool = False,
         quiet: bool = False,
         language: str = "en",
         output_stream=None,
@@ -56,7 +55,6 @@ class SingleArchiveExtractor:
         self.retry_policy = retry_policy
         self.sevenzip_runner = sevenzip_runner
         self.best_effort = bool(best_effort)
-        self.write_progress_manifest = bool(write_progress_manifest)
         self.quiet = bool(quiet)
         self.i18n = I18nContext(language)
         self.output_stream = output_stream if output_stream is not None else sys.stdout
@@ -293,26 +291,21 @@ class SingleArchiveExtractor:
                         }
                         self._fill_success_output_counts(diagnostics, output_stats)
                     self._log(self.i18n.t("extract.log.success", archive=archive))
-                    manifest_path = ""
                     manifest_payload = None
                     if diagnostics.get("result"):
-                        with _phase(phase_timer, f"{phase_prefix}_write_success_manifest"):
-                            manifest_path, manifest_payload = write_extraction_progress_manifest_payload(
+                        with _phase(phase_timer, f"{phase_prefix}_build_success_manifest"):
+                            manifest_payload = build_extraction_progress_manifest(
                                 archive=archive,
                                 out_dir=out_dir,
                                 diagnostics=diagnostics,
                                 round_index=retry_count + 1,
-                                write_file=self.write_progress_manifest,
                             )
-                        if manifest_path:
-                            diagnostics["progress_manifest"] = manifest_path
                     return ExtractionResult(
                         success=True,
                         out_dir=out_dir,
                         password_used=correct_pwd,
                         selected_codepage=selected_codepage,
                         diagnostics=diagnostics,
-                        progress_manifest=manifest_path,
                         progress_manifest_payload=manifest_payload,
                         output_inventory=output_inventory,
                         files_written=output_stats["file_count"],
@@ -380,17 +373,14 @@ class SingleArchiveExtractor:
                     and has_recoverable_partial_outputs(diagnostics, out_dir)
                 )
             if recoverable_partial:
-                with _phase(phase_timer, f"{phase_prefix}_write_partial_manifest"):
-                    manifest_path, manifest_payload = write_extraction_progress_manifest_payload(
+                with _phase(phase_timer, f"{phase_prefix}_build_partial_manifest"):
+                    manifest_payload = build_extraction_progress_manifest(
                         archive=archive,
                         out_dir=out_dir,
                         diagnostics=diagnostics,
                         round_index=retry_count + 1,
-                        write_file=self.write_progress_manifest,
                     )
                 diagnostics["partial_outputs"] = True
-                if manifest_path:
-                    diagnostics["progress_manifest"] = manifest_path
                 return self._failed(
                     out_dir,
                     error_msg,
@@ -399,7 +389,6 @@ class SingleArchiveExtractor:
                     selected_codepage=selected_codepage,
                     diagnostics=diagnostics,
                     partial_outputs=True,
-                    progress_manifest=manifest_path,
                     progress_manifest_payload=manifest_payload,
                 )
             self._cleanup_output(out_dir, OutputCleanupEvent.UNRECOVERABLE_FAILURE)
@@ -502,7 +491,6 @@ class SingleArchiveExtractor:
         selected_codepage: str | None = None,
         diagnostics: dict | None = None,
         partial_outputs: bool = False,
-        progress_manifest: str = "",
         progress_manifest_payload: Any = None,
     ) -> ExtractionResult:
         diagnostic_payload = dict(diagnostics or {})
@@ -519,7 +507,6 @@ class SingleArchiveExtractor:
             selected_codepage=selected_codepage,
             diagnostics=diagnostic_payload,
             partial_outputs=partial_outputs,
-            progress_manifest=progress_manifest,
             progress_manifest_payload=progress_manifest_payload,
         )
 
@@ -825,7 +812,6 @@ class SingleArchiveExtractor:
                 "password_used": result.password_used,
                 "selected_codepage": result.selected_codepage,
                 "diagnostics": dict(result.diagnostics or {}),
-                "progress_manifest": result.progress_manifest,
                 "files_written": stats["file_count"],
                 "bytes_written": stats["total_bytes"],
             })
@@ -855,19 +841,6 @@ class SingleArchiveExtractor:
                 segment_count=len(segment_results),
             )
         if any_success:
-            manifest_path = ""
-            manifest_payload = None
-            if self.write_progress_manifest:
-                with _phase(phase_timer, f"{phase_prefix}_write_manifest"):
-                    manifest_path, manifest_payload = write_extraction_progress_manifest_payload(
-                        archive=archive,
-                        out_dir=out_dir,
-                        diagnostics=diagnostics,
-                        round_index=1,
-                        write_file=self.write_progress_manifest,
-                    )
-                if manifest_path:
-                    diagnostics["progress_manifest"] = manifest_path
             self._log(self.i18n.t(
                 "extract.log.embedded_success" if all_success else "extract.log.embedded_failed",
                 archive=archive,
@@ -885,8 +858,6 @@ class SingleArchiveExtractor:
                 # corrupt partial files.  This keeps terminal-failure cleanup
                 # from deleting the complete child outputs.
                 partial_outputs=False,
-                progress_manifest=manifest_path,
-                progress_manifest_payload=manifest_payload,
                 output_inventory=output_inventory,
                 files_written=totals["file_count"],
                 bytes_written=totals["total_bytes"],

@@ -1,13 +1,12 @@
 import json
 
-from sunpack_native import load_progress_manifest, worker_manifest_from_rows
+from sunpack_native import worker_manifest_from_rows
 
 from sunpack.pipeline.extraction.internal.sevenzip.worker_diagnostics import parse_worker_json_line
 from tests.helpers.worker_events import worker_trace_item
 from sunpack.pipeline.extraction.progress import (
     build_extraction_progress_manifest,
     iter_progress_files,
-    write_extraction_progress_manifest_payload,
 )
 
 
@@ -91,9 +90,9 @@ def test_progress_manifest_from_worker_rows_keeps_complete_bytes_written(tmp_pat
 
 def test_progress_manifest_adds_untraced_output_files(tmp_path):
     out_dir = tmp_path / "out"
-    (out_dir / "sub").mkdir(parents=True)
+    (out_dir / ".sunpack").mkdir(parents=True)
     (out_dir / "traced.txt").write_bytes(b"abc")
-    (out_dir / "sub" / "extra.txt").write_bytes(b"hello")
+    (out_dir / ".sunpack" / "extraction_manifest.json").write_bytes(b"hello")
 
     manifest = build_extraction_progress_manifest(
         archive="a.zip",
@@ -105,41 +104,12 @@ def test_progress_manifest_adds_untraced_output_files(tmp_path):
     )
 
     by_archive_path = {item["archive_path"]: item for item in iter_progress_files(manifest)}
-    assert set(by_archive_path) == {"traced.txt", "sub/extra.txt"}
-    extra = by_archive_path["sub/extra.txt"]
+    assert set(by_archive_path) == {"traced.txt", ".sunpack/extraction_manifest.json"}
+    extra = by_archive_path[".sunpack/extraction_manifest.json"]
     assert extra["status"] == "unverified"
     assert extra["bytes_written"] == 5
-    assert extra["path"] == str(out_dir / "sub" / "extra.txt")
+    assert extra["path"] == str(out_dir / ".sunpack" / "extraction_manifest.json")
     assert "not reported" in extra["message"]
-
-
-def test_progress_manifest_file_round_trips_through_rust(tmp_path):
-    out_dir = tmp_path / "out"
-    path, manifest = write_extraction_progress_manifest_payload(
-        archive="a.zip",
-        out_dir=str(out_dir),
-        diagnostics={"result": _trace_result(
-            [{"path": "雪.txt", "bytes_written": 1, "expected_size": 2, "failed": True}],
-            status="failed",
-        )},
-        write_file=True,
-    )
-
-    payload = json.loads((out_dir / ".sunpack" / "extraction_manifest.json").read_text(encoding="utf-8"))
-    assert path == str(out_dir / ".sunpack" / "extraction_manifest.json")
-    assert payload["summary"]["partial"] == 1
-    assert payload["files"][0]["archive_path"] == "雪.txt"
-    loaded = load_progress_manifest(path)
-    assert loaded.summary == manifest.summary
-    assert loaded.file_page(0, 1) == manifest.file_page(0, 1)
-    assert load_progress_manifest(str(tmp_path / "missing.json")) is None
-
-
-def test_incomplete_progress_manifest_is_unreadable(tmp_path):
-    path = tmp_path / "incomplete.json"
-    path.write_text(json.dumps({"files": [], "summary": {}}), encoding="utf-8")
-
-    assert load_progress_manifest(str(path)) is None
 
 
 def test_complete_worker_inventory_uses_summary_only_manifest(tmp_path):
@@ -157,13 +127,12 @@ def test_complete_worker_inventory_uses_summary_only_manifest(tmp_path):
         },
     }))
 
-    path, manifest = write_extraction_progress_manifest_payload(
+    manifest = build_extraction_progress_manifest(
         archive="a.zip",
         out_dir=str(tmp_path / "out"),
         diagnostics={"result": result},
     )
 
-    assert path == ""
     assert len(manifest) == 0
     assert manifest.summary["total"] == 2
     assert manifest.files_written == 2

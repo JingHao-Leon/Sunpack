@@ -2,10 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from contextlib import nullcontext
-from pathlib import Path
 from typing import Any, Callable, TYPE_CHECKING
 
-from sunpack_native import NativeProgressManifest, load_progress_manifest
+from sunpack_native import NativeProgressManifest
 
 from sunpack.core.contracts.archive_input import ArchiveInputDescriptor
 from sunpack.core.contracts.tasks import ArchiveTask
@@ -84,7 +83,7 @@ def build_verification_evidence(
         worker_result = _worker_result(extraction_diagnostics)
         worker_native_diagnostics = _worker_native_diagnostics(worker_result)
     with _phase(phase_timer, f"{phase_prefix}_progress_manifest"):
-        progress_manifest = _load_progress_manifest(extraction_result)
+        progress_manifest = extraction_result.progress_manifest_payload
     return VerificationEvidence(
         task=task,
         extraction_result=extraction_result,
@@ -96,20 +95,6 @@ def build_verification_evidence(
         worker_native_diagnostics=worker_native_diagnostics,
         progress_manifest=progress_manifest,
     )
-
-
-def _load_progress_manifest(extraction_result: ExtractionResult) -> NativeProgressManifest | None:
-    cached = extraction_result.progress_manifest_payload
-    if isinstance(cached, NativeProgressManifest):
-        return cached
-    manifest_path = extraction_result.progress_manifest
-    if not manifest_path and extraction_result.out_dir:
-        candidate = Path(extraction_result.out_dir) / ".sunpack" / "extraction_manifest.json"
-        if candidate.exists():
-            manifest_path = str(candidate)
-    if not manifest_path:
-        return None
-    return load_progress_manifest(str(manifest_path))
 
 
 def _analysis_facts_from_task(task: ArchiveTask) -> dict[str, Any]:

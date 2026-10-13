@@ -67,7 +67,6 @@ def test_load_config_merges_simple_config_over_advanced_config(tmp_path, monkeyp
         ({"detection": {"enabled": "false"}}, "detection.enabled"),
         ({"filesystem": {"scan_filters_enabled": "false"}}, "filesystem.scan_filters_enabled"),
         ({"post_extract": {"flatten_single_directory": "false"}}, "post_extract.flatten_single_directory"),
-        ({"extraction": {"write_progress_manifest": "false"}}, "extraction.write_progress_manifest"),
         ({"passwords": {"clipboard_passwords_enabled": "false"}}, "passwords.clipboard_passwords_enabled"),
         ({"watch": {"toast_enabled": "false"}}, "watch.toast_enabled"),
         ({"verification": {"enabled": "false"}}, "verification.enabled"),

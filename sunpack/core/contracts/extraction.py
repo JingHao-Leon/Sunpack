@@ -20,7 +20,6 @@ class ExtractionResult:
     selected_codepage: Optional[str] = None
     diagnostics: dict[str, Any] = field(default_factory=dict)
     partial_outputs: bool = False
-    progress_manifest: str = ""
     # Rust-owned per-file progress manifest (sunpack_native.NativeProgressManifest).
     progress_manifest_payload: NativeProgressManifest | None = None
     output_inventory: OutputInventory | None = None

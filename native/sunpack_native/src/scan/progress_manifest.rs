@@ -1,31 +1,24 @@
 //! Per-file extraction progress manifest owned by Rust.
 //!
 //! Built from the worker's native output trace (or manifest rows) plus a
-//! scan of the output directory. Python reads aggregates and bounded pages;
-//! the optional `.sunpack/extraction_manifest.json` file is written and read
-//! here as well.
+//! scan of the output directory. Python reads aggregates and bounded pages.
 
-use crate::io::resource_lifecycle::TrackedFile;
 use crate::scan::directory::{scan_output_inventory_impl, NativeWorkerManifest, OutputFileRecord};
 use crate::scan::worker_event::{NativeOutputTrace, OutputTraceItem};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 
 const UNTRACED_MESSAGE: &str =
     "file was present after extraction but was not reported by worker output trace";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FileStatus {
     Complete,
     Partial,
     Failed,
-    Skipped,
     Unverified,
 }
 
@@ -35,14 +28,12 @@ impl FileStatus {
             Self::Complete => "complete",
             Self::Partial => "partial",
             Self::Failed => "failed",
-            Self::Skipped => "skipped",
             Self::Unverified => "unverified",
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone)]
 struct ProgressFile {
     path: String,
     archive_path: String,
@@ -72,8 +63,7 @@ impl ProgressFile {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Default)]
 struct Summary {
     complete: usize,
     partial: usize,
@@ -94,7 +84,6 @@ impl Summary {
                 FileStatus::Complete => summary.complete += 1,
                 FileStatus::Partial => summary.partial += 1,
                 FileStatus::Failed => summary.failed += 1,
-                FileStatus::Skipped => summary.skipped += 1,
                 FileStatus::Unverified => summary.unverified += 1,
             }
         }
@@ -102,8 +91,7 @@ impl Summary {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone)]
 struct ManifestDocument {
     archive: String,
     out_dir: String,
@@ -313,46 +301,6 @@ impl NativeProgressManifest {
         dict.set_item("missing_volume", missing_volume)?;
         Ok(dict)
     }
-
-    #[pyo3(signature = (path, pretty=false))]
-    fn write_json(&self, py: Python<'_>, path: String, pretty: bool) -> PyResult<()> {
-        let document = Arc::clone(&self.document);
-        py.detach(move || -> PyResult<()> {
-            let target = Path::new(&path);
-            if let Some(parent) = target.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let payload = if pretty {
-                serde_json::to_vec_pretty(document.as_ref())
-            } else {
-                serde_json::to_vec(document.as_ref())
-            }
-            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
-            let mut file = TrackedFile::open_with(target, "progress_manifest_output", |options| {
-                options.write(true).create(true).truncate(true);
-            })?;
-            file.write_all(&payload)?;
-            file.flush()?;
-            Ok(())
-        })
-    }
-}
-
-/// Read a manifest file written by ``write_json``; ``None`` when unreadable.
-#[pyfunction]
-pub(crate) fn load_progress_manifest(
-    py: Python<'_>,
-    path: String,
-) -> Option<NativeProgressManifest> {
-    py.detach(move || {
-        let mut file = TrackedFile::open(&path, "progress_manifest_input").ok()?;
-        let mut data = Vec::new();
-        file.read_to_end(&mut data).ok()?;
-        let document = serde_json::from_slice::<ManifestDocument>(&data).ok()?;
-        Some(NativeProgressManifest {
-            document: Arc::new(document),
-        })
-    })
 }
 
 /// Summary-only manifest for a worker result whose complete inventory was verified.

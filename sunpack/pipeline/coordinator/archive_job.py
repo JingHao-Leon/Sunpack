@@ -396,7 +396,6 @@ class ArchiveJobExecutor:
                 "container_integrity": outcome.verification.container_integrity,
                 "verification_strength": outcome.verification.verification_strength,
                 "archive_coverage": _coverage_payload(outcome.verification),
-                "progress_manifest": res.progress_manifest,
                 **(
                     {"warning": possible_missing_volume.to_dict()}
                     if possible_missing_volume is not None

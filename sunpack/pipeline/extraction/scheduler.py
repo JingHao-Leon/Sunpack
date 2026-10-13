@@ -120,7 +120,6 @@ class ExtractionScheduler:
             retry_policy=self.retry_policy,
             sevenzip_runner=self.sevenzip_runner,
             best_effort=True,
-            write_progress_manifest=bool(self.extraction_config.get("write_progress_manifest", False)),
             quiet=bool(self.extraction_config.get("quiet", False)),
             language=str(self.extraction_config.get("language") or "en"),
             output_stream=self.output_stream,

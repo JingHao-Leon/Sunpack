@@ -47,6 +47,7 @@ pub(crate) struct VolumeAnchor {
     pub(crate) internal_volume_number: Option<u32>,
     pub(crate) structure_offset: Option<u64>,
     pub(crate) expected_logical_size: Option<u64>,
+    pub(crate) zip_eocd_offset: Option<u64>,
     pub(crate) continuation_from_previous: bool,
     pub(crate) continuation_to_next: bool,
     pub(crate) relation_has_next: Option<bool>,
@@ -77,6 +78,7 @@ impl VolumeAnchor {
         out.set_item("internal_volume_number", self.internal_volume_number)?;
         out.set_item("structure_offset", self.structure_offset)?;
         out.set_item("expected_logical_size", self.expected_logical_size)?;
+        out.set_item("zip_eocd_offset", self.zip_eocd_offset)?;
         out.set_item(
             "continuation_from_previous",
             self.continuation_from_previous,
@@ -711,11 +713,7 @@ fn probe_zip(prefix: &[u8], tail: &[u8], tail_start: u64, out: &mut VolumeAnchor
             .or(empty_eocd_offset)
     });
     let empty_eocd_start = empty_eocd_offset == Some(0);
-    let eocd_index = memmem::rfind(tail, ZIP_EOCD).filter(|index| {
-        tail.get(index + 20..index + 22)
-            .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]) as usize)
-            .is_some_and(|comment_len| index + 22 + comment_len == tail.len())
-    });
+    let eocd_index = crate::formats::zip::find_eocd_record(tail, false).map(|record| record.offset);
     if start_offset.is_none() && eocd_index.is_none() {
         return false;
     }
@@ -739,6 +737,7 @@ fn probe_zip(prefix: &[u8], tail: &[u8], tail_start: u64, out: &mut VolumeAnchor
     }
     let mut split_terminal = false;
     if let Some(index) = eocd_index {
+        out.zip_eocd_offset = Some(tail_start + index as u64);
         if let Some(record) = tail.get(index..index + 22) {
             let mut disk = u32::from(u16::from_le_bytes([record[4], record[5]]));
             let mut cd_disk = u32::from(u16::from_le_bytes([record[6], record[7]]));
@@ -836,6 +835,7 @@ pub(crate) fn upgrade_relation_zip_tail(anchor: &VolumeAnchor) -> VolumeAnchor {
         .internal_volume_number
         .or(out.internal_volume_number);
     out.expected_logical_size = terminal.expected_logical_size;
+    out.zip_eocd_offset = terminal.zip_eocd_offset;
     out.continuation_from_previous = terminal.continuation_from_previous;
     out.error = terminal.error;
     for role in terminal.anchor_roles {
@@ -1108,6 +1108,9 @@ pub(crate) fn probe_volume_anchor_at_offset(
     }
 
     if offset > 0 {
+        if let Some(eocd) = result.zip_eocd_offset.as_mut() {
+            *eocd = eocd.saturating_add(offset);
+        }
         if let Some(next) = result.rar_next_header_offset.as_mut() {
             *next += offset;
         }

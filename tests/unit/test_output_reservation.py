@@ -62,12 +62,39 @@ def test_concurrent_formats_share_numbered_directory_family(tmp_path):
         return resolver(task), task.archive_input().format_hint
 
     with ThreadPoolExecutor(max_workers=8) as executor:
-        results = list(executor.map(reserve, range(32)))
+        results = list(executor.map(reserve, range(320)))
 
     assert {path for path, _ in results} == {
-        default, *(str(tmp_path / f"release.v2({index})") for index in range(1, 32)),
+        default, *(str(tmp_path / f"release.v2({index})") for index in range(1, 320)),
     }
     assert {fmt for _, fmt in results} == {"zip", "7z"}
-    for index in range(32):
+    for index in range(1, 320):
         registry.release(str(index))
+    assert registry.reserve(default, "reused", set()) == str(tmp_path / "release.v2(1)")
+    registry.release("reused")
+    registry.release("0")
     assert registry.reserve(default, "next", set()) == default
+
+
+def test_evicted_numbering_history_preserves_active_owners_and_reuses_releases(tmp_path, monkeypatch):
+    # Small same-family reservations do not exercise live references after LRU
+    # eviction. Check behavior, rather than the allocator's internal cache size.
+    import os
+    import sunpack.core.support.output_paths as output_paths
+    monkeypatch.setattr(output_paths.os.path, "exists", lambda path: os.path.basename(path) == "archive")
+    registry = OutputReservationRegistry()
+    base = str(tmp_path / "archive")
+    first = registry.reserve(base, "first", set())
+    second = registry.reserve(first, "second", set())
+    third = registry.reserve(base, "third", set())
+    assert (first, second, third) == tuple(str(tmp_path / f"archive({i})") for i in (1, 2, 3))
+    for index in range(300):
+        registry.reserve(str(tmp_path / str(index) / "archive"), str(index), set())
+    registry.release("second")
+    assert registry.reserve(base, "reuse", set()) == second
+    registry.release("first")
+    registry.release("third")
+    registry.release("reuse")
+    for index in range(300):
+        registry.release(str(index))
+    assert registry.reserve(base, "next", set()) == first

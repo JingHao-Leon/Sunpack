@@ -55,12 +55,12 @@ class _ZipCryptoEncryptor:
         return bytes(output)
 
 
-def _write_ansi_password_zip(path, name: str = "secret.txt"):
+def _write_ansi_password_zip(path, name: str = "secret.txt", *, password_bytes=None):
     """Build a stored ZipCrypto entry keyed by the ANSI (GBK) password bytes,
     as WinRAR/Bandizip/Explorer produce on Chinese Windows."""
     crc = zlib.crc32(PAYLOAD) & 0xFFFFFFFF
     header = bytes(range(1, 12)) + bytes([crc >> 24])
-    encrypted = _ZipCryptoEncryptor(PASSWORD.encode("gbk")).encrypt(header + PAYLOAD)
+    encrypted = _ZipCryptoEncryptor(password_bytes or PASSWORD.encode("gbk")).encrypt(header + PAYLOAD)
     raw_name = name.encode("ascii")
     local = struct.pack(
         "<IHHHHHIIIHH",
@@ -117,3 +117,55 @@ def test_worker_extracts_with_the_password_the_fast_verifier_accepts(tmp_path):
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert (out_dir / "secret.txt").read_bytes() == PAYLOAD
+
+
+@pytest.mark.parametrize("layout", ["file", "carrier", "raw_split", "spanned"])
+def test_eocd_signatures_in_comments_preserve_planned_password_input(tmp_path, layout):
+    # One fixture covers logical coordinate reuse and the shared pre-planning
+    # fallback. Plain encryption tests cannot find this valid-comment failure.
+    from sunpack.core.config.loader import load_config
+    from sunpack.pipeline.coordinator.task_scan import direct_file_task
+    from sunpack.pipeline.discovery.detection.input_planning import ArchiveInputPlanningStage
+    from sunpack.core.support import archive_knowledge_projection as knowledge_view
+    from sunpack_native import zip_fast_verify_passwords
+
+    password = "comment-secret"
+    seed = tmp_path / "seed.zip"
+    _write_ansi_password_zip(seed, password_bytes=password.encode())
+    data = seed.read_bytes()
+    comment = b"PK\x05\x06" + b"comment data" * 4 + b"PK\x05\x06 end"
+    payload = data[:-2] + struct.pack("<H", len(comment)) + comment
+    parts = []
+    if layout == "carrier":
+        archive = tmp_path / "carrier.dat"
+        archive.write_bytes(b"carrier-prefix" + payload + b"carrier-suffix")
+    elif layout == "raw_split":
+        archive = tmp_path / "raw.dat.001"
+        second = tmp_path / "raw.dat.002"
+        split = len(payload) // 2
+        archive.write_bytes(payload[:split])
+        second.write_bytes(payload[split:])
+        parts = [str(archive), str(second)]
+    elif layout == "spanned":
+        archive = tmp_path / "split.z01"
+        second = tmp_path / "split.zip"
+        central = payload.index(b"PK\x01\x02")
+        last = bytearray(payload[central:])
+        eocd = len(data) - 22 - central
+        struct.pack_into("<HH", last, eocd + 4, 1, 1)
+        struct.pack_into("<I", last, eocd + 16, 0)
+        archive.write_bytes(payload[:central])
+        second.write_bytes(last)
+        parts = [str(archive), str(second)]
+    else:
+        archive = tmp_path / "plain.dat"
+        archive.write_bytes(payload)
+        assert zip_fast_verify_passwords(str(archive), ["wrong", password])["status"] == "match"
+    task = direct_file_task(str(archive), all_parts=parts or [str(archive)])
+    ArchiveInputPlanningStage(load_config()).plan_task(task)
+    descriptor = knowledge_view.source_password_probe_input(task) or task.archive_input().to_dict()
+    assert "zip_eocd_offset" in descriptor.get("analysis", {}), descriptor
+    outcome = ZipFastVerifier().verify_batch(str(archive), ["wrong", password],
+        part_paths=parts or None, archive_input=descriptor)
+    assert outcome.status == "match", outcome
+    assert 1 in outcome.matched_indices

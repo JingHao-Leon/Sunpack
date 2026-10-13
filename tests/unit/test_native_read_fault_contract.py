@@ -1,7 +1,7 @@
 import struct
 import zlib
 
-from sunpack_native import AnalysisBinaryView
+from sunpack_native import AnalysisBinaryView, zip_fast_verify_passwords
 
 
 def test_native_zip_probe_reports_empty_archive_start_at_zero(tmp_path):
@@ -27,6 +27,9 @@ def test_zip_tail_read_fault_names_eocd_and_suggests_missing_volume(tmp_path):
     assert result["read_error"]["actual"] == 4
     assert result["read_error"]["possible_missing_volume"] is True
     assert "missing_volume" in result["damage_flags"]
+    password_result = zip_fast_verify_passwords(str(archive), ["candidate"])
+    assert password_result["status"] == "needs_volume_or_tail_damaged"
+    assert password_result["read_error"]["field"] == "zip.eocd"
 
 
 def test_seven_zip_declared_next_header_fault_names_tail_field(tmp_path):

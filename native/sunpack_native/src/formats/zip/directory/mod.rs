@@ -1,6 +1,6 @@
 #[derive(Clone, Copy)]
-struct EocdInfo {
-    offset: usize,
+pub(crate) struct EocdInfo {
+    pub(crate) offset: usize,
     end: usize,
     disk_entries: u16,
     total_entries: u16,
@@ -176,4 +176,3 @@ fn expected_zip64_central_size(entry: &CentralEntry) -> usize {
         + usize::from(entry.local_header_offset == u32::MAX) * 8
         + usize::from(entry.disk_number_start == u16::MAX) * 4
 }
-

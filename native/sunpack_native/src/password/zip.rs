@@ -22,19 +22,22 @@ const AES_PARALLEL_PASSWORD_THRESHOLD: usize = 4;
 const ZIPCRYPTO_PARALLEL_PASSWORD_THRESHOLD: usize = 256;
 
 #[pyfunction]
+#[pyo3(signature = (archive_path, passwords, eocd_offset=None))]
 pub(crate) fn zip_fast_verify_passwords(
     py: Python<'_>,
     archive_path: String,
     passwords: &Bound<'_, PyList>,
+    eocd_offset: Option<u64>,
 ) -> PyResult<Py<PyAny>> {
     let reader = ManagedReader::open(&archive_path)?;
-    zip_fast_verify_passwords_with_reader(py, &reader, passwords)
+    zip_fast_verify_passwords_with_reader(py, &reader, passwords, eocd_offset)
 }
 
 pub(crate) fn zip_fast_verify_passwords_with_reader(
     py: Python<'_>,
     reader: &ManagedReader,
     passwords: &Bound<'_, PyList>,
+    eocd_offset: Option<u64>,
 ) -> PyResult<Py<PyAny>> {
     let candidates = passwords
         .iter()
@@ -43,15 +46,18 @@ pub(crate) fn zip_fast_verify_passwords_with_reader(
 
     let key = InputKey::file("zip", reader)?;
     verify_prepared(py, key, &candidates, || {
-        prepare_zip_stream(&mut reader.cursor(), reader.len()).map(PasswordContext::Zip)
+        prepare_zip_stream(&mut reader.cursor(), reader.len(), eocd_offset)
+            .map(PasswordContext::Zip)
     })
 }
 
 #[pyfunction]
+#[pyo3(signature = (ranges, passwords, eocd_offset=None))]
 pub(crate) fn zip_fast_verify_passwords_from_ranges(
     py: Python<'_>,
     ranges: &Bound<'_, PyList>,
     passwords: &Bound<'_, PyList>,
+    eocd_offset: Option<u64>,
 ) -> PyResult<Py<PyAny>> {
     let candidates = passwords
         .iter()
@@ -61,16 +67,22 @@ pub(crate) fn zip_fast_verify_passwords_from_ranges(
     let total_len = ranges_total_len(&parsed);
     let key = ranges_key("zip", &parsed)?;
     verify_prepared(py, key, &candidates, || {
-        prepare_zip_stream(&mut VirtualRangeReader::new(parsed.into()), total_len)
-            .map(PasswordContext::Zip)
+        prepare_zip_stream(
+            &mut VirtualRangeReader::new(parsed.into()),
+            total_len,
+            eocd_offset,
+        )
+        .map(PasswordContext::Zip)
     })
 }
 
 #[pyfunction]
+#[pyo3(signature = (parts, passwords, eocd_offset=None))]
 pub(crate) fn zip_fast_verify_passwords_from_volumes(
     py: Python<'_>,
     parts: &Bound<'_, PyList>,
     passwords: &Bound<'_, PyList>,
+    eocd_offset: Option<u64>,
 ) -> PyResult<Py<PyAny>> {
     let candidates = passwords
         .iter()
@@ -78,32 +90,54 @@ pub(crate) fn zip_fast_verify_passwords_from_volumes(
         .collect::<PyResult<Vec<_>>>()?;
     let volumes = VolumeSet::new(parse_volumes(parts)?);
     verify_prepared(py, volumes.key("zip")?, &candidates, || {
-        prepare_zip_volumes(&volumes).map(PasswordContext::Zip)
+        prepare_zip_volumes(&volumes, eocd_offset).map(PasswordContext::Zip)
     })
 }
 
-fn prepare_zip_volumes(volumes: &VolumeSet) -> Result<ZipPasswordContext, PreparedStatus> {
-    let tail = match volumes.read_last_tail_field(MAX_EOCD_SCAN, "zip.eocd_search_window") {
-        Ok(tail) => tail,
-        Err(fault) => return Err(fault.into()),
+fn prepare_zip_volumes(
+    volumes: &VolumeSet,
+    eocd_offset: Option<u64>,
+) -> Result<ZipPasswordContext, PreparedStatus> {
+    let (tail, eocd_offset) = if let Some(offset) = eocd_offset {
+        let (disk, local) = volumes.advance_disk_offset(0, 0, offset).ok_or_else(|| {
+            PreparedStatus::new(
+                "needs_volume_or_tail_damaged",
+                "analyzed ZIP EOCD crosses unavailable volumes",
+            )
+        })?;
+        let record =
+            volumes.read_disk_spanning_field(disk, local, 22, "zip.eocd", FieldLocation::Tail)?;
+        if !record.starts_with(ZIP_EOCD) {
+            return Err(PreparedStatus::new(
+                "damaged",
+                "analyzed ZIP EOCD signature is invalid",
+            ));
+        }
+        (record, 0)
+    } else {
+        let tail = volumes.read_last_tail_field(MAX_EOCD_SCAN, "zip.eocd_search_window")?;
+        if tail.len() < 22 {
+            return Err(
+                ReadFault::short_read("read_record", 0, 22, tail.len(), tail.len() as u64)
+                    .with_field("zip.eocd", FieldLocation::Tail)
+                    .into(),
+            );
+        }
+        let offset = crate::formats::zip::find_eocd_record(&tail, false)
+            .or_else(|| crate::formats::zip::find_eocd_record(&tail, true))
+            .map(|record| record.offset)
+            .ok_or_else(|| {
+                ReadFault::invalid_field(
+                    "locate",
+                    0,
+                    22,
+                    tail.len() as u64,
+                    "ZIP EOCD was not found",
+                )
+                .with_field("zip.eocd", FieldLocation::Tail)
+            })?;
+        (tail, offset)
     };
-    let Some(eocd_offset) = find_last_signature(&tail, ZIP_EOCD) else {
-        let fault =
-            ReadFault::invalid_field("locate", 0, 22, tail.len() as u64, "ZIP EOCD was not found")
-                .with_field("zip.eocd", FieldLocation::Tail);
-        return Err(fault.into());
-    };
-    if eocd_offset + 22 > tail.len() {
-        let fault = ReadFault::short_read(
-            "read_record",
-            eocd_offset as u64,
-            22,
-            tail.len().saturating_sub(eocd_offset),
-            tail.len() as u64,
-        )
-        .with_field("zip.eocd", FieldLocation::Tail);
-        return Err(fault.into());
-    }
     let disk_number = le_u16(&tail, eocd_offset + 4).unwrap_or(u16::MAX) as usize;
     let central_disk = le_u16(&tail, eocd_offset + 6).unwrap_or(u16::MAX) as usize;
     let total_entries = le_u16(&tail, eocd_offset + 10).unwrap_or(u16::MAX) as usize;
@@ -350,9 +384,11 @@ impl ZipPasswordContext {
 fn prepare_zip_stream<R: Read + Seek>(
     file: &mut R,
     total_len: u64,
+    eocd_offset: Option<u64>,
 ) -> Result<ZipPasswordContext, PreparedStatus> {
-    zip_tail_requirement(file, total_len)?;
-    if let Some(mut header) = locate_encrypted_entry_from_central_directory(file, total_len)? {
+    if let Some(mut header) =
+        locate_encrypted_entry_from_central_directory(file, total_len, eocd_offset)?
+    {
         header.source_len = total_len;
         return prepare_zip_header(file, &header);
     }
@@ -479,97 +515,84 @@ fn parse_local_header(bytes: &[u8], offset: usize) -> Option<ZipLocalHeader> {
     })
 }
 
-fn zip_tail_requirement<R: Read + Seek>(file: &mut R, total_len: u64) -> Result<(), ReadFault> {
-    let tail_len = MAX_EOCD_SCAN.min(total_len as usize);
-    if tail_len < 22 {
-        return Err(
-            ReadFault::short_read("read_record", 0, 22, tail_len, total_len)
-                .with_field("zip.eocd", FieldLocation::Tail),
-        );
-    }
-    seek_field(
-        file,
-        total_len - tail_len as u64,
-        total_len,
-        "zip.eocd_search_window",
-        FieldLocation::Tail,
-    )?;
-    let mut tail = vec![0u8; tail_len];
-    read_exact_field(
-        file,
-        &mut tail,
-        total_len,
-        "zip.eocd_search_window",
-        FieldLocation::Tail,
-    )?;
-    let Some(eocd) = find_last_signature(&tail, ZIP_EOCD) else {
-        return Err(ReadFault::invalid_field(
-            "locate",
-            total_len.saturating_sub(tail_len as u64),
-            22,
-            total_len,
-            "ZIP EOCD was not found",
-        )
-        .with_field("zip.eocd", FieldLocation::Tail));
-    };
-    if eocd + 22 > tail.len() {
-        return Err(ReadFault::short_read(
-            "read_record",
-            total_len - tail_len as u64 + eocd as u64,
-            22,
-            tail.len().saturating_sub(eocd),
-            total_len,
-        )
-        .with_field("zip.eocd", FieldLocation::Tail));
-    }
-    Ok(())
-}
-
 fn locate_encrypted_entry_from_central_directory<R: Read + Seek>(
     file: &mut R,
     total_len: u64,
+    analyzed_eocd: Option<u64>,
 ) -> Result<Option<ZipLocalHeader>, PreparedStatus> {
-    let tail_len = MAX_EOCD_SCAN.min(total_len as usize);
-    let tail_start = total_len.saturating_sub(tail_len as u64);
-    let mut tail = vec![0u8; tail_len];
-    seek_field(
-        file,
-        tail_start,
-        total_len,
-        "zip.eocd_search_window",
-        FieldLocation::Tail,
-    )?;
-    read_exact_field(
-        file,
-        &mut tail,
-        total_len,
-        "zip.eocd_search_window",
-        FieldLocation::Tail,
-    )?;
-    let eocd = find_last_signature(&tail, ZIP_EOCD).ok_or_else(|| {
-        ReadFault::invalid_field(
-            "locate",
-            tail_start,
-            22,
-            total_len,
-            "ZIP EOCD was not found",
-        )
-        .with_field("zip.eocd", FieldLocation::Tail)
-    })?;
-    if eocd + 22 > tail.len()
-        || le_u16(&tail, eocd + 4) != Some(0)
-        || le_u16(&tail, eocd + 6) != Some(0)
+    // Reuse the analyzed logical record; callers before planning share the ZIP locator.
+    let (offset, record) = match analyzed_eocd {
+        Some(offset) => {
+            seek_field(file, offset, total_len, "zip.eocd", FieldLocation::Tail)?;
+            let mut record = [0u8; 22];
+            read_exact_field(
+                file,
+                &mut record,
+                total_len,
+                "zip.eocd",
+                FieldLocation::Tail,
+            )?;
+            (offset, record)
+        }
+        None => {
+            let tail_len = MAX_EOCD_SCAN.min(total_len as usize);
+            if tail_len < 22 {
+                return Err(
+                    ReadFault::short_read("read_record", 0, 22, tail_len, total_len)
+                        .with_field("zip.eocd", FieldLocation::Tail)
+                        .into(),
+                );
+            }
+            let tail_start = total_len.saturating_sub(tail_len as u64);
+            seek_field(
+                file,
+                tail_start,
+                total_len,
+                "zip.eocd_search_window",
+                FieldLocation::Tail,
+            )?;
+            let mut tail = vec![0u8; tail_len];
+            read_exact_field(
+                file,
+                &mut tail,
+                total_len,
+                "zip.eocd_search_window",
+                FieldLocation::Tail,
+            )?;
+            let eocd = crate::formats::zip::find_eocd_record(&tail, false)
+                .or_else(|| crate::formats::zip::find_eocd_record(&tail, true))
+                .ok_or_else(|| {
+                    ReadFault::invalid_field(
+                        "locate",
+                        tail_start,
+                        22,
+                        total_len,
+                        "ZIP EOCD was not found",
+                    )
+                    .with_field("zip.eocd", FieldLocation::Tail)
+                })?;
+            (
+                tail_start + eocd.offset as u64,
+                tail[eocd.offset..eocd.offset + 22].try_into().unwrap(),
+            )
+        }
+    };
+    if !record.starts_with(ZIP_EOCD)
+        || le_u16(&record, 4) != Some(0)
+        || le_u16(&record, 6) != Some(0)
     {
-        return Err(ReadFault::short_read(
+        return Err(ReadFault::invalid_field(
             "parse_record",
-            tail_start + eocd as u64,
+            offset,
             22,
-            tail.len().saturating_sub(eocd),
             total_len,
+            "invalid single-disk ZIP EOCD",
         )
         .with_field("zip.eocd", FieldLocation::Tail)
         .into());
     }
+    let tail = record;
+    let eocd = 0;
     let total_entries = le_u16(&tail, eocd + 10).unwrap() as usize;
     let central_size = le_u32(&tail, eocd + 12).unwrap() as u64;
     let central_offset = le_u32(&tail, eocd + 16).unwrap() as u64;
@@ -1065,12 +1088,6 @@ fn find_signature(bytes: &[u8], signature: &[u8]) -> Option<usize> {
         .position(|window| window == signature)
 }
 
-fn find_last_signature(bytes: &[u8], signature: &[u8]) -> Option<usize> {
-    bytes
-        .windows(signature.len())
-        .rposition(|window| window == signature)
-}
-
 fn le_u16(bytes: &[u8], offset: usize) -> Option<u16> {
     Some(u16::from_le_bytes([
         *bytes.get(offset)?,
@@ -1161,7 +1178,7 @@ mod zip64_bounded_probe_tests {
     fn zip64_directory_location_defers_instead_of_reporting_missing_volume() {
         let data = stored_zip_with_eocd_offset(u32::MAX);
         let len = data.len() as u64;
-        let result = prepare_zip_stream(&mut std::io::Cursor::new(data), len);
+        let result = prepare_zip_stream(&mut std::io::Cursor::new(data), len, None);
         assert_eq!(status_of(result), "unknown_needs_final_verifier");
     }
 
@@ -1169,7 +1186,7 @@ mod zip64_bounded_probe_tests {
     fn ordinary_unencrypted_zip_is_still_not_required() {
         let data = stored_zip_with_eocd_offset(40);
         let len = data.len() as u64;
-        let result = prepare_zip_stream(&mut std::io::Cursor::new(data), len);
+        let result = prepare_zip_stream(&mut std::io::Cursor::new(data), len, None);
         assert_eq!(status_of(result), "not_required");
     }
 }

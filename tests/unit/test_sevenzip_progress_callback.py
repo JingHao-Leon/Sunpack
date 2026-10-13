@@ -39,3 +39,34 @@ def test_native_worker_progress_event_is_forwarded_to_task_callback(tmp_path):
     assert len(started) == 1
     assert int(started[0].get("completed_bytes") or 0) > 0
     assert events == [(task, event) for event in progress_events]
+
+
+def test_progress_tail_preserves_all_callbacks_and_total_count():
+    # The short real-worker case cannot detect dropped callbacks or a count
+    # incorrectly derived from a truncated tail. Exercise actual async delivery.
+    import asyncio
+
+    count = 512
+    class Worker:
+        worker_epoch = "history-test"
+        worker_path = "test.exe"
+        def take_stderr(self): return []
+        def is_alive(self): return True
+        async def submit(self, _payload, job_id, *, on_line, **_kwargs):
+            for index in range(count):
+                on_line("", {"type": "progress", "job_id": job_id,
+                             "event": "item_done", "item_index": index})
+            on_line("", {"type": "result", "job_id": job_id, "status": "ok"})
+            on_line("", {"type": "native_event", "job_id": job_id, "event": "job_finished"})
+    class Holder:
+        async def get_or_start(self, _startupinfo): return Worker()
+    runner = SevenZipRunner({}, shared_async_worker_holder=Holder())
+    indices = []
+    runner.progress_callback = lambda _task, event: indices.append(event["item_index"])
+    completed = asyncio.run(runner._submit_native_job_asyncio({"job_id": "history"}))
+    diagnostics = completed.worker_diagnostics
+    assert completed.returncode == 0
+    assert indices == list(range(count))
+    assert diagnostics["progress_event_count"] == count
+    assert len(diagnostics["progress_events"]) < count
+    assert diagnostics["last_progress_event"]["item_index"] == count - 1

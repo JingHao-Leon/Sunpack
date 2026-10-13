@@ -309,6 +309,7 @@ class ArchiveInputPlanningStage:
                 analysis["execution"] = execution_analysis
             selected_format = str(getattr(selected, "format", "") or "")
             analysis.update(_stream_execution_analysis(selected, 0))
+            analysis.update(_zip_password_analysis(selected, 0))
             updated = replace(
                 descriptor,
                 format_hint=selected_format or descriptor.format_hint,
@@ -406,6 +407,7 @@ class ArchiveInputPlanningStage:
             "segment_source": "analysis",
         }
         segment_analysis.update(_stream_execution_analysis(evidence, segment.start_offset))
+        segment_analysis.update(_zip_password_analysis(evidence, segment.start_offset))
         if evidence.details.get("password_required"):
             segment_analysis["password_required"] = True
         if len(parts) == 1:
@@ -479,7 +481,10 @@ class ArchiveInputPlanningStage:
         if len(parts) > 1 and int(segment.start_offset) <= 0:
             source_input = task.archive_input()
             if len(source_input.parts) > 1:
-                return source_input
+                return replace(source_input, analysis={
+                    **source_input.analysis,
+                    **_zip_password_analysis(evidence, segment.start_offset),
+                })
 
         # RAR volumes are independent containers and cannot become one concat
         # stream.  Header-password probes only need the real archive prefix in
@@ -607,6 +612,20 @@ def _discovery_confirmed(task: ArchiveTask) -> bool:
 
 def _strict_subrange(start: int, end: int | None, size: int) -> bool:
     return end is not None and 0 <= start < end <= size and (start > 0 or end < size)
+
+
+def _zip_password_analysis(evidence: ArchiveFormatEvidence | None, offset: int) -> dict[str, Any]:
+    if evidence is None or evidence.format != "zip":
+        return {}
+    details = evidence.details
+    candidates = details.get("candidate_details") or [details]
+    for candidate in candidates:
+        if not isinstance(candidate, dict) or candidate.get("archive_offset", 0) != offset:
+            continue
+        eocd = candidate.get("eocd_offset")
+        if isinstance(eocd, int) and eocd >= offset:
+            return {"zip_eocd_offset": eocd - offset}
+    return {}
 
 
 def _stream_execution_analysis(evidence: ArchiveFormatEvidence | None, offset: int) -> dict[str, Any]:

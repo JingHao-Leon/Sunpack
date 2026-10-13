@@ -383,3 +383,36 @@ def test_fast_job_recurses_before_slow_sibling_finishes(tmp_path, monkeypatch):
 
     assert nested_started.is_set()
     assert response.summary.success_count == 3
+
+
+def test_encrypted_comment_zip_in_nested_carriers_runs_for_both_origins(tmp_path):
+    # Verifier-only fixtures cannot catch discovery silently dropping a task.
+    # Combine nesting, a disguised carrier and both shared-engine origins.
+    import struct
+    from tests.unit.test_zip_password_encoding import _write_ansi_password_zip, PAYLOAD
+    seed = tmp_path / "seed.zip"
+    _write_ansi_password_zip(seed, password_bytes=b"comment-secret")
+    data = seed.read_bytes()
+    comment = b"ordinary PK\x05\x06 comment"
+    carrier = b"carrier prefix" + data[:-2] + struct.pack("<H", len(comment)) + comment + b"carrier suffix"
+    sources = []
+    for origin in ("foreground", "watch"):
+        source = tmp_path / f"{origin}.dat"
+        source.write_bytes(make_zip({"inner.jpg": carrier}))
+        sources.append((origin, source))
+    config = normalize_config(with_detection_pipeline({
+        "recursive_extract": "2", "user_passwords": ["wrong", "comment-secret"],
+        "builtin_passwords": [], "output": {"root": str(tmp_path / "out")},
+        "post_extract": {"archive_cleanup_mode": "k", "flatten_single_directory": False},
+    }))
+    async def run():
+        async with PipelineEngine(config) as engine:
+            return await asyncio.gather(*(
+                engine.run([str(source)], origin=origin, stdout=io.StringIO(), stderr=io.StringIO())
+                for origin, source in sources
+            ))
+    for response in asyncio.run(run()):
+        assert not response.summary.failed_tasks
+        assert response.summary.success_count == 2
+        leaf = next(item for item in response.summary.target_results if Path(item.input_path).name == "inner.jpg")
+        assert (Path(leaf.output_dir) / "secret.txt").read_bytes() == PAYLOAD

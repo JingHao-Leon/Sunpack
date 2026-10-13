@@ -1,4 +1,6 @@
 import subprocess
+from collections import deque
+from collections.abc import Iterable, Iterator
 from copy import deepcopy
 from typing import Any
 
@@ -11,6 +13,24 @@ from sunpack_native import (
 
 _STDIO_TAIL_LINES = 40
 _STDIO_TAIL_CHARS = 4000
+_PROGRESS_TAIL_EVENTS = 64
+
+
+class ProgressHistory:
+    """One job's total event count and bounded diagnostic tail."""
+
+    __slots__ = ("count", "_tail")
+
+    def __init__(self):
+        self.count = 0
+        self._tail: deque[dict[str, Any]] = deque(maxlen=_PROGRESS_TAIL_EVENTS)
+
+    def append(self, event: dict[str, Any]) -> None:
+        self.count += 1
+        self._tail.append(event)
+
+    def snapshot(self) -> list[dict[str, Any]]:
+        return list(self._tail)
 
 
 def attach_worker_diagnostics(
@@ -19,7 +39,7 @@ def attach_worker_diagnostics(
     request_payload: dict[str, Any] | None = None,
     process_failure: dict[str, Any] | None = None,
     result_payload: dict[str, Any] | None = None,
-    progress_events: list[dict[str, Any]] | None = None,
+    progress_events: ProgressHistory | Iterable[dict[str, Any]] | None = None,
 ) -> subprocess.CompletedProcess:
     completed.worker_diagnostics = build_worker_diagnostics(
         stdout=str(completed.stdout or ""),
@@ -48,20 +68,27 @@ def build_worker_diagnostics(
     request_payload: dict[str, Any] | None = None,
     process_failure: dict[str, Any] | None = None,
     result_payload: dict[str, Any] | None = None,
-    progress_events: list[dict[str, Any]] | None = None,
+    progress_events: ProgressHistory | Iterable[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    history = progress_events if isinstance(progress_events, ProgressHistory) else ProgressHistory()
+    result = result_payload or {}
     if result_payload is not None:
-        result = result_payload
-        parsed_progress_events = list(progress_events or [])
+        if not isinstance(progress_events, ProgressHistory):
+            for event in progress_events or ():
+                history.append(event)
     else:
-        events = _json_events(stdout)
-        result = next((event for event in reversed(events) if event.get("type") == "result"), {})
-        parsed_progress_events = [event for event in events if event.get("type") == "progress"]
+        for event in _json_events(stdout):
+            if event.get("type") == "result":
+                result = event
+            elif event.get("type") == "progress":
+                history.append(event)
+    parsed_progress_events = history.snapshot()
     diagnostics: dict[str, Any] = {
         "source": "sevenzip_worker",
         "returncode": returncode,
         "result": result,
         "progress_events": parsed_progress_events,
+        "progress_event_count": history.count,
         "last_progress_event": parsed_progress_events[-1] if parsed_progress_events else {},
         "process": {
             "args": list(args) if isinstance(args, (list, tuple)) else args,
@@ -105,13 +132,11 @@ def compact_success_worker_diagnostics(diagnostics: dict[str, Any]) -> None:
     result.get("diagnostics", {}).get("output_trace", {}).pop("native_items", None)
 
 
-def _json_events(text: str) -> list[dict[str, Any]]:
-    events: list[dict[str, Any]] = []
+def _json_events(text: str) -> Iterator[dict[str, Any]]:
     for line in (text or "").splitlines():
         payload = parse_worker_json_line(line)
         if payload:
-            events.append(payload)
-    return events
+            yield payload
 
 
 def native_worker_manifest(result: dict[str, Any]) -> NativeWorkerManifest | None:

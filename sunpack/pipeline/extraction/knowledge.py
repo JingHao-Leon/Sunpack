@@ -172,7 +172,7 @@ def _compact_native_diagnostics(native: dict[str, Any]) -> dict[str, Any]:
         output["last_progress_event"] = _compact_mapping(native["last_progress_event"], max_items=20)
     progress_events = native.get("progress_events") if isinstance(native.get("progress_events"), list) else []
     if progress_events:
-        output["progress_event_count"] = len(progress_events)
+        output["progress_event_count"] = int(native.get("progress_event_count", len(progress_events)))
         if isinstance(progress_events[-1], dict):
             output["last_progress_event"] = _compact_mapping(progress_events[-1], max_items=20)
     return output

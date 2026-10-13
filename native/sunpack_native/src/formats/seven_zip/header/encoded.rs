@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 struct SevenZipEncodedHeaderCoder {
     method_id: Vec<u8>,
     properties: Vec<u8>,
@@ -260,13 +262,13 @@ fn decode_seven_zip_output(
             .iter()
             .find(|(input, _)| *input == input_stream)
         {
-            inputs.push(decode_seven_zip_output(
+            inputs.push(Cow::Owned(decode_seven_zip_output(
                 *upstream_output,
                 packed_data,
                 folder,
                 password,
                 visiting,
-            )?);
+            )?));
         } else {
             let packed_index = folder
                 .packed_streams
@@ -276,7 +278,7 @@ fn decode_seven_zip_output(
             inputs.push(
                 packed_data
                     .get(packed_index)
-                    .cloned()
+                    .map(|data| Cow::Borrowed(data.as_slice()))
                     .ok_or_else(|| "encoded_header_pack_stream_missing".to_string())?,
             );
         }
@@ -306,11 +308,11 @@ fn decode_seven_zip_output(
     if inputs.len() != 1 {
         return Err("encoded_header_decoder_unsupported_multi_input_coder".to_string());
     }
-    decode_seven_zip_encoded_coder(&inputs[0], coder, password, unpack_size)
+    decode_seven_zip_encoded_coder(inputs.pop().unwrap(), coder, password, unpack_size)
 }
 
 fn decode_seven_zip_encoded_coder(
-    data: &[u8],
+    data: Cow<'_, [u8]>,
     coder: &SevenZipEncodedHeaderCoder,
     password: Option<&str>,
     unpack_size: u64,
@@ -321,7 +323,7 @@ fn decode_seven_zip_encoded_coder(
         return Err("encoded_header_decoder_unsupported_method:unpack_size_too_large".to_string());
     }
     if coder.method_id.as_slice() == EncoderMethod::ID_COPY {
-        return Ok(data.to_vec());
+        return Ok(data.into_owned());
     }
     if coder.method_id.as_slice() == EncoderMethod::ID_AES256_SHA256 {
         let mut decrypted = decrypt_seven_zip_aes256_sha256(data, &coder.properties, password)?;
@@ -346,7 +348,7 @@ fn decode_seven_zip_encoded_coder(
         }
         return Ok(decoded);
     }
-    let compressed = Cursor::new(data.to_vec());
+    let compressed = Cursor::new(data);
     let mut decoded = Vec::with_capacity(
         usize::try_from(unpack_size)
             .unwrap_or(0)
@@ -391,10 +393,16 @@ fn decode_seven_zip_encoded_coder(
                 "encoded_header_decoder_unsupported_method:dictionary_too_large".to_string(),
             );
         }
-        let mut reader = Lzma2Reader::new(compressed, dict_size, None);
+        let reader = Lzma2Reader::new(compressed, dict_size, None);
+        // Bound output like 7z's outSize/finishMode. One extra byte detects
+        // excess output and still checks the end marker for an exact-size stream.
         reader
+            .take(unpack_size + 1)
             .read_to_end(&mut decoded)
             .map_err(|err| format!("encoded_header_payload_crc_bad:{err}"))?;
+        if decoded.len() as u64 != unpack_size {
+            return Err("encoded_header_payload_crc_bad:lzma2_unpack_size".to_string());
+        }
         return Ok(decoded);
     }
     macro_rules! decode_bcj {
@@ -447,7 +455,7 @@ fn decode_seven_zip_encoded_coder(
 }
 
 fn decrypt_seven_zip_aes256_sha256(
-    data: &[u8],
+    data: Cow<'_, [u8]>,
     properties: &[u8],
     password: Option<&str>,
 ) -> Result<Vec<u8>, String> {
@@ -459,7 +467,7 @@ fn decrypt_seven_zip_aes256_sha256(
     if data.len() % 16 != 0 {
         return Err("encoded_header_payload_crc_bad:aes_block_size".to_string());
     }
-    let mut output = data.to_vec();
+    let mut output = data.into_owned();
     let decrypted_len = Aes256CbcDec::new(&key.into(), &iv.into())
         .decrypt_padded::<NoPadding>(&mut output)
         .map_err(|_| "encoded_header_decode_password_rejected".to_string())?
@@ -711,6 +719,29 @@ mod encoded_folder_graph_tests {
     use super::*;
 
     #[test]
+    fn lzma2_encoded_coder_requires_declared_size_and_end_marker() {
+        // Raw LZMA2 encoding of "test" repeated 128 times. Existing folder
+        // graph tests do not exercise size lies or truncated LZMA2 streams.
+        let packed = [
+            224, 1, 255, 0, 12, 93, 0, 58, 25, 74, 206, 43, 15, 35, 137, 235, 206, 128, 0, 0,
+        ];
+        let coder = SevenZipEncodedHeaderCoder {
+            method_id: EncoderMethod::ID_LZMA2.to_vec(),
+            properties: vec![0],
+            num_in_streams: 1,
+            num_out_streams: 1,
+        };
+        let decode = |data: &[u8], size| {
+            decode_seven_zip_encoded_coder(Cow::Borrowed(data), &coder, None, size)
+        };
+        assert_eq!(decode(&packed, 512).unwrap(), b"test".repeat(128));
+        for wrong_size in [0, 1, 511, 513] {
+            assert!(decode(&packed, wrong_size).is_err());
+        }
+        assert!(decode(&packed[..packed.len() - 1], 512).is_err());
+    }
+
+    #[test]
     fn lz4_encoded_coder_checks_size_properties_and_checksum() {
         let mut bytes = vec![0x04, 0x22, 0x4d, 0x18, 0x64, 0x40];
         bytes.push((crate::formats::lz4::xxh32(&bytes[4..]) >> 8) as u8);
@@ -725,16 +756,22 @@ mod encoded_folder_graph_tests {
             num_out_streams: 1,
         };
         assert_eq!(
-            decode_seven_zip_encoded_coder(&bytes, &coder, None, 4).unwrap(),
+            decode_seven_zip_encoded_coder(Cow::Borrowed(&bytes), &coder, None, 4).unwrap(),
             b"test"
         );
         for wrong_size in [0, 3, 5, 64 * 1024 * 1024 + 1] {
-            assert!(decode_seven_zip_encoded_coder(&bytes, &coder, None, wrong_size).is_err());
+            assert!(decode_seven_zip_encoded_coder(
+                Cow::Borrowed(&bytes),
+                &coder,
+                None,
+                wrong_size
+            )
+            .is_err());
         }
         *bytes.last_mut().unwrap() ^= 1;
-        assert!(decode_seven_zip_encoded_coder(&bytes, &coder, None, 4).is_err());
+        assert!(decode_seven_zip_encoded_coder(Cow::Borrowed(&bytes), &coder, None, 4).is_err());
         coder.properties.clear();
-        assert!(decode_seven_zip_encoded_coder(&bytes, &coder, None, 4).is_err());
+        assert!(decode_seven_zip_encoded_coder(Cow::Borrowed(&bytes), &coder, None, 4).is_err());
     }
 
     fn reference_aes_key(properties: &[u8], password: &[u8]) -> [u8; 32] {

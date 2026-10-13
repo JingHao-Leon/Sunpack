@@ -1,4 +1,5 @@
 from __future__ import annotations
+from dataclasses import replace
 
 from sunpack.core.contracts.archive_input import (
     ArchiveInputDescriptor,
@@ -11,14 +12,16 @@ from sunpack.pipeline.discovery.relations.internal.models import CandidateGroup
 def archive_input_for_group(group: CandidateGroup) -> ArchiveInputDescriptor | None:
     metadata = dict(group.head_metadata or {})
     format_hint = str(metadata.get("format") or "").lower().lstrip(".")
+    zip_eocd = metadata.get("zip_eocd_offset") if format_hint == "zip" else None
 
     if group.split_volumes:
-        return ArchiveInputDescriptor.from_split_volumes(
+        descriptor = ArchiveInputDescriptor.from_split_volumes(
             archive_path=group.entry_path,
             volumes=group.split_volumes,
             format_hint=format_hint,
             logical_name=group.logical_name,
         )
+        return replace(descriptor, analysis={"zip_eocd_offset": zip_eocd}) if isinstance(zip_eocd, int) else descriptor
 
     if not metadata.get("relation_confirmed"):
         return None
@@ -47,12 +50,16 @@ def archive_input_for_group(group: CandidateGroup) -> ArchiveInputDescriptor | N
                     role="main",
                 )
             ],
-            analysis={"segment_source": "relations"},
+            analysis={"segment_source": "relations", **(
+                {"zip_eocd_offset": zip_eocd - structure_offset}
+                if isinstance(zip_eocd, int) and zip_eocd >= structure_offset else {}
+            )},
         )
 
-    return ArchiveInputDescriptor.from_parts(
+    descriptor = ArchiveInputDescriptor.from_parts(
         archive_path=group.entry_path,
         part_paths=list(group.input_paths or [group.entry_path]),
         format_hint=format_hint,
         logical_name=group.logical_name,
     )
+    return replace(descriptor, analysis={"zip_eocd_offset": zip_eocd}) if isinstance(zip_eocd, int) else descriptor

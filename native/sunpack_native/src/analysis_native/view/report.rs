@@ -891,10 +891,12 @@ impl<'a, 'py> ReportContext<'a, 'py> {
             {
                 continue;
             }
-            evidences.push(match zip_local_header_recovery(&native, &hits, &mut earliest_local)? {
-                Some(recovered) => recovered,
-                None => zip_from_native(native, &hits, self.view.reader.len())?,
-            });
+            evidences.push(
+                match zip_local_header_recovery(&native, &hits, &mut earliest_local)? {
+                    Some(recovered) => recovered,
+                    None => zip_from_native(native, &hits, self.view.reader.len())?,
+                },
+            );
         }
         let known_starts = evidences
             .iter()
@@ -1435,6 +1437,10 @@ fn zip_from_embedded<'py>(py: Python<'py>, item: &Bound<'py, PyDict>) -> PyResul
     let details = PyDict::new(py);
     details.set_item("source", "embedded_scan")?;
     details.set_item("validation", &validation)?;
+    details.set_item("archive_offset", start)?;
+    if let Some(offset) = item.get_item("eocd_offset")? {
+        details.set_item("eocd_offset", offset)?;
+    }
     details.set_item("candidate_kind", str_of(item, "candidate_kind")?)?;
     details.set_item("boundary_kind", &boundary_kind)?;
     details.set_item(
@@ -1990,8 +1996,12 @@ pub(crate) fn confirm_format_identity(py: Python<'_>, path: &str, format: &str) 
 pub(crate) fn confirm_format_identity_native(path: &str, format: &str) -> bool {
     match format {
         "enc" => {
-            let Ok(reader) = ManagedReader::open(path) else { return false; };
-            let Ok(header) = reader.read_direct_at(0, 40) else { return false; };
+            let Ok(reader) = ManagedReader::open(path) else {
+                return false;
+            };
+            let Ok(header) = reader.read_direct_at(0, 40) else {
+                return false;
+            };
             sunpack_enc::Header::parse(&header, reader.len()).is_ok()
         }
         "tar" => {

@@ -1,6 +1,7 @@
 import heapq
 import os
 import re
+from collections import OrderedDict
 from collections.abc import Container, MutableSet
 
 from sunpack.core.contracts.tasks import ArchiveTask
@@ -83,23 +84,38 @@ def resolve_output_volume_key(path: str) -> str:
 
 
 class _NumberedPaths:
+    _RELEASED_HISTORY_LIMIT = 256
+
     def __init__(self, start: int):
         self.next_index = start
         self.available: list[int] = []
+        self.observed_slots: set[str] = set()
 
     def take(self) -> int:
-        if self.available:
+        if self.available and self.available[0] < self.next_index:
             return heapq.heappop(self.available)
         index = self.next_index
         self.next_index += 1
+        if self.available and self.available[0] == index:
+            heapq.heappop(self.available)
         return index
+
+    def release(self, index: int) -> None:
+        if len(self.available) >= self._RELEASED_HISTORY_LIMIT:
+            # Rewind the bounded search hint rather than losing reusable names.
+            self.next_index = min(self.next_index, self.available[0], index)
+            self.available.clear()
+        else:
+            heapq.heappush(self.available, index)
 
 
 class OutputPathAllocator:
     """Cache numbered searches; the caller serializes allocation and release."""
 
+    _FAMILY_HISTORY_LIMIT = 256
+
     def __init__(self):
-        self._numbers: dict[tuple[str, int], _NumberedPaths] = {}
+        self._numbers: OrderedDict[tuple[str, int], _NumberedPaths] = OrderedDict()
         # Different starting names can visit the same numbered alternative.
         self._slots: dict[str, dict[_NumberedPaths, int]] = {}
 
@@ -126,6 +142,18 @@ class OutputPathAllocator:
         numbers = self._numbers.get(family)
         if numbers is None:
             numbers = self._numbers[family] = _NumberedPaths(start)
+            if len(self._numbers) > self._FAMILY_HISTORY_LIMIT:
+                _, evicted = self._numbers.popitem(last=False)
+                # Eviction retains actual reservations, but drops search-only
+                # references to other owners' paths.
+                for observed_key in evicted.observed_slots:
+                    slots = self._slots[observed_key]
+                    slots.pop(evicted)
+                    if not slots:
+                        self._slots.pop(observed_key)
+                evicted.observed_slots.clear()
+        else:
+            self._numbers.move_to_end(family)
 
         local_slots: list[int] = []
         try:
@@ -138,16 +166,20 @@ class OutputPathAllocator:
                 if key not in reserved and key in local_reserved:
                     local_slots.append(index)
                     continue
-                self._slots.setdefault(key, {})[numbers] = index
-                if key not in reserved and not os.path.exists(candidate):
+                if key in reserved:
+                    self._slots.setdefault(key, {})[numbers] = index
+                    numbers.observed_slots.add(key)
+                elif not os.path.exists(candidate):
+                    self._slots.setdefault(key, {})[numbers] = index
                     return candidate
         finally:
             for index in local_slots:
-                heapq.heappush(numbers.available, index)
+                numbers.release(index)
 
     def release(self, path_key: str) -> None:
         for numbers, index in self._slots.pop(path_key, {}).items():
-            heapq.heappush(numbers.available, index)
+            numbers.observed_slots.discard(path_key)
+            numbers.release(index)
 
     def clear_cache(self) -> dict[str, int]:
         counts = {"families": len(self._numbers), "slots": len(self._slots)}

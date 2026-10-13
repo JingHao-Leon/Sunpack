@@ -17,6 +17,7 @@ from sunpack_native import NativeWorkerResultAccumulator, parse_worker_transport
 from sunpack.core.contracts.archive_input import ArchiveInputDescriptor
 from sunpack.core.contracts.tasks import ArchiveTask
 from sunpack.pipeline.extraction.internal.sevenzip.worker_diagnostics import (
+    ProgressHistory,
     attach_worker_diagnostics,
     parse_worker_json_line,
 )
@@ -1154,7 +1155,7 @@ class SevenZipRunner:
             prepared_job["worker_epoch"] = worker.worker_epoch
             stdout_lines: list[str] = []
             stderr_lines: list[str] = []
-            progress_events: list[dict[str, Any]] = []
+            progress_events = ProgressHistory()
             pending_result: subprocess.CompletedProcess | None = None
             pending_payload: dict[str, Any] | None = None
             cancelled = False
@@ -1344,7 +1345,7 @@ class SevenZipRunner:
             prepared_job["worker_epoch"] = worker.worker_epoch
             stdout_lines: list[str] = []
             stderr_lines: list[str] = []
-            progress_events: list[dict[str, Any]] = []
+            progress_events = ProgressHistory()
             pending_result: subprocess.CompletedProcess | None = None
             pending_result_payload: dict[str, Any] | None = None
             backpressure_retries = 0
@@ -1550,7 +1551,7 @@ class SevenZipRunner:
         request_payload: dict | None = None,
         process_failure: dict | None = None,
         result_payload: dict | None = None,
-        progress_events: list[dict] | None = None,
+        progress_events: ProgressHistory | None = None,
     ) -> subprocess.CompletedProcess:
         return attach_worker_diagnostics(
             subprocess.CompletedProcess(args, returncode, stdout or "", stderr or ""),

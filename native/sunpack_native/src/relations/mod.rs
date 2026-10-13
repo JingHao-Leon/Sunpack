@@ -928,6 +928,22 @@ fn validated_proposal_to_dict(
         metadata.set_item("relation_confirmed", true)?;
         metadata.unbind()
     };
+    if proposal.format == "zip" {
+        let mut logical_start = 0u64;
+        for (path, _, _, _, _) in &proposal.volumes {
+            let Some(anchor) = validation.anchors.get(&path.to_ascii_lowercase()) else {
+                break;
+            };
+            let start = anchor.structure_offset.unwrap_or(0);
+            if let Some(eocd) = anchor.zip_eocd_offset.filter(|eocd| *eocd >= start) {
+                metadata
+                    .bind(py)
+                    .set_item("zip_eocd_offset", logical_start + eocd - start)?;
+                break;
+            }
+            logical_start = logical_start.saturating_add(anchor.size.saturating_sub(start));
+        }
+    }
     dict.set_item("head_metadata", metadata)?;
     dict.set_item("companion_paths", &proposal.companions)?;
     dict.set_item("carrier_path", &carrier)?;
@@ -1237,6 +1253,7 @@ pub(crate) fn volume_anchor_to_dict(py: Python<'_>, anchor: &VolumeAnchor) -> Py
     dict.set_item("internal_volume_number", anchor.internal_volume_number)?;
     dict.set_item("structure_offset", anchor.structure_offset)?;
     dict.set_item("expected_logical_size", anchor.expected_logical_size)?;
+    dict.set_item("zip_eocd_offset", anchor.zip_eocd_offset)?;
     dict.set_item(
         "continuation_from_previous",
         anchor.continuation_from_previous,

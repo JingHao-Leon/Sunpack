@@ -118,6 +118,7 @@ struct EmbeddedCandidate {
     boundary_kind: &'static str,
     extractable: bool,
     lz4_index: Option<Box<crate::formats::lz4::Index>>,
+    zip_eocd_offset: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,6 +216,9 @@ impl NativeScanResult {
             row.set_item("candidate_kind", candidate.candidate_kind)?;
             row.set_item("boundary_kind", candidate.boundary_kind)?;
             row.set_item("extractable", candidate.extractable)?;
+            if let Some(offset) = candidate.zip_eocd_offset {
+                row.set_item("eocd_offset", offset)?;
+            }
             if let Some(index) = &candidate.lz4_index {
                 let facts = index.to_dict(py, self.file_size)?;
                 row.set_item("stream_plan", facts.get_item("stream_plan")?)?;
@@ -925,7 +929,7 @@ fn validate_zip_eocd(
     )? {
         return Ok(None);
     }
-    Ok(Some(candidate(
+    let mut resolved = candidate(
         "zip",
         archive_offset,
         Some(end),
@@ -935,7 +939,9 @@ fn validate_zip_eocd(
         } else {
             "eocd_geometry_and_first_local_link"
         },
-    )))
+    );
+    resolved.zip_eocd_offset = Some(eocd_offset);
+    Ok(Some(resolved))
 }
 
 struct Zip64EndRecords {
@@ -1793,6 +1799,7 @@ fn candidate(
         boundary_kind: if exact { "exact" } else { "unresolved" },
         extractable: exact,
         lz4_index: None,
+        zip_eocd_offset: None,
     }
 }
 

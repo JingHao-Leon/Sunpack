@@ -743,13 +743,20 @@ impl NativeArchiveSession {
         crate::password::enc::enc_fast_verify_passwords_with_reader(py, &self.reader, passwords)
     }
 
+    #[pyo3(signature = (passwords, eocd_offset=None))]
     fn zip_fast_verify_passwords(
         &self,
         py: Python<'_>,
         passwords: &Bound<'_, PyList>,
+        eocd_offset: Option<u64>,
     ) -> PyResult<Py<PyAny>> {
         self.ensure_open()?;
-        crate::password::zip::zip_fast_verify_passwords(py, self.path.clone(), passwords)
+        crate::password::zip::zip_fast_verify_passwords_with_reader(
+            py,
+            &self.reader,
+            passwords,
+            eocd_offset,
+        )
     }
 
     fn seven_zip_fast_verify_passwords(

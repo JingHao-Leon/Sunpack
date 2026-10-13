@@ -1,4 +1,4 @@
-fn find_eocd_record(data: &[u8], allow_trailing_junk: bool) -> Option<EocdInfo> {
+pub(crate) fn find_eocd_record(data: &[u8], allow_trailing_junk: bool) -> Option<EocdInfo> {
     let mut pos = data
         .windows(EOCD_SIG.len())
         .rposition(|window| window == EOCD_SIG)?;
@@ -53,7 +53,10 @@ struct ResolvedCentralDirectory {
 /// EOCD.  When the naive `directory_end - cd_size` position does not carry a
 /// central-directory signature but the declared offset does, the declared
 /// offset wins (SFX/junk tolerance), mirroring inspect.rs.
-fn resolve_central_directory(data: &[u8], eocd: &EocdInfo) -> Result<ResolvedCentralDirectory, &'static str> {
+fn resolve_central_directory(
+    data: &[u8],
+    eocd: &EocdInfo,
+) -> Result<ResolvedCentralDirectory, &'static str> {
     let mut declared_offset = u64::from(eocd.cd_offset);
     let mut declared_size = u64::from(eocd.cd_size);
     let mut total_entries = u64::from(eocd.total_entries);
@@ -72,10 +75,10 @@ fn resolve_central_directory(data: &[u8], eocd: &EocdInfo) -> Result<ResolvedCen
     }
     let naive = usize::try_from(directory_end.saturating_sub(declared_size))
         .map_err(|_| "central_directory_size_out_of_range")?;
-    let declared = usize::try_from(declared_offset)
-        .map_err(|_| "central_directory_offset_out_of_range")?;
-    let declared_size = usize::try_from(declared_size)
-        .map_err(|_| "central_directory_size_out_of_range")?;
+    let declared =
+        usize::try_from(declared_offset).map_err(|_| "central_directory_offset_out_of_range")?;
+    let declared_size =
+        usize::try_from(declared_size).map_err(|_| "central_directory_size_out_of_range")?;
     let physical_offset = if !zip_has_signature_at(data, naive, CD_SIG)
         && zip_has_signature_at(data, declared, CD_SIG)
     {
@@ -83,7 +86,9 @@ fn resolve_central_directory(data: &[u8], eocd: &EocdInfo) -> Result<ResolvedCen
     } else {
         naive
     };
-    let end = physical_offset.saturating_add(declared_size).min(data.len());
+    let end = physical_offset
+        .saturating_add(declared_size)
+        .min(data.len());
     let archive_offset = physical_offset.saturating_sub(declared);
     Ok(ResolvedCentralDirectory {
         physical_offset,
@@ -162,10 +167,7 @@ fn walk_central_directory_range(data: &[u8], offset: usize, expected_end: Option
             break;
         }
     }
-    CdWalk {
-        end: pos,
-        count,
-    }
+    CdWalk { end: pos, count }
 }
 
 fn parse_central_directory_entries(
@@ -195,4 +197,3 @@ fn parse_central_directory_entries(
     }
     entries
 }
-

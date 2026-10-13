@@ -2,8 +2,9 @@
 use crate::io::iocp;
 use crate::io::reader::{CachedBytes, ManagedReader};
 use crate::scan::compression_stream::{
-    resolve_xz_stream_start, validate_bzip2_structure_observed, validate_gzip_structure_observed,
-    validate_zstd_structure_observed, ValidationError, ValidationResult,
+    parse_xz_footer, resolve_xz_stream_start, validate_bzip2_structure_observed,
+    validate_gzip_structure_observed, validate_zstd_structure_observed, ValidationError,
+    ValidationResult,
 };
 use aho_corasick::{packed, AhoCorasick};
 use crc32fast::hash as crc32;
@@ -103,7 +104,6 @@ const DEFAULT_IOCP_CHUNK_SIZE: usize = 2 * 1024 * 1024;
 const DEFAULT_IOCP_BUFFERS: usize = 2;
 const DEFAULT_IOCP_WORKERS: usize = 4;
 const MAX_ARCHIVE_METADATA_RECORDS: usize = 1_000_000;
-const MAX_VALIDATION_RAW_HITS: usize = 1_000_000;
 #[cfg(test)]
 const TEST_IOCP_CHUNK_SIZE: usize = 1024 * 1024;
 
@@ -122,9 +122,32 @@ struct EmbeddedCandidate {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RawHit {
-    hit_name: &'static str,
-    kind: &'static str,
     offset: u64,
+    pattern: u8,
+    rejected: bool,
+}
+
+impl RawHit {
+    fn hit_name(&self) -> &'static str {
+        PATTERNS
+            .get(self.pattern as usize)
+            .map_or("xz_footer", |pattern| pattern.1)
+    }
+
+    fn kind(&self) -> &'static str {
+        PATTERNS
+            .get(self.pattern as usize)
+            .map_or("xz_footer", |pattern| pattern.2)
+    }
+
+    fn format(&self) -> &'static str {
+        match self.kind() {
+            "zip_eocd" => "zip",
+            "rar4" | "rar5" => "rar",
+            "lz4_skippable" => "lz4",
+            kind => kind,
+        }
+    }
 }
 
 pub(crate) struct NativeScanResult {
@@ -158,12 +181,20 @@ impl NativeScanResult {
         result.set_item("raw_hit_count", self.raw_hit_count)?;
         result.set_item("budget_exhausted", self.budget_exhausted)?;
         let hit_rows = PyList::empty(py);
-        for hit in self.raw_hits {
+        // Project only signature evidence for validated roots. Noise and
+        // signatures owned by an outer archive never need Python objects.
+        for hit in self.raw_hits.iter().filter(|hit| {
+            self.candidates
+                .binary_search_by_key(&(hit.offset, hit.format()), |candidate| {
+                    (candidate.offset, candidate.format)
+                })
+                .is_ok()
+        }) {
             let row = PyDict::new(py);
-            row.set_item("name", hit.hit_name)?;
+            row.set_item("name", hit.hit_name())?;
             row.set_item(
                 "offset",
-                if hit.kind == "tar" {
+                if hit.kind() == "tar" {
                     hit.offset + 257
                 } else {
                     hit.offset
@@ -311,25 +342,18 @@ fn scan_embedded_archives_native_with_iocp(
     };
     let mut xz_footer_ends = raw_hits
         .iter()
-        .filter(|hit| hit.kind == "xz_footer")
+        .filter(|hit| hit.kind() == "xz_footer")
         .map(|hit| hit.offset + XZ_FOOTER_MAGIC.len() as u64)
         .collect::<Vec<_>>();
     xz_footer_ends.sort_unstable();
-    raw_hits.retain(|hit| hit.kind != "xz_footer");
-    raw_hits.sort_by_key(|hit| (hit.offset, hit.hit_name));
-    let raw_hit_count = raw_hits.len();
-    if raw_hit_count > MAX_VALIDATION_RAW_HITS {
-        return Ok(NativeScanResult {
-            file_size,
-            raw_hits: Vec::new(),
-            candidates: Vec::new(),
-            logical_resolution_complete: false,
-            raw_hit_count,
-            budget_exhausted: true,
-            scan_read_bytes,
-            scan_read_operations,
-        });
-    }
+    let raw_hit_count = raw_hits
+        .iter()
+        .filter(|hit| hit.kind() != "xz_footer")
+        .count();
+    raw_hits.retain(|hit| hit.kind() != "xz_footer" && !hit.rejected);
+    // Release noisy scan storage before walking structures or retaining a page.
+    raw_hits.shrink_to_fit();
+    raw_hits.sort_unstable_by_key(|hit| (hit.offset, hit.hit_name()));
 
     // Structural facts survive in the result; transient validation windows
     // share this reader's generation/request state, not the global block cache.
@@ -367,6 +391,7 @@ fn embedded_overlap() -> usize {
         .map(|(magic, _, _)| magic.len())
         .max()
         .unwrap_or(1)
+        .max(12) // XZ footer CRC/flags precede its two-byte marker.
         .saturating_sub(1)
 }
 
@@ -384,7 +409,7 @@ fn validate_raw_hits(
     };
     let zip_eocd_hits = raw_hits
         .iter()
-        .filter(|hit| hit.kind == "zip_eocd")
+        .filter(|hit| hit.kind() == "zip_eocd")
         .collect::<Vec<_>>();
     let mut candidates = zip_eocd_hits
         .par_iter()
@@ -392,7 +417,7 @@ fn validate_raw_hits(
             validate_candidate(
                 reader,
                 file_size,
-                hit.kind,
+                hit.kind(),
                 hit.offset,
                 &mut Default::default(),
             )
@@ -416,7 +441,7 @@ fn validate_raw_hits(
 
     let mut range_index = 0usize;
     let mut covered_until = 0u64;
-    for hit in raw_hits.iter().filter(|hit| hit.kind != "zip_eocd") {
+    for hit in raw_hits.iter().filter(|hit| hit.kind() != "zip_eocd") {
         while range_index < seeded_ranges.len() && seeded_ranges[range_index].0 <= hit.offset {
             covered_until = covered_until.max(seeded_ranges[range_index].1);
             range_index += 1;
@@ -425,10 +450,10 @@ fn validate_raw_hits(
             continue;
         }
 
-        let resolved = if hit.kind == "xz" {
+        let resolved = if hit.kind() == "xz" {
             validate_xz(reader, file_size, hit.offset, &mut xz_footers)?
         } else {
-            let suffix_index = match hit.kind {
+            let suffix_index = match hit.kind() {
                 "gzip" => 0,
                 "bzip2" => 1,
                 "zstd" => 2,
@@ -438,7 +463,7 @@ fn validate_raw_hits(
             validate_candidate(
                 reader,
                 file_size,
-                hit.kind,
+                hit.kind(),
                 hit.offset,
                 &mut suffixes[suffix_index],
             )?
@@ -525,6 +550,7 @@ fn scan_sample_packed(sample: &[u8], carry_len: usize, base_offset: u64) -> Vec<
             let pattern = matched.pattern().as_usize();
             record_raw_hit(
                 &mut hits,
+                sample,
                 carry_len,
                 base_offset,
                 pattern,
@@ -540,6 +566,7 @@ fn scan_sample_packed(sample: &[u8], carry_len: usize, base_offset: u64) -> Vec<
                 if sample.get(begin..begin + magic.len()) == Some(magic) {
                     record_raw_hit(
                         &mut hits,
+                        sample,
                         carry_len,
                         base_offset,
                         next,
@@ -553,6 +580,7 @@ fn scan_sample_packed(sample: &[u8], carry_len: usize, base_offset: u64) -> Vec<
         for matched in embedded_matcher().find_overlapping_iter(sample) {
             record_raw_hit(
                 &mut hits,
+                sample,
                 carry_len,
                 base_offset,
                 matched.pattern().as_usize(),
@@ -562,14 +590,7 @@ fn scan_sample_packed(sample: &[u8], carry_len: usize, base_offset: u64) -> Vec<
         }
     }
     for start in memmem::find_iter(sample, XZ_FOOTER_MAGIC) {
-        let end = start + XZ_FOOTER_MAGIC.len();
-        if end > carry_len {
-            hits.push(RawHit {
-                hit_name: "xz_footer",
-                kind: "xz_footer",
-                offset: base_offset + start as u64,
-            });
-        }
+        record_xz_footer(&mut hits, sample, start, carry_len, base_offset);
     }
     hits
 }
@@ -650,15 +671,7 @@ fn scan_sample_candidate(
 ) {
     let first = sample[start];
     if first == XZ_FOOTER_MAGIC[0] {
-        if sample.get(start..start + XZ_FOOTER_MAGIC.len()) == Some(XZ_FOOTER_MAGIC)
-            && start + XZ_FOOTER_MAGIC.len() > carry_len
-        {
-            hits.push(RawHit {
-                hit_name: "xz_footer",
-                kind: "xz_footer",
-                offset: base_offset + start as u64,
-            });
-        }
+        record_xz_footer(hits, sample, start, carry_len, base_offset);
         return;
     }
     // Direct dispatch keeps dense rejected prefixes cheap. A longer generic
@@ -670,6 +683,7 @@ fn scan_sample_candidate(
                 if sample.get(start..start + magic.len()) == Some(magic) {
                     record_raw_hit(
                         hits,
+                        sample,
                         carry_len,
                         base_offset,
                         $index,
@@ -705,8 +719,34 @@ fn scan_sample_candidate(
     }
 }
 
+fn record_xz_footer(
+    hits: &mut Vec<RawHit>,
+    sample: &[u8],
+    start: usize,
+    carry_len: usize,
+    base_offset: u64,
+) {
+    let end = start + XZ_FOOTER_MAGIC.len();
+    if end <= carry_len || start < 10 {
+        return;
+    }
+    let Some(footer) = sample.get(start - 10..end) else {
+        return;
+    };
+    // Reuse the canonical footer parser against the bytes already in the IOCP
+    // buffer. Invalid two-byte markers require neither storage nor later I/O.
+    if parse_xz_footer(footer, base_offset + end as u64).is_ok() {
+        hits.push(RawHit {
+            offset: base_offset + start as u64,
+            pattern: PATTERNS.len() as u8,
+            rejected: false,
+        });
+    }
+}
+
 fn record_raw_hit(
     hits: &mut Vec<RawHit>,
+    sample: &[u8],
     carry_len: usize,
     base_offset: u64,
     pattern: usize,
@@ -719,7 +759,7 @@ fn record_raw_hit(
     if end <= carry_len {
         return;
     }
-    let (_, hit_name, kind) = PATTERNS[pattern];
+    let (_, _, kind) = PATTERNS[pattern];
     let absolute = base_offset + start as u64;
     let candidate_offset = if kind == "lz4_skippable" {
         let Some(value) = absolute.checked_sub(1) else {
@@ -735,9 +775,14 @@ fn record_raw_hit(
         absolute
     };
     hits.push(RawHit {
-        hit_name,
-        kind,
         offset: candidate_offset,
+        pattern: pattern as u8,
+        // When the fixed header crosses a chunk boundary, defer to the normal
+        // validator. Otherwise reuse its predicate without another file read.
+        rejected: pattern == 0
+            && sample
+                .get(start..start + 30)
+                .is_some_and(|header| !zip_local_fixed_plausible(header)),
     });
 }
 
@@ -1058,7 +1103,6 @@ fn validate_zip(
     if header.len() < 30 || &header[..4] != ZIP_LOCAL {
         return Ok(None);
     }
-    let version = u16::from_le_bytes([header[4], header[5]]);
     let flags = u16::from_le_bytes([header[6], header[7]]);
     let compressed_32 = u32::from_le_bytes(header[18..22].try_into().unwrap());
     let uncompressed_32 = u32::from_le_bytes(header[22..26].try_into().unwrap());
@@ -1068,7 +1112,7 @@ fn validate_zip(
         .saturating_add(30)
         .saturating_add(name_len)
         .saturating_add(extra_len);
-    if version > 100 || flags & 0xc000 != 0 || name_len == 0 || header_end > size {
+    if !zip_local_fixed_plausible(&header) || header_end > size {
         return Ok(None);
     }
     let mut compressed_size = compressed_32 as u64;
@@ -1118,6 +1162,13 @@ fn validate_zip(
         return Ok(None);
     }
     Ok(Some(candidate("zip", offset, None, confidence, validation)))
+}
+
+fn zip_local_fixed_plausible(header: &[u8]) -> bool {
+    let version = u16::from_le_bytes([header[4], header[5]]);
+    let flags = u16::from_le_bytes([header[6], header[7]]);
+    let name_len = u16::from_le_bytes([header[26], header[27]]);
+    version <= 100 && flags & 0xc000 == 0 && name_len != 0
 }
 
 fn validate_seven_zip(
@@ -1825,12 +1876,12 @@ mod tests {
         let mut hits = scan_sample(&data, 0, 0);
         let mut ends = hits
             .iter()
-            .filter(|hit| hit.kind == "xz_footer")
+            .filter(|hit| hit.kind() == "xz_footer")
             .map(|hit| hit.offset + 2)
             .collect::<Vec<_>>();
         ends.sort_unstable();
-        hits.retain(|hit| hit.kind != "xz_footer");
-        hits.sort_by_key(|hit| hit.offset);
+        hits.retain(|hit| hit.kind() != "xz_footer");
+        hits.sort_unstable_by_key(|hit| hit.offset);
         let source = ManagedReader::from_bytes(data, ReaderConfig::default());
         let candidates = validate_raw_hits(&source, source.len(), &hits, &ends).unwrap();
         assert_eq!(
@@ -1850,7 +1901,7 @@ mod tests {
         let hits = scan_sample(&data, 0, 0);
         let mut ends = hits
             .iter()
-            .filter(|hit| hit.kind == "xz_footer")
+            .filter(|hit| hit.kind() == "xz_footer")
             .map(|hit| hit.offset + 2)
             .collect::<Vec<_>>();
         ends.sort_unstable();
@@ -1899,12 +1950,12 @@ mod tests {
         let mut hits = scan_sample(&data, 0, 0);
         let mut ends = hits
             .iter()
-            .filter(|hit| hit.kind == "xz_footer")
+            .filter(|hit| hit.kind() == "xz_footer")
             .map(|hit| hit.offset + 2)
             .collect::<Vec<_>>();
         ends.sort_unstable();
-        hits.retain(|hit| hit.kind != "xz_footer");
-        hits.sort_by_key(|hit| hit.offset);
+        hits.retain(|hit| hit.kind() != "xz_footer");
+        hits.sort_unstable_by_key(|hit| hit.offset);
         let source = ManagedReader::from_bytes(
             data,
             ReaderConfig {
@@ -1973,7 +2024,8 @@ mod tests {
     fn reference_raw_hits(data: &[u8]) -> Vec<RawHit> {
         let mut hits = Vec::new();
         for matched in embedded_matcher().find_overlapping_iter(data) {
-            let (_, hit_name, kind) = PATTERNS[matched.pattern().as_usize()];
+            let pattern = matched.pattern().as_usize();
+            let (_, _, kind) = PATTERNS[pattern];
             let absolute = matched.start() as u64;
             let candidate_offset = if kind == "lz4_skippable" {
                 let Some(value) = absolute.checked_sub(1) else {
@@ -1989,19 +2041,22 @@ mod tests {
                 absolute
             };
             hits.push(RawHit {
-                hit_name,
-                kind,
                 offset: candidate_offset,
+                pattern: pattern as u8,
+                rejected: pattern == 0
+                    && data
+                        .get(matched.start()..matched.start() + 30)
+                        .is_some_and(|header| !zip_local_fixed_plausible(header)),
             });
         }
-        hits.sort_by_key(|hit| (hit.offset, hit.hit_name));
+        hits.sort_unstable_by_key(|hit| (hit.offset, hit.hit_name()));
         hits
     }
 
     fn optimized_raw_hits(data: &[u8]) -> Vec<RawHit> {
         let mut hits = scan_sample(data, 0, 0);
-        hits.retain(|hit| hit.kind != "xz_footer");
-        hits.sort_by_key(|hit| (hit.offset, hit.hit_name));
+        hits.retain(|hit| hit.kind() != "xz_footer");
+        hits.sort_unstable_by_key(|hit| (hit.offset, hit.hit_name()));
         hits
     }
 
@@ -2012,8 +2067,13 @@ mod tests {
             let start = 41 + index * 19;
             data[start..start + magic.len()].copy_from_slice(magic);
         }
-        data[31..33].copy_from_slice(XZ_FOOTER_MAGIC);
-        data[223..225].copy_from_slice(XZ_FOOTER_MAGIC);
+        let mut footer = [0u8; 12];
+        footer[4..8].copy_from_slice(&1u32.to_le_bytes());
+        footer[10..12].copy_from_slice(XZ_FOOTER_MAGIC);
+        let checksum = crc32(&footer[4..10]);
+        footer[..4].copy_from_slice(&checksum.to_le_bytes());
+        data[21..33].copy_from_slice(&footer);
+        data[213..225].copy_from_slice(&footer);
 
         for length in 0..=data.len() {
             for carry_len in [0, 31, 32, 33, 64] {
@@ -2022,6 +2082,7 @@ mod tests {
                 for matched in embedded_matcher().find_overlapping_iter(sample) {
                     record_raw_hit(
                         &mut expected,
+                        sample,
                         carry_len,
                         4096,
                         matched.pattern().as_usize(),
@@ -2030,17 +2091,21 @@ mod tests {
                     );
                 }
                 for start in memmem::find_iter(sample, XZ_FOOTER_MAGIC) {
-                    if start + XZ_FOOTER_MAGIC.len() > carry_len {
+                    if start >= 10
+                        && start + 2 > carry_len
+                        && parse_xz_footer(&sample[start - 10..start + 2], 4096 + start as u64 + 2)
+                            .is_ok()
+                    {
                         expected.push(RawHit {
-                            hit_name: "xz_footer",
-                            kind: "xz_footer",
+                            pattern: PATTERNS.len() as u8,
+                            rejected: false,
                             offset: 4096 + start as u64,
                         });
                     }
                 }
                 let mut actual = scan_sample(sample, carry_len, 4096);
-                expected.sort_by_key(|hit| (hit.offset, hit.hit_name));
-                actual.sort_by_key(|hit| (hit.offset, hit.hit_name));
+                expected.sort_unstable_by_key(|hit| (hit.offset, hit.hit_name()));
+                actual.sort_unstable_by_key(|hit| (hit.offset, hit.hit_name()));
                 assert_eq!(actual, expected, "length={length} carry={carry_len}");
             }
         }
@@ -2051,6 +2116,7 @@ mod tests {
             for matched in embedded_matcher().find_overlapping_iter(&dense) {
                 record_raw_hit(
                     &mut expected,
+                    &dense,
                     0,
                     0,
                     matched.pattern().as_usize(),
@@ -2059,15 +2125,19 @@ mod tests {
                 );
             }
             for start in memmem::find_iter(&dense, XZ_FOOTER_MAGIC) {
-                expected.push(RawHit {
-                    hit_name: "xz_footer",
-                    kind: "xz_footer",
-                    offset: start as u64,
-                });
+                if start >= 10
+                    && parse_xz_footer(&dense[start - 10..start + 2], start as u64 + 2).is_ok()
+                {
+                    expected.push(RawHit {
+                        pattern: PATTERNS.len() as u8,
+                        rejected: false,
+                        offset: start as u64,
+                    });
+                }
             }
             let mut actual = scan_sample(&dense, 0, 0);
-            expected.sort_by_key(|hit| (hit.offset, hit.hit_name));
-            actual.sort_by_key(|hit| (hit.offset, hit.hit_name));
+            expected.sort_unstable_by_key(|hit| (hit.offset, hit.hit_name()));
+            actual.sort_unstable_by_key(|hit| (hit.offset, hit.hit_name()));
             assert_eq!(actual, expected, "dense prefix {prefix:?}");
         }
     }
@@ -2154,8 +2224,8 @@ mod tests {
             ("zstd", zs_join, 0),
         ] {
             let mut hits = scan_sample(&data, 0, 0);
-            hits.retain(|hit| hit.kind == kind);
-            hits.sort_by_key(|hit| hit.offset);
+            hits.retain(|hit| hit.kind() == kind);
+            hits.sort_unstable_by_key(|hit| hit.offset);
             let reference = ManagedReader::from_bytes(data.clone(), ReaderConfig::default());
             let mut expected = Vec::new();
             for hit in &hits {
@@ -2210,8 +2280,8 @@ mod tests {
         let second = frame.len() as u64;
         let source = ManagedReader::from_bytes(frame.repeat(2), ReaderConfig::default());
         let hits = [0, second].map(|offset| RawHit {
-            kind: "zstd",
-            hit_name: "zstd",
+            pattern: 8,
+            rejected: false,
             offset,
         });
         let candidates = validate_raw_hits(&source, source.len(), &hits, &[]).unwrap();
@@ -2741,7 +2811,8 @@ mod tests {
         let reader = ManagedReader::open(&path).unwrap();
 
         let mut expected = reference_raw_hits(&data);
-        expected.sort_by_key(|hit| (hit.offset, hit.hit_name));
+        expected.retain(|hit| !hit.rejected);
+        expected.sort_unstable_by_key(|hit| (hit.offset, hit.hit_name()));
         let iocp =
             scan_embedded_archives_native_with_iocp(reader, TEST_IOCP_CHUNK_SIZE, 4, 4).unwrap();
 

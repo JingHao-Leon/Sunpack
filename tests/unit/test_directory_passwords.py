@@ -55,6 +55,12 @@ def test_directory_password_context_inherits_and_extends(tmp_path):
 
     assert task.runtime[DIRECTORY_PASSWORD_CONTEXT_KEY] == ["outer-secret", "inner-secret"]
 
+    # The nearest context wins, including an explicitly empty child context.
+    store.remember(str(child), SimpleNamespace(runtime={DIRECTORY_PASSWORD_CONTEXT_KEY: []}))
+    assert store.inherited_for(str(archive)) == []
+    assert store.inherited_for(str(parent)) == ["outer-secret"]
+    assert store.inherited_for(str(tmp_path / "parent-sibling" / "archive.zip")) == []
+
 
 def test_clipboard_password_filter_rejects_obvious_non_text_payloads():
     assert _plausible_passwords(["ok", "bad\x00value", "x" * 600], max_password_length=512) == ["ok"]

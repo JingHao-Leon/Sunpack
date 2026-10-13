@@ -1268,6 +1268,14 @@ namespace sunpack::sevenzip
                 out_error->clear();
             }
 
+            const auto key = normalized_output_path_key(directory);
+            if (created_directories_.find(key) != created_directories_.end())
+            {
+                // Successful checks/creation belong to this extraction callback.
+                // Repeated files in the same directory reuse that result.
+                return true;
+            }
+
             try
             {
                 ensure_no_reparse_ancestors(directory);
@@ -1287,12 +1295,6 @@ namespace sunpack::sevenzip
                     *out_error = std::make_error_code(std::errc::permission_denied);
                 }
                 return false;
-            }
-
-            const auto key = normalized_output_path_key(directory);
-            if (created_directories_.find(key) != created_directories_.end())
-            {
-                return true; // 已确认创建成功过
             }
 
             std::error_code create_error;

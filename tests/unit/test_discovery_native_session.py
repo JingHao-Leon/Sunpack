@@ -1,4 +1,9 @@
 import tarfile
+import lzma
+import os
+import subprocess
+import sys
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 
@@ -7,6 +12,54 @@ from sunpack_native import reader_cache_stats
 from sunpack.pipeline.coordinator.scan_session import DiscoveryScanSession
 from sunpack.pipeline.coordinator.target_scan import build_native_table_for_targets
 from tests.helpers.config_factory import make_config
+
+
+def test_static_noisy_carrier_extracts_nested_and_cross_chunk_xz_with_one_rayon_worker(tmp_path):
+    """Catch lost outputs across scanner/discovery/extraction boundaries.
+
+    Existing pipeline fixtures do not combine the former hit limit, one Rayon
+    worker and a split XZ footer. Native matcher tests cannot catch projection
+    or routing losses. One small carrier/child process covers both origins.
+    """
+    nested = BytesIO()
+    with zipfile.ZipFile(nested, "w") as writer:
+        writer.writestr("payload.txt", b"nested payload")
+    outer = BytesIO()
+    with zipfile.ZipFile(outer, "w") as writer:
+        writer.writestr("inner.opaque", nested.getvalue())
+    data = b"PK\x03\x04" * 1_000_001 + outer.getvalue()
+    xz = lzma.compress(b"xz payload", format=lzma.FORMAT_XZ)
+    chunk = 2 * 1024 * 1024
+    # Place Y before the IOCP boundary and Z after it; its CRC/flags are in carry.
+    end = ((len(data) + len(xz)) // chunk + 1) * chunk + 1
+    carrier = tmp_path / "carrier.opaque"
+    carrier.write_bytes(data + b"x" * (end - len(data) - len(xz)) + xz + b"trailer")
+    completed = subprocess.run(
+        [sys.executable, "-c", """
+import asyncio, sys
+from pathlib import Path
+from sunpack.pipeline.coordinator.engine import PipelineEngine
+from tests.helpers.config_factory import make_config
+async def run():
+    for origin in ('foreground', 'watch'):
+        root = Path(sys.argv[2]) / origin
+        config = make_config({
+            'recursive_extract': '3', 'output': {'root': str(root)},
+            'user_passwords': [], 'builtin_passwords': [],
+            'post_extract': {'archive_cleanup_mode': 'k', 'flatten_single_directory': False},
+        })
+        async with PipelineEngine(config) as engine:
+            response = await engine.run([sys.argv[1]], origin=origin)
+        assert not response.summary.failed_tasks, response.summary.failed_tasks
+        assert response.summary.success_count == 2, response.summary
+        payloads = [p.read_bytes() for p in root.rglob('*') if p.is_file()]
+        assert b'nested payload' in payloads and b'xz payload' in payloads
+asyncio.run(run())
+""", str(carrier), str(tmp_path / "output")],
+        env={**os.environ, "RAYON_NUM_THREADS": "1"},
+        capture_output=True, text=True, timeout=30,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 def test_native_discovery_does_not_project_negative_embedded_candidates(tmp_path):

@@ -3,7 +3,7 @@
 //! This module deliberately owns a scan-local file handle and completion port.
 //! The normal reader, shared handle pool, and request cache remain synchronous
 //! and unchanged. A scan keeps a bounded read window, hands completed buffers
-//! to Rayon workers, and immediately reissues the next sequential read with a
+//! to scoped scan workers, and immediately reissues the next sequential read with a
 //! separate pooled buffer.
 
 use std::collections::{HashMap, VecDeque};
@@ -136,7 +136,7 @@ struct IocpHandles {
 
 // Windows kernel handles are process-wide synchronization objects. The
 // handle values are shared read-only by the producer and are closed only after
-// the Rayon scope has joined and all pending operations have been drained.
+// the scan workers have joined and all pending operations have been drained.
 unsafe impl Send for IocpHandles {}
 unsafe impl Sync for IocpHandles {}
 
@@ -362,7 +362,9 @@ where
     let handles = Arc::new(open_handles(path)?);
     let scan = &scan;
 
-    let result = rayon::scope(|scope| -> io::Result<IocpScanOutput<T>> {
+    // These workers block on native queues. Keeping them outside Rayon also
+    // keeps the IOCP producer runnable when its caller occupies a Rayon worker.
+    let result = std::thread::scope(|scope| -> io::Result<IocpScanOutput<T>> {
         // Read slots stay owned by the IOCP producer. Completed bytes move to
         // independent scan jobs, so the slot can issue its next predicted
         // sequential read without waiting for matching to finish.
@@ -376,33 +378,35 @@ where
             let job_rx = Arc::clone(&job_rx);
             let done_tx = done_tx.clone();
             let worker_handles = Arc::clone(&handles);
-            scope.spawn(move |_| loop {
-                let job = {
-                    let receiver = job_rx
-                        .lock()
-                        .expect("IOCP scan job receiver lock is not poisoned");
-                    receiver.recv()
-                };
-                let Ok(job) = job else {
-                    break;
-                };
-                let hits = scan(
-                    &job.buffer[..job.bytes_read],
-                    job.leading_overlap,
-                    job.read_start,
-                );
-                if done_tx.send((job.buffer, hits)).is_err() {
-                    break;
-                }
-                unsafe {
-                    let _ = PostQueuedCompletionStatus(
-                        worker_handles.port,
-                        0,
-                        WORKER_COMPLETION_KEY,
-                        null_mut(),
+            std::thread::Builder::new()
+                .name("sunpack-embedded-scan".into())
+                .spawn_scoped(scope, move || loop {
+                    let job = {
+                        let receiver = job_rx
+                            .lock()
+                            .expect("IOCP scan job receiver lock is not poisoned");
+                        receiver.recv()
+                    };
+                    let Ok(job) = job else {
+                        break;
+                    };
+                    let hits = scan(
+                        &job.buffer[..job.bytes_read],
+                        job.leading_overlap,
+                        job.read_start,
                     );
-                }
-            });
+                    if done_tx.send((job.buffer, hits)).is_err() {
+                        break;
+                    }
+                    unsafe {
+                        let _ = PostQueuedCompletionStatus(
+                            worker_handles.port,
+                            0,
+                            WORKER_COMPLETION_KEY,
+                            null_mut(),
+                        );
+                    }
+                })?;
         }
         drop(done_tx);
 
@@ -611,19 +615,26 @@ mod tests {
         ));
         std::fs::write(&path, &data).unwrap();
 
-        let output = scan_file(
-            &path,
-            data.len() as u64,
-            chunk_bytes,
-            2,
-            1,
-            0,
-            |_, _, base_offset| {
-                std::thread::sleep(std::time::Duration::from_millis(1));
-                vec![base_offset]
-            },
-        )
-        .unwrap();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        let output = pool
+            .install(|| {
+                scan_file(
+                    &path,
+                    data.len() as u64,
+                    chunk_bytes,
+                    2,
+                    1,
+                    0,
+                    |_, _, base_offset| {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                        vec![base_offset]
+                    },
+                )
+            })
+            .unwrap();
 
         let expected = (0..data.len())
             .step_by(chunk_bytes)

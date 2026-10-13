@@ -1281,15 +1281,19 @@ pub(crate) fn read_xz_footer(reader: &ManagedReader, end: u64) -> ValidationResu
         .checked_sub(12)
         .ok_or(ValidationError::Invalid("xz_footer_missing"))?;
     let footer = reader.read_cached_at(start, 12)?;
+    parse_xz_footer(&footer, end)
+}
+
+pub(crate) fn parse_xz_footer(footer: &[u8], end: u64) -> ValidationResult<XzFooter> {
     if footer.len() != 12 || &footer[10..12] != b"YZ" {
         return invalid("xz_footer_magic_invalid");
-    }
-    if u32::from_le_bytes(footer[0..4].try_into().unwrap()) != crc32(&footer[4..10]) {
-        return invalid("xz_footer_crc_bad");
     }
     let flags = [footer[8], footer[9]];
     if flags[0] != 0 || flags[1] & 0xf0 != 0 {
         return invalid("xz_stream_flags_invalid");
+    }
+    if u32::from_le_bytes(footer[0..4].try_into().unwrap()) != crc32(&footer[4..10]) {
+        return invalid("xz_footer_crc_bad");
     }
     Ok(XzFooter {
         end,

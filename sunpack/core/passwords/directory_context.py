@@ -90,12 +90,12 @@ class DirectoryPasswordContextStore:
         if not archive_path:
             return []
         archive_key = os.path.normcase(os.path.abspath(archive_path))
-        best_root = ""
-        best_context: list[str] = []
         with self._lock:
-            for root_key, context in self._contexts.items():
-                if archive_key == root_key or archive_key.startswith(root_key + os.sep):
-                    if len(root_key) > len(best_root):
-                        best_root = root_key
-                        best_context = context
-        return list(best_context)
+            while True:
+                context = self._contexts.get(archive_key)
+                if context is not None:
+                    return list(context)
+                parent = os.path.dirname(archive_key)
+                if parent == archive_key:
+                    return []
+                archive_key = parent

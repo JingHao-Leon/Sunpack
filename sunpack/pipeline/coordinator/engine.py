@@ -36,7 +36,6 @@ from sunpack.core.support.output_reservation import OutputReservationRegistry, b
 from sunpack.pipeline.extraction.internal.sevenzip.sevenzip_runner import SevenZipRunner
 from sunpack.core.support.output_paths import default_output_dir_for_task
 from sunpack.core.support.path_keys import path_key
-from sunpack.core.support.filesystem_scan_errors import filesystem_scan_failure
 from sunpack.core.support.archive_sessions import release_archive_sessions_under_roots
 from sunpack.core.support.resource_lifecycle import TaskResourceScope, promotion_barrier
 from sunpack.pipeline.discovery.embedded.options import EmbeddedOptions
@@ -910,7 +909,8 @@ class _SourceCleanup:
             if existing:
                 try:
                     if self._mode() == "keep":
-                        cleanup = ArchiveCleanup("keep", self._config.get("cli", {}).get("language", "en"))
+                        cli = self._config.get("cli", {})
+                        cleanup = ArchiveCleanup("keep", cli.get("language", "en"), quiet=bool(cli.get("quiet", False)))
                         results.extend(cleanup.cleanup_success_archives(
                             [[path] for path in existing],
                         ))
@@ -1040,6 +1040,7 @@ class _RequestRuntime:
             language=self.language,
             quiet=self.quiet,
             verbose=self.verbose,
+            emit_errors=submission.origin == "foreground" and not cli_config.get("json", False),
             stdout=submission.stdout,
             stderr=submission.stderr,
         )
@@ -1551,12 +1552,7 @@ class _RequestRuntime:
             inventories=inventories,
             logical_roots=logical_roots,
         )
-        for error in work.errors:
-            failure = filesystem_scan_failure(error, self.language)
-            with self.context.lock:
-                if failure.message not in self.context.scan_failed_tasks:
-                    self.context.scan_failed_tasks.append(failure.message)
-                    self.context.scan_failures.append(failure)
+        self.task_scanner.record_scan_errors(work.session)
         return work
 
     async def _allow_recursive_depth(self, depth: int) -> bool:

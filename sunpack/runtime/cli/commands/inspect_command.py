@@ -5,9 +5,9 @@ from sunpack.runtime.cli.cli_runtime import (
     inspect_result_to_item,
     resolve_common_root,
     resolve_target_paths,
-    result_for_missing,
 )
 from sunpack.runtime.cli.cli_types import CliCommandResult
+from sunpack.runtime.cli.cli_constants import EXIT_TASK_FAILED
 from sunpack.core.contracts.archive_input import ArchiveInputDescriptor
 from sunpack.core.contracts.tasks import ArchiveTask
 from sunpack.runtime.cli.persistent_runtime import load_request_config
@@ -17,6 +17,7 @@ from sunpack.core.analysis.source import analysis_source_for_descriptor
 from sunpack.pipeline.coordinator.detection_diagnostics import DetectionDiagnostics
 from sunpack.core.support.json_format import to_json_text
 from sunpack.pipeline.discovery.embedded.options import EmbeddedOptions
+from sunpack.core.support.filesystem_scan_errors import filesystem_scan_error_count
 
 COMMAND = "inspect"
 ORDER = 30
@@ -40,9 +41,7 @@ def register(subparsers, ctx):
 
 def handle(args, ctx):
     reporter = ctx.reporter
-    target_paths, missing_paths = resolve_target_paths(args.paths, base_dir=ctx.cwd)
-    if missing_paths:
-        return result_for_missing(COMMAND, args, missing_paths, ctx)
+    target_paths = resolve_target_paths(args.paths, base_dir=ctx.cwd)
 
     config = load_request_config(ctx.cwd)
     detection_options = EmbeddedOptions(force_scan=bool(args.deep_detect))
@@ -67,6 +66,7 @@ def handle(args, ctx):
         "analyze": bool(args.analyze),
         "analyzed_items": sum(1 for item in all_items if item.get("analysis")),
         "analysis_extractable_items": sum(1 for item in all_items if (item.get("analysis") or {}).get("has_extractable")),
+        "scan_error_count": filesystem_scan_error_count(diagnostics.context.scan_failures),
     }
     if not args.json:
         reporter.info(
@@ -104,8 +104,12 @@ def handle(args, ctx):
                 candidates = _candidate_label(analysis.get("candidates") or [])
                 if candidates:
                     reporter.info(ctx.t("cli.inspect.analysis_candidates", candidates=candidates))
+        for error in diagnostics.errors:
+            reporter.error(ctx.t("report.scan_error", task=error))
+        if diagnostics.errors:
+            reporter.error(ctx.t("report.scan_incomplete"))
 
-    return 0, CliCommandResult(
+    return (EXIT_TASK_FAILED if diagnostics.errors else 0), CliCommandResult(
         command=COMMAND,
         inputs={
             "paths": target_paths,
@@ -119,6 +123,7 @@ def handle(args, ctx):
         },
         summary=summary,
         items=items,
+        errors=diagnostics.errors,
     )
 
 

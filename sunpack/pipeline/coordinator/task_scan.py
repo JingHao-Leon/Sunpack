@@ -1,7 +1,7 @@
 import os
 from typing import Any
 
-from sunpack_native import relations_logical_name
+from sunpack_native import classify_scan_targets, relations_logical_name
 
 from sunpack.core.contracts.archive_input import ArchiveInputDescriptor
 from sunpack.core.contracts.discovery import StageResult
@@ -46,6 +46,7 @@ class ArchiveTaskScanner:
             is_recursive_scan=is_recursive_scan,
         )
         self._record_provider_failures()
+        self.record_scan_errors(scan_session)
         return tasks
 
     def scan_stage_result(
@@ -68,6 +69,7 @@ class ArchiveTaskScanner:
             include_details=False,
         )
         self._record_provider_failures()
+        self.record_scan_errors(scan_session)
         return result
 
     def discover_targets(
@@ -85,7 +87,14 @@ class ArchiveTaskScanner:
             is_recursive_scan=is_recursive_scan,
         )
         self._record_provider_failures()
+        self.record_scan_errors(scan_session)
         return result.resolved_tasks
+
+    def record_scan_errors(self, session: DiscoveryScanSession | None) -> None:
+        if session is not None:
+            self.context.record_scan_errors(
+                session.take_scan_errors(), self.config.get("cli", {}).get("language", "en"),
+            )
 
     def filter_processed_tasks(self, tasks: list[ArchiveTask]) -> list[ArchiveTask]:
         return self.provider.filter_processed_tasks(
@@ -103,16 +112,18 @@ class ArchiveTaskScanner:
 
     def direct_file_tasks(self, file_paths: list[str]) -> list[ArchiveTask]:
         tasks: list[ArchiveTask] = []
-        normalized_paths: list[str] = []
-        for raw_path in file_paths:
-            path = os.path.abspath(os.path.normpath(raw_path))
-            if not os.path.isfile(path):
-                self.context.scan_failed_tasks.append(f"{raw_path} [direct mode requires a file]")
-                continue
-            normalized_paths.append(path)
+        paths = [os.path.abspath(os.path.normpath(path)) for path in file_paths]
+        kinds, errors = classify_scan_targets(paths)
+        self.context.record_scan_errors(errors, self.config.get("cli", {}).get("language", "en"))
+        normalized_paths = [path for path, kind in zip(paths, kinds) if kind == 1]
+        for path, kind in zip(paths, kinds):
+            if kind not in {0, 1}:
+                self.context.scan_failed_tasks.append(f"{path} [direct mode requires a file]")
 
-        discovered = self.provider.discover_targets(normalized_paths)
+        session = DiscoveryScanSession(config=self.config)
+        discovered = self.provider.discover_targets(normalized_paths, scan_session=session)
         self._record_provider_failures()
+        self.record_scan_errors(session)
         covered = set(discovered.claimed_paths | discovered.blocked_paths)
         tasks.extend(self.provider.filter_processed_tasks(
             discovered.resolved_tasks,

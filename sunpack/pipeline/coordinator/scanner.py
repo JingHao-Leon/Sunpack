@@ -6,6 +6,7 @@ from sunpack.core.contracts.failures import FailureKind
 from sunpack.core.contracts.run_state import RunState
 from sunpack.pipeline.coordinator.task_scan import ArchiveTaskScanner
 from sunpack.pipeline.discovery.embedded.options import EmbeddedOptions
+from sunpack.core.support.filesystem_scan_errors import filesystem_scan_error_count
 
 
 @dataclass
@@ -24,6 +25,7 @@ class ScanReport:
     tasks: List[ScanResult]
     findings: List[DiscoveryFinding]
     errors: List[str]
+    scan_error_count: int = 0
 
 
 class ScanOrchestrator:
@@ -71,6 +73,7 @@ class ScanOrchestrator:
                 failure.message for failure in self.task_scanner.context.scan_failures
                 if failure.kind == FailureKind.FILESYSTEM_ERROR
             ],
+            scan_error_count=filesystem_scan_error_count(self.task_scanner.context.scan_failures),
         )
 
 

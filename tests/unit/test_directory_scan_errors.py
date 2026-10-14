@@ -1,8 +1,11 @@
 import io
+import json
 import os
 import subprocess
+import sys
 import zipfile
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -13,11 +16,12 @@ from sunpack.core.contracts.failures import FailureKind
 from sunpack.core.contracts.run_state import RunState
 from sunpack.core.i18n import I18nContext
 from sunpack.core.i18n.context import validate_catalog
+from sunpack.core.support.filesystem_scan_errors import filesystem_scan_error_count
 from sunpack.pipeline.coordinator.output_scan_policy import NestedOutputScanPolicy
 from sunpack.pipeline.coordinator.task_scan import ArchiveTaskScanner
 from sunpack.runtime.cli.cli_context import CliContext
 from sunpack.runtime.cli.cli_reporter import CliReporter
-from sunpack.runtime.cli.commands import scan
+from sunpack.runtime.cli.commands import inspect_command, scan
 from sunpack.runtime.watch.scheduler import WatchScheduler
 
 
@@ -74,16 +78,116 @@ def test_unreadable_subtree_is_reported_without_losing_readable_archives(tmp_pat
         assert state.scan_failures[0].kind == FailureKind.FILESYSTEM_ERROR
         code, result = scan.handle(SimpleNamespace(paths=[str(root)], deep_detect=False, json=json_mode), context)
         assert code != 0 and result.summary["task_count"] == 1
+        assert result.summary["scan_error_count"] == 1
         assert len(result.errors) == 1 and str(blocked) in result.errors[0]
         expected = "无法读取目录：" if language == "zh" else "Cannot read directory: "
         assert result.errors[0].startswith(expected)
         assert "read_dir:" not in result.errors[0]
         validate_catalog()
         assert bool(stderr.getvalue()) is not json_mode
+        if not json_mode:
+            assert stderr.getvalue().startswith("[扫描错误]" if language == "zh" else "[Scan error]")
+            assert ("[扫描不完整]" if language == "zh" else "[Scan incomplete]") in stderr.getvalue()
         nested = NestedOutputScanPolicy(config).prepare_scan([str(blocked)])
-        assert not nested.roots and len(nested.errors) == 1
+        assert not nested.roots and nested.session is not None
+        assert len(nested.session.take_scan_errors()) == 1
         candidates = scheduler._scan_candidates([str(root)], recursive=True)
         assert len(candidates) == 1 and candidates[0].path == str(root / "good.blob")
         assert not notifications
         assert log_events[-1][0] == "filesystem_scan_failed"
         assert str(blocked) in log_events[-1][1]["errors"][0]
+
+
+@pytest.mark.parametrize("command, count_key", [(scan, "task_count"), (inspect_command, "resolved_items")])
+def test_explicit_missing_target_keeps_valid_input_and_reports_metadata_failure(tmp_path, monkeypatch, command, count_key):
+    # Unlike subtree failures, root metadata failures used to disappear before
+    # native discovery, or prevent the CLI from processing any valid input.
+    good = tmp_path / "good.blob"
+    missing = tmp_path / "missing"
+    with zipfile.ZipFile(good, "w") as output:
+        output.writestr("payload.txt", "payload")
+    config = normalize_config({"verification": {}, "cli": {"language": "zh"}})
+    monkeypatch.setattr(command, "load_request_config", lambda _cwd: config)
+    context = CliContext(language="zh", cwd=str(tmp_path), reporter=CliReporter(
+        json_mode=True, stdout=io.StringIO(), stderr=io.StringIO(),
+    ))
+    code, result = command.handle(SimpleNamespace(paths=[str(missing), str(good)], deep_detect=False, json=True,
+                                                analyze=False, archives_only=False), context)
+    assert code != 0 and result.summary[count_key] == 1
+    assert len(result.errors) == 1 and str(missing) in result.errors[0]
+    assert result.errors[0].startswith("无法读取文件或目录信息：")
+    state = RunState()
+    tasks = ArchiveTaskScanner(config, state).direct_file_tasks([str(missing), str(good)])
+    assert len(tasks) == 1 and tasks[0].main_path == str(good)
+    assert len(state.scan_failures) == 1
+    assert state.scan_failures[0].details["operation"] == "metadata"
+
+
+@pytest.mark.parametrize("direct", [False, True])
+@pytest.mark.parametrize("mode", ["text", "quiet", "json"])
+def test_extract_cli_keeps_valid_archive_when_an_explicit_target_is_missing(tmp_path, direct, mode):
+    # Extraction has its own CLI admission and request path; scan-only checks
+    # cannot catch an early return there or loss of errors in its final result.
+    archive = tmp_path / "good.blob"
+    missing = tmp_path / "missing"
+    with zipfile.ZipFile(archive, "w") as output:
+        output.writestr("payload.txt", "payload")
+    options = ["--direct-file"] if direct else []
+    if mode != "text":
+        options.append("--" + mode)
+    completed = subprocess.run([
+        sys.executable, "-B", str(Path(__file__).resolve().parents[2] / "sunpack.py"),
+        "extract", "--no-pause", "--cleanup", "k", *options, str(missing), str(archive),
+    ], capture_output=True, text=True, encoding="utf-8", cwd=tmp_path)
+    assert completed.returncode != 0
+    if mode == "json":
+        result = json.loads(completed.stdout)
+        assert result["summary"]["success_count"] == 1, completed.stderr
+        assert result["summary"]["failed_count"] == 0
+        assert result["summary"]["scan_error_count"] == 1
+        assert result["tasks"][0]["scan_error_count"] == 1
+        assert len(result["errors"]) == 1 and str(missing) in result["errors"][0]
+        assert completed.stderr == ""
+    else:
+        label = "[扫描错误]" if "[扫描错误]" in completed.stderr else "[Scan error]"
+        assert completed.stderr.count(label) == 1 and str(missing) in completed.stderr
+        assert label not in completed.stdout
+        if mode == "quiet":
+            assert completed.stdout == ""
+        else:
+            assert any(counts in completed.stdout for counts in ("解压失败：0  扫描错误：1", "Extraction failed: 0  Scan errors: 1"))
+    assert (tmp_path / "good" / "payload.txt").read_text() == "payload"
+
+
+def test_nested_scan_error_overflow_keeps_each_root_and_registers_once(tmp_path):
+    # Two overflowing scans expose lost omitted counts. Reusing their primed
+    # session also checks that nested discovery does not register errors twice.
+    roots = [tmp_path / "first", tmp_path / "second"]
+    blocked_dirs = []
+    for root in roots:
+        root.mkdir()
+        for index in range(22):
+            blocked = root / str(index)
+            blocked.mkdir()
+            blocked_dirs.append(blocked)
+        with zipfile.ZipFile(root / "good.blob", "w") as output:
+            output.writestr("payload.txt", "payload")
+    config = normalize_config({"verification": {}, "cli": {"language": "en"}, "filesystem": {
+        "scan_filters": [{"name": "size_range", "enabled": False}],
+    }})
+    with ExitStack() as permissions:
+        for blocked in blocked_dirs:
+            permissions.enter_context(deny_directory_listing(blocked))
+        work = NestedOutputScanPolicy(config).prepare_scan(map(str, roots))
+        state = RunState()
+        scanner = ArchiveTaskScanner(config, state)
+        scanner.record_scan_errors(work.session)
+        initial_errors = tuple(state.scan_failed_tasks)
+        tasks = scanner.discover_targets(list(work.roots), scan_session=work.session, is_recursive_scan=True)
+        assert len(tasks) == 2
+        assert tuple(state.scan_failed_tasks) == initial_errors
+        omitted = [failure for failure in state.scan_failures if failure.details["operation"] == "omitted"]
+        assert {failure.details["path"] for failure in omitted} == {str(root) for root in roots}
+        assert all(failure.message_params["error"] == "2" for failure in omitted)
+        assert len(state.scan_failures) == 42
+        assert filesystem_scan_error_count(state.scan_failures) == 44

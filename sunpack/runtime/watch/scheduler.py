@@ -393,8 +393,7 @@ class WatchScheduler:
         return root if os.path.isdir(root) else os.path.dirname(root)
 
     def _scan_candidates(self, roots: list[str], *, recursive: bool) -> list[WatchCandidate]:
-        errors: list[tuple[str, str, str]] = []
-        candidates = scan_watch_candidates(roots, recursive=recursive, errors=errors)
+        candidates, errors = scan_watch_candidates(roots, recursive=recursive)
         if errors:
             self.log.write("filesystem_scan_failed", roots=roots, errors=[
                 filesystem_scan_failure(error, self.i18n.language).message for error in errors
@@ -1869,7 +1868,7 @@ class WatchScheduler:
         }
         if scan_errors:
             self.log.write("filesystem_scan_failed", path=candidate.path, errors=sorted(scan_errors))
-            # Only the Watch notification projection omits scan diagnostics.
+            # The Watch completion projection omits log-only scan diagnostics.
             # The pipeline response and CLI error reporting retain them.
             summary = replace(
                 summary,
@@ -1878,9 +1877,6 @@ class WatchScheduler:
                 scan_failed_tasks=tuple(message for message in summary.scan_failed_tasks
                                         if message not in scan_errors),
             )
-            if not summary.target_results and not summary.failed_tasks:
-                self._notify("suppressed", request.notification_id)
-                return WatchRunResult(processed=1, failed=1, errors=sorted(scan_errors))
 
         results = target_results(summary)
         target_result = _target_result_for_path(summary, candidate.path)

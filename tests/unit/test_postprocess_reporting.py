@@ -101,14 +101,19 @@ def test_flatten_projection_handles_removed_wrappers_and_other_drives():
     assert result.relocate("C:/output-sibling") == "C:/output-sibling"
 
 
-def test_existing_final_report_shows_postprocess_warning_and_actual_output():
+@pytest.mark.parametrize("quiet", [False, True])
+def test_existing_final_report_shows_postprocess_warning_and_actual_output(quiet):
     stream = io.StringIO()
-    reporter = RunReporter("zh", stdout=stream)
+    errors = io.StringIO()
+    reporter = RunReporter("zh", stdout=stream, stderr=errors, quiet=quiet)
     reporter._top_level_outputs = ["C:/output"]
     reporter.relocate_outputs(DirectoryFlattenResult("C:/output", "C:/output.work", "C:/output"))
     reporter.log_final_summary(0, 1, [], cleanup_results=[
         ArchiveCleanupResult("C:/output.work", "flatten", "failed", message="publish failed"),
     ])
-    assert "1 项后处理操作失败" in stream.getvalue()
-    assert "输出位置：C:/output.work" in stream.getvalue().replace("\\", "/")
-    assert "C:/output.work: publish failed" in stream.getvalue()
+    assert "[后处理警告] 解压完成，1 项后处理操作失败" in errors.getvalue()
+    assert "C:/output.work: publish failed" in errors.getvalue()
+    if quiet:
+        assert stream.getvalue() == ""
+    else:
+        assert "输出位置：C:/output.work" in stream.getvalue().replace("\\", "/")

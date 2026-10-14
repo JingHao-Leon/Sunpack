@@ -136,31 +136,18 @@ extern "system" {
 }
 
 #[pyfunction]
-#[pyo3(signature = (roots, recursive=true, errors=None))]
+#[pyo3(signature = (roots, recursive=true))]
 pub(crate) fn scan_watch_candidates(
     py: Python<'_>,
     roots: Vec<String>,
     recursive: bool,
-    errors: Option<&Bound<'_, PyList>>,
-) -> PyResult<Py<PyList>> {
+) -> PyResult<(Py<PyList>, Vec<DirectoryReadError>)> {
     let (candidates, messages) = py.detach(|| scan_watch_candidate_rows(roots, recursive))?;
-    if let Some(errors) = errors {
-        for message in messages {
-            errors.append(message)?;
-        }
-    } else if !messages.is_empty() {
-        let details = messages
-            .into_iter()
-            .map(|(operation, path, error)| format!("{path} [{operation}: {error}]"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        return Err(pyo3::exceptions::PyOSError::new_err(details));
-    }
     let values = PyList::empty(py);
     for row in candidates {
         values.append(watch_candidate_to_python(py, row)?)?;
     }
-    Ok(values.unbind())
+    Ok((values.unbind(), messages))
 }
 
 fn scan_watch_candidate_rows(
@@ -168,29 +155,26 @@ fn scan_watch_candidate_rows(
     recursive: bool,
 ) -> PyResult<(Vec<WatchCandidateRow>, Vec<DirectoryReadError>)> {
     let mut candidates = Vec::new();
-    let mut errors = DirectoryReadErrors::default();
+    let mut messages = Vec::new();
     for root in roots {
         let path = PathBuf::from(root);
-        let metadata = match fs::metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                errors.push(&path, "metadata", error);
-                continue;
+        let mut errors = DirectoryReadErrors::new(&path);
+        match fs::metadata(&path) {
+            Err(error) => errors.push(&path, "metadata", error),
+            Ok(metadata) if metadata.is_file() => {
+                if let Some(candidate) = watch_candidate_from_metadata(&path, &metadata, None)? {
+                    candidates.push(candidate);
+                }
             }
-        };
-        if metadata.is_file() {
-            if let Some(candidate) = watch_candidate_from_metadata(&path, &metadata, None)? {
-                candidates.push(candidate);
+            Ok(metadata) if metadata.is_dir() => {
+                scan_watch_dir(&path, &mut candidates, recursive, &mut errors)?
             }
-            continue;
+            Ok(_) => {}
         }
-        if !metadata.is_dir() {
-            continue;
-        }
-        scan_watch_dir(&path, &mut candidates, recursive, &mut errors)?;
+        messages.extend(errors.into_messages());
     }
     candidates.sort_by(|left, right| left.path.cmp(&right.path));
-    Ok((candidates, errors.into_messages()))
+    Ok((candidates, messages))
 }
 
 #[pyfunction]

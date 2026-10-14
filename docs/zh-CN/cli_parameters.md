@@ -56,6 +56,10 @@ sunpack w st
 
 `passwords` 只支持 `--json` 以及密码输入参数；`config` 支持 `--json` 和 `--quiet`。JSON 结果使用统一外层字段：`command`、`inputs`、`summary`、`errors`、`items`、`tasks`、`logs`；具体命令按语义填充 `items` 或 `tasks`。
 
+`extract`、`scan` 和 `inspect` 的普通文本写入 stdout，错误写入 stderr。`[扫描错误]` 表示文件系统扫描失败，`[解压失败]` 表示归档处理失败；`[扫描不完整]` 表示部分路径无法读取，发现结果可能不完整，其余可读取的输入仍会继续处理。`--quiet` 隐藏进度，但保留错误和后处理警告；`--json` 输出 JSON 结果，不输出这些文本消息。
+
+JSON 的 `summary.scan_error_count` 统计文件系统扫描错误，包括省略了单独详情的错误。`extract` 的 `summary.failed_count` 和各轮处理的 `failed_count` 不再包含扫描错误，各轮处理另有 `scan_error_count`。两类错误均保留在 `errors` 中，并使退出码非零，即使其他归档处理成功也是如此。
+
 ## extract
 
 用法：

@@ -125,29 +125,40 @@ def test_scan_filesystem_errors_only_log_and_do_not_replace_archive_notification
     summary = RunSummary(
         target_results=results, scan_failed_tasks=(scan_error.message,), scan_failures=(scan_error,),
     )
-    watcher = _watcher(tmp_path)
+    watcher = _watcher(tmp_path, cold_start_seconds=0)
     notices = []
     events = []
     watcher._notify = lambda *args: notices.append(args)
     monkeypatch.setattr(watcher.log, "write", lambda event, **fields: events.append((event, fields)))
+    enqueue = watcher.enqueue
+    enqueue(str(source))
+    candidate, = watcher._pop_ready(time.time() + 1)
+    watcher.state.mark(candidate.path, candidate.size, candidate.mtime, file_id=candidate.file_id,
+                       change_usn=candidate.change_usn, status="failed_password")
     monkeypatch.setattr(watcher, "enqueue", lambda *_args, **_kwargs: pytest.fail("scan error retried"))
 
     async def scenario():
         async def complete():
             return PipelineResponse("request", summary, PipelineArtifacts())
         request = scheduler_module._ActivePipelineRequest(
-            "notice", WatchCandidate(str(source), 6, 1.0), asyncio.create_task(complete()),
+            "notice", candidate, asyncio.create_task(complete()),
             password_generation=watcher.state.password_generation,
         )
-        return await watcher._complete_candidate(request)
+        return await watcher._finish_active_request(request)
 
-    _await(scenario())
+    run_result = _await(scenario())
     expected = {None: "suppressed", OutcomeKind.COMPLETE_SUCCESS: "succeeded", OutcomeKind.FAILURE: "failed"}
     assert notices[-1][0] == expected[archive_outcome]
     assert all(scan_error.message not in str(notice) for notice in notices)
     assert any(event == "filesystem_scan_failed" and fields["errors"] == [scan_error.message]
                for event, fields in events)
     assert summary.scan_failures == (scan_error,)
+    if archive_outcome is None:
+        assert run_result.failed == 0 and run_result.errors == []
+        assert watcher.state.latest_entry_for_path(str(source)) is None
+        assert any(event == "no_tasks_found" for event, _ in events)
+        enqueue(str(source))
+        assert watcher.pending_count == 0
 
 
 def test_usn_close_accumulated_data_reason_does_not_restart_content_quiet_window():

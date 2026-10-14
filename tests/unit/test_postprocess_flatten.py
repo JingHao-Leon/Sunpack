@@ -24,7 +24,9 @@ def test_flatten_reports_native_errors(monkeypatch, capsys):
     assert result.output_dir == native_result["output_dir"]
     assert result.source_dir == native_result["source_dir"]
     assert result.errors == tuple(native_result["errors"])
-    assert r"C:\source\child -> C:\target\child: Access is denied" in output
+    # The existing final report owns error display; the worker adapter returns
+    # diagnostics without duplicating them among normal progress messages.
+    assert native_result["errors"][0] not in output
 
 
 def test_postprocess_flatten_output_uses_chinese_language(tmp_path, capsys):

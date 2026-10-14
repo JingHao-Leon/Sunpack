@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any
 
 from sunpack_native import NativeCandidateTable, NativeHeadFactCache
@@ -30,7 +31,19 @@ class DiscoveryScanSession:
         self._relation_group_signatures: dict[str, str] = {}
         self._head_facts = NativeHeadFactCache()
         self._scan_roots: list[str] = []
-        self.scan_errors: list[tuple[str, str, str]] = []
+        self._scan_errors: list[tuple[str, str, str]] = []
+
+    def add_scan_errors(self, errors: Iterable[tuple[str, str, str]]) -> None:
+        self._scan_errors.extend(errors)
+
+    def take_scan_errors(self) -> list[tuple[str, str, str]]:
+        errors = self._scan_errors
+        self._scan_errors = []
+        return errors
+
+    @property
+    def has_scan_errors(self) -> bool:
+        return bool(self._scan_errors)
 
     def set_scan_roots(self, roots: list[str]) -> None:
         self._scan_roots = []
@@ -47,7 +60,7 @@ class DiscoveryScanSession:
             self._scan_roots.append(normalized)
 
     def prime_snapshot(self, directory: str, snapshot: DirectorySnapshot) -> None:
-        self.scan_errors.extend(snapshot.native_snapshot.scan_errors())
+        self.add_scan_errors(snapshot.native_snapshot.scan_errors())
         self._snapshots[self._snapshot_key(directory, max_depth=None)] = snapshot
 
     def prime_output_inventory(self, inventory: Any) -> None:
@@ -83,7 +96,7 @@ class DiscoveryScanSession:
                 config=self.config,
                 include_raw_snapshot=self.include_raw_snapshots,
             ).scan()
-            self.scan_errors.extend(self._snapshots[key].native_snapshot.scan_errors())
+            self.add_scan_errors(self._snapshots[key].native_snapshot.scan_errors())
         return self._snapshots[key]
 
     def relation_groups_for_directory(

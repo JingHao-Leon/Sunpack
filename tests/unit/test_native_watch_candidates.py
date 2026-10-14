@@ -12,14 +12,14 @@ def test_native_watch_scan_preserves_rows_and_recursion_policy(tmp_path):
     empty = tmp_path / "empty"
     empty.touch()
 
-    shallow = scan_watch_candidates([str(tmp_path)], False)
-    errors = []
-    recursive = scan_watch_candidates([str(tmp_path), str(tmp_path / "missing")], True, errors)
+    shallow, errors = scan_watch_candidates([str(tmp_path)], False)
+    assert not errors
+    recursive, errors = scan_watch_candidates([str(tmp_path), str(tmp_path / "missing")], True)
     assert len(errors) == 1 and "missing" in errors[0][1]
     assert [Path(row["path"]).name for row in shallow] == [first.name]
     assert {Path(row["path"]).name for row in recursive} == {first.name, second.name}
     assert [row["path"] for row in recursive] == sorted(row["path"] for row in recursive)
-    assert scan_watch_candidates([str(first)], False) == shallow
+    assert scan_watch_candidates([str(first)], False) == (shallow, [])
     for row in recursive:
         assert row == watch_candidate_for_path(row["path"])
         assert row["file_id"] and row["change_usn"] > 0 and row["mtime"] > 0

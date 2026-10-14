@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 
-from sunpack_native import NativeCandidateTable
+from sunpack_native import NativeCandidateTable, classify_scan_targets
 from sunpack.core.contracts.discovery import DiscoveryCandidate
 from sunpack.pipeline.coordinator.scan_session import DiscoveryScanSession
 from sunpack.pipeline.discovery.relations.scheduler import RelationsScheduler
@@ -38,11 +38,13 @@ def build_native_table_for_targets(
     selected_dirs: list[str] = []
     selected_files: list[str] = []
 
-    for raw_path in target_paths:
-        path = normalized_path(raw_path)
-        if os.path.isdir(path):
+    paths = [normalized_path(path) for path in target_paths]
+    kinds, errors = classify_scan_targets(paths)
+    session.add_scan_errors(errors)
+    for path, kind in zip(paths, kinds):
+        if kind == 2:
             selected_dirs.append(path)
-        elif os.path.isfile(path):
+        elif kind == 1:
             selected_files.append(path)
 
     scan_roots = list(selected_dirs)

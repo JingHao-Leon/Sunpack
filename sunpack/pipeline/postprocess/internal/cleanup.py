@@ -13,13 +13,15 @@ def _path_key(path: str) -> str:
 
 
 class ArchiveCleanup:
-    def __init__(self, mode: str = "recycle", language: str = "en", *, stdout=None):
+    def __init__(self, mode: str = "recycle", language: str = "en", *, stdout=None, quiet: bool = False):
         self.mode = mode
         self.i18n = I18nContext(language)
         self.stdout = stdout if stdout is not None else sys.stdout
+        self.quiet = quiet
 
     def _print(self, value: str) -> None:
-        print(value, file=self.stdout, flush=True)
+        if not self.quiet:
+            print(value, file=self.stdout, flush=True)
 
     def cleanup_success_archives(
         self,

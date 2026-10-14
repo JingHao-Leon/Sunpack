@@ -3,7 +3,6 @@ from sunpack.runtime.cli.cli_parsers import CliHelpFormatter, build_common_parse
 from sunpack.runtime.cli.cli_runtime import (
     resolve_common_root,
     resolve_target_paths,
-    result_for_missing,
     scan_finding_to_item,
     scan_result_to_item,
 )
@@ -51,9 +50,7 @@ def register(subparsers, ctx):
 
 def handle(args, ctx):
     reporter = ctx.reporter
-    target_paths, missing_paths = resolve_target_paths(args.paths, base_dir=ctx.cwd)
-    if missing_paths:
-        return result_for_missing(COMMAND, args, missing_paths, ctx)
+    target_paths = resolve_target_paths(args.paths, base_dir=ctx.cwd)
 
     config = load_request_config(ctx.cwd)
     orchestrator = ScanOrchestrator(config, EmbeddedOptions(force_scan=bool(args.deep_detect)))
@@ -74,6 +71,7 @@ def handle(args, ctx):
         "split_task_count": sum(1 for item in task_items if len(item["all_parts"]) > 1),
         "finding_count": len(finding_items),
         "blocked_finding_count": sum(1 for item in finding_items if item["status"] == "blocked"),
+        "scan_error_count": report.scan_error_count,
     }
     if not args.json:
         reporter.info(ctx.t(
@@ -107,7 +105,9 @@ def handle(args, ctx):
                 reporter.info(ctx.t("cli.scan.reason", reason=reason))
 
         for error in report.errors:
-            reporter.error(error)
+            reporter.error(ctx.t("report.scan_error", task=error))
+        if report.errors:
+            reporter.error(ctx.t("report.scan_incomplete"))
 
     return (EXIT_TASK_FAILED if report.errors else 0), CliCommandResult(
         command=COMMAND,

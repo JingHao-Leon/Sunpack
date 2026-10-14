@@ -15,7 +15,6 @@ from sunpack.pipeline.extraction.output_inventory import OutputInventory
 class NestedScanWork:
     roots: tuple[str, ...]
     session: DiscoveryScanSession | None
-    errors: tuple[tuple[str, str, str], ...] = ()
 
 
 class NestedOutputScanPolicy:
@@ -53,7 +52,6 @@ class NestedOutputScanPolicy:
     ) -> NestedScanWork:
         roots = []
         seen = set()
-        errors: list[tuple[str, str, str]] = []
         inventories = inventories or {}
         # A carrier can contain several independently extracted archives.  In
         # that case the carrier output directory is only a physical container;
@@ -65,42 +63,28 @@ class NestedOutputScanPolicy:
             config=self.config,
             include_raw_snapshots=True,
         )
-        has_primed_snapshot = False
         for output_dir in scan_dirs:
-            if not output_dir or not os.path.isdir(output_dir):
+            if not output_dir:
                 continue
             inventory = OutputInventory.from_value(
                 inventories.get(os.path.normcase(os.path.abspath(output_dir))),
                 expected_root=output_dir,
             )
             snapshot = self._snapshot_from_inventory(inventory, scan_session)
-            if snapshot is not None:
-                errors.extend(snapshot.native_snapshot.scan_errors())
-                if not snapshot.has_files:
-                    continue
-                root = os.path.abspath(output_dir)
-                key = os.path.normcase(root)
-                if key not in seen:
-                    seen.add(key)
-                    roots.append(root)
-                scan_session.prime_snapshot(root, snapshot)
-                has_primed_snapshot = True
-                continue
-            snapshot = self._scan_output(output_dir)
-            errors.extend(snapshot.native_snapshot.scan_errors())
+            if snapshot is None:
+                snapshot = self._scan_output(output_dir)
+            root = os.path.abspath(output_dir)
+            scan_session.prime_snapshot(root, snapshot)
             if not snapshot.has_files:
                 continue
-            root = os.path.abspath(output_dir)
             key = os.path.normcase(root)
             if key not in seen:
                 seen.add(key)
                 roots.append(root)
-            scan_session.prime_snapshot(root, snapshot)
-            has_primed_snapshot = True
-        session = scan_session if has_primed_snapshot else None
+        session = scan_session if roots or scan_session.has_scan_errors else None
         if session is not None:
             session.set_scan_roots(roots)
-        return NestedScanWork(tuple(roots), session, tuple(errors))
+        return NestedScanWork(tuple(roots), session)
 
     @staticmethod
     def project_logical_scan_roots(

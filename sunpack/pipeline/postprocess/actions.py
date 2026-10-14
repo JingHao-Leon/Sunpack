@@ -24,8 +24,9 @@ class PostProcessActions:
         if self.cleanup_mode not in {"keep", "recycle", "delete"}:
             raise ValueError("archive_cleanup_mode must be normalized before PostProcessActions starts")
         self.stdout = stdout if stdout is not None else sys.stdout
-        self.cleanup = ArchiveCleanup(mode=self.cleanup_mode, language=self.language, stdout=self.stdout)
-        self.flattener = DirectoryFlattener(language=self.language, stdout=self.stdout)
+        quiet = bool(cli_config.get("quiet", False))
+        self.cleanup = ArchiveCleanup(mode=self.cleanup_mode, language=self.language, stdout=self.stdout, quiet=quiet)
+        self.flattener = DirectoryFlattener(language=self.language, stdout=self.stdout, quiet=quiet)
 
     def apply(
         self,

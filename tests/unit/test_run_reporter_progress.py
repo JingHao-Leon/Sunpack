@@ -2,9 +2,12 @@ import io
 import re
 from types import SimpleNamespace
 
+import pytest
+
 import sunpack.pipeline.coordinator.reporting as reporting
 from sunpack.core.contracts.failures import FailureInfo, FailureKind
 from sunpack.pipeline.coordinator.reporting import RunReporter
+from sunpack.core.support.filesystem_scan_errors import filesystem_scan_failure
 
 
 def _task(path):
@@ -41,7 +44,7 @@ def test_progress_displays_nested_archive_parent_chain_and_final_page(tmp_path, 
     assert "[扫描完成] 发现 1 个待处理压缩包" in output
     assert "[递归扫描] 第 2 层发现 1 个嵌套压缩包" in output
     assert "└─ [成功 2/2] inner.7z（来自 outer.zip）" in output
-    assert "完整成功：2  部分恢复：0  失败：0" in output
+    assert "完整成功：2  部分恢复：0  解压失败：0  扫描错误：0" in output
     assert "递归层级：2 层，处理嵌套包：1 个" in output
     assert f"输出位置：{outer_output}" in output
 
@@ -88,8 +91,12 @@ def test_partial_recovery_prints_possible_missing_volume_warning(tmp_path, capsy
     assert "[警告] 压缩包内容不完整；可能缺少一个或多个分卷" in output
 
 
-def test_final_summary_localizes_structured_scan_failure(tmp_path):
-    stream = io.StringIO()
+@pytest.mark.parametrize("language", ["zh", "en"])
+@pytest.mark.parametrize("quiet, emit_errors", [(False, True), (True, True), (True, False)])
+def test_final_summary_distinguishes_scan_and_archive_errors(tmp_path, language, quiet, emit_errors):
+    # Separately covers mixed error presentation and overflow counts. Native
+    # scan tests alone cannot expose quiet swallowing archive failure messages.
+    output, errors = io.StringIO(), io.StringIO()
     path = tmp_path / "broken.7z"
     failure = FailureInfo(
         FailureKind.DAMAGED,
@@ -98,15 +105,33 @@ def test_final_summary_localizes_structured_scan_failure(tmp_path):
         message_key="failure.damaged",
         details={"path": str(path)},
     )
+    scan_failures = [filesystem_scan_failure(error, language) for error in (
+        ("read_dir", str(tmp_path / "blocked"), "access denied"),
+        ("omitted", str(tmp_path), "4"),
+    )]
 
-    RunReporter("zh", stdout=stream).log_final_summary(
+    RunReporter(language, quiet=quiet, emit_errors=emit_errors, stdout=output, stderr=errors).log_final_summary(
         0,
         0,
-        [str(path)],
-        failures=[failure],
+        [str(path), *(item.message for item in scan_failures)],
+        failures=[failure, *scan_failures],
     )
 
-    assert f"{path}: 压缩包损坏" in stream.getvalue()
+    labels = ("[解压失败]", "[扫描错误]", "[扫描不完整]", "压缩包损坏", "解压失败：1  扫描错误：5") if language == "zh" else (
+        "[Extraction failed]", "[Scan error]", "[Scan incomplete]", "Archive is damaged", "Extraction failed: 1  Scan errors: 5",
+    )
+    if emit_errors:
+        assert f"{path}: {labels[3]}" in errors.getvalue()
+        assert errors.getvalue().count(labels[0]) == 1
+        assert errors.getvalue().count(labels[1]) == 2
+        assert labels[2] in errors.getvalue()
+    else:
+        assert errors.getvalue() == ""
+    if quiet:
+        assert output.getvalue() == ""
+    else:
+        assert labels[4] in output.getvalue()
+        assert all(label not in output.getvalue() for label in labels[:3])
 
 
 def test_interactive_panel_updates_fixed_row_with_progress_and_colors(tmp_path, monkeypatch):

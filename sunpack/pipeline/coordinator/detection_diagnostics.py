@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from typing import Any
 
+from sunpack.core.contracts.run_state import RunState
+from sunpack.pipeline.coordinator.scan_session import DiscoveryScanSession
 from sunpack.pipeline.coordinator.task_provider import ArchiveTaskProvider
 from sunpack.pipeline.discovery.embedded.options import EmbeddedOptions
 from sunpack.core.support.path_keys import path_key
@@ -32,9 +34,18 @@ class DetectionDiagnostics:
             config,
             detection_options=detection_options,
         )
+        self.context = RunState()
+
+    @property
+    def errors(self) -> list[str]:
+        return self.context.scan_failed_tasks
 
     def collect(self, paths: list[str]) -> list[DiscoveryDiagnostic]:
-        result = self.provider.discover_targets(paths)
+        session = DiscoveryScanSession(config=self.provider.config)
+        result = self.provider.discover_targets(paths, scan_session=session)
+        self.context.record_scan_errors(
+            session.take_scan_errors(), self.provider.config.get("cli", {}).get("language", "en"),
+        )
         resolved = {
             path_key(item.main_path): item
             for item in result.resolved_tasks

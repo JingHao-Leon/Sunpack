@@ -2,8 +2,7 @@ import os
 from dataclasses import asdict
 from typing import Any
 
-from sunpack.runtime.cli.cli_constants import EXIT_USAGE
-from sunpack.runtime.cli.cli_types import CliCommandResult, CliPasswordSummary
+from sunpack.runtime.cli.cli_types import CliPasswordSummary
 from sunpack.core.config.loader import apply_config_overrides
 from sunpack.core.config.schema import normalize_config_value
 from sunpack.core.config.detection_view import directory_scan_mode, scan_filter_config, scan_filters_enabled
@@ -42,19 +41,15 @@ def build_effective_config(config: dict) -> dict[str, Any]:
         },
     }
 
-def resolve_target_paths(paths: list[str], *, base_dir: str | None = None) -> tuple[list[str], list[str]]:
+def resolve_target_paths(paths: list[str], *, base_dir: str | None = None) -> list[str]:
     target_paths = []
-    missing_paths = []
     for raw_path in paths:
         norm_path = os.path.normpath(raw_path)
         if not os.path.isabs(norm_path):
             norm_path = os.path.join(base_dir or os.getcwd(), norm_path)
         norm_path = os.path.abspath(norm_path)
-        if os.path.exists(norm_path):
-            target_paths.append(norm_path)
-        else:
-            missing_paths.append(raw_path)
-    return target_paths, missing_paths
+        target_paths.append(norm_path)
+    return target_paths
 
 
 def resolve_common_root(paths: list[str]) -> str:
@@ -215,16 +210,6 @@ def apply_runtime_config_overrides(config: dict, args, *, base_dir: str | None =
         section("passwords", {})["directory_passwords_enabled"] = bool(args.directory_passwords)
     apply_config_overrides(config, payload)
     return overrides
-
-
-def result_for_missing(command: str, args, missing_paths: list[str], ctx) -> tuple[int, CliCommandResult]:
-    errors = [ctx.t("cli.target_not_found", path=path) for path in missing_paths]
-    return EXIT_USAGE, CliCommandResult(
-        command=command,
-        inputs={"paths": list(getattr(args, "paths", []) or [])},
-        summary={"missing_count": len(missing_paths)},
-        errors=errors,
-    )
 
 
 def scan_result_to_item(res) -> dict[str, Any]:

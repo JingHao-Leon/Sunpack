@@ -18,7 +18,6 @@ from sunpack.runtime.cli.cli_runtime import (
     prompt_for_passwords_async,
     resolve_common_root,
     resolve_target_paths,
-    result_for_missing,
 )
 from sunpack.runtime.cli.cli_types import CliCommandResult
 from sunpack.runtime.cli.persistent_runtime import load_request_config, pipeline_engine
@@ -34,6 +33,8 @@ from sunpack.core.contracts.retry_targets import (
 from sunpack.core.contracts.results import OutcomeKind
 from sunpack.core.passwords import dedupe_passwords
 from sunpack.core.support.collections import dedupe_values
+from sunpack.core.support.filesystem_scan_errors import filesystem_scan_error_count, is_filesystem_scan_failure
+from sunpack.core.support.path_keys import absolute_path_key
 from sunpack.pipeline.discovery.embedded.options import EmbeddedOptions
 import asyncio
 import os
@@ -60,9 +61,7 @@ def register(subparsers, ctx):
 
 async def handle(args, ctx):
     reporter = ctx.reporter
-    target_paths, missing_paths = resolve_target_paths(args.paths, base_dir=ctx.cwd)
-    if missing_paths:
-        return result_for_missing(COMMAND, args, missing_paths, ctx)
+    target_paths = resolve_target_paths(args.paths, base_dir=ctx.cwd)
 
     from sunpack.runtime.cli.runtime_state import runtime_host
 
@@ -118,6 +117,7 @@ async def handle(args, ctx):
     latest_target_results: dict[str, object] = {}
     all_processed_keys: list[str] = []
     all_scan_failed_tasks: list[str] = []
+    all_filesystem_scan_failures: dict[tuple[str, str, str], FailureInfo] = {}
     all_recovered_outputs: list[dict] = []
     cleanup_results_by_path = {}
     initial_password_summary = build_password_summary(
@@ -130,6 +130,7 @@ async def handle(args, ctx):
         initial_password_summary,
         quiet=bool(getattr(reporter, "quiet", False) or getattr(reporter, "json_mode", False)),
         verbose=bool(getattr(reporter, "verbose", False)),
+        json_mode=bool(args.json),
     )
     deep_detect = bool(getattr(args, "deep_detect", False))
     engine_context = pipeline_engine(run_config)
@@ -157,6 +158,13 @@ async def handle(args, ctx):
             summary = response.summary
             failed_tasks = list(summary.failed_tasks)
             failures = list(summary.failures)
+            filesystem_failures = [failure for failure in summary.scan_failures if is_filesystem_scan_failure(failure)]
+            filesystem_messages = {failure.message for failure in filesystem_failures}
+            for failure in filesystem_failures:
+                key = (failure.details.get("operation", ""),
+                       absolute_path_key(failure.details.get("path", "")),
+                       failure.message_params.get("error", failure.message))
+                all_filesystem_scan_failures[key] = failure
             processed_keys = list(summary.processed_keys)
             for failed_task in list(getattr(summary, "scan_failed_tasks", ()) or ()):
                 if failed_task not in all_scan_failed_tasks:
@@ -171,7 +179,8 @@ async def handle(args, ctx):
             retry_targets = [path for path in password_retry_paths(summary) if os.path.exists(path)]
             attempts.append({
                 "success_count": summary.success_count,
-                "failed_count": len(failed_tasks),
+                "failed_count": sum(task not in filesystem_messages for task in failed_tasks),
+                "scan_error_count": filesystem_scan_error_count(filesystem_failures),
                 "processed_count": len(set(processed_keys)),
                 "partial_success_count": getattr(summary, "partial_success_count", 0),
                 "recovered_outputs": list(getattr(summary, "recovered_outputs", []) or []),
@@ -234,6 +243,7 @@ async def handle(args, ctx):
         recovered_outputs = list(getattr(summary, "recovered_outputs", []) or [])
         cleanup_results = list(getattr(summary, "cleanup_results", []) or [])
 
+    filesystem_messages = {failure.message for failure in all_filesystem_scan_failures.values()}
     result = CliCommandResult(
         command=COMMAND,
         inputs={
@@ -248,7 +258,8 @@ async def handle(args, ctx):
         },
         summary={
             "success_count": success_count,
-            "failed_count": len(failed_tasks),
+            "failed_count": sum(task not in filesystem_messages for task in failed_tasks),
+            "scan_error_count": filesystem_scan_error_count(all_filesystem_scan_failures.values()),
             "processed_count": len(set(processed_keys)),
             "partial_success_count": partial_success_count,
             "recovered_outputs": recovered_outputs,
@@ -290,12 +301,14 @@ def _extract_run_config(
     *,
     quiet: bool = False,
     verbose: bool = False,
+    json_mode: bool = False,
 ) -> dict:
     run_config = dict(config)
     run_config["cli"] = {
         **(config.get("cli", {}) if isinstance(config.get("cli"), dict) else {}),
         "quiet": quiet,
         "verbose": verbose,
+        "json": json_mode,
     }
     run_config["extraction"] = {
         **(config.get("extraction", {}) if isinstance(config.get("extraction"), dict) else {}),

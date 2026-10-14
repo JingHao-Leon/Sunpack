@@ -8,6 +8,7 @@ from typing import Any, List
 from sunpack.core.contracts.failures import FailureInfo
 from sunpack.core.contracts.results import ArchiveCleanupResult, DirectoryFlattenResult
 from sunpack.core.i18n import I18nContext
+from sunpack.core.support.filesystem_scan_errors import filesystem_scan_error_count, is_filesystem_scan_failure
 
 # native 侧的空间事件名（与 sevenzip_runner 的 _SPACE_EVENTS 一致），表达等待状态而非 job 生命周期状态。
 _SPACE_EVENTS = frozenset({"space_blocked", "space_status", "space_resumed"})
@@ -31,6 +32,7 @@ class RunReporter:
         quiet: bool = False,
         verbose: bool = False,
         *,
+        emit_errors: bool = True,
         stdout=None,
         stderr=None,
     ):
@@ -38,6 +40,7 @@ class RunReporter:
         self.language = self.i18n.language
         self.quiet = bool(quiet)
         self.verbose = bool(verbose)
+        self.emit_errors = bool(emit_errors)
         self.stdout = stdout if stdout is not None else sys.stdout
         self.stderr = stderr if stderr is not None else sys.stderr
         self._lock = threading.Lock()
@@ -287,14 +290,19 @@ class RunReporter:
         recovered = list(recovered_outputs or [])
         partial_count = len(recovered)
         complete_count = max(0, int(success_count))
-        failed_count = len(failed_tasks)
+        structured_failures = list(failures or [])
+        scan_failures = [failure for failure in structured_failures if is_filesystem_scan_failure(failure)]
+        scan_messages = {failure.message for failure in scan_failures}
+        archive_failed_tasks = [task for task in failed_tasks if task not in scan_messages]
+        failed_count = len(archive_failed_tasks)
         elapsed = max(0.0, time.time() - start_time)
 
         if not self.quiet:
             self._print("\n" + self.i18n.t("report.complete_title"))
             self._print("-" * 54)
             self._print(self.i18n.t("report.time", duration=self.i18n.format_duration(elapsed)))
-            self._print(self.i18n.t("report.counts", complete=complete_count, partial=partial_count, failed=failed_count))
+            self._print(self.i18n.t("report.counts", complete=complete_count, partial=partial_count,
+                                    failed=failed_count, scan_errors=filesystem_scan_error_count(scan_failures)))
             if self._max_depth > 1:
                 self._print(self.i18n.t("report.recursion", levels=self._max_depth, count=self._nested_tasks))
             output_location = self._output_location()
@@ -310,25 +318,28 @@ class RunReporter:
                 if warning is not None:
                     self._print(self.i18n.t("report.partial_warning", warning=warning.message))
 
-        structured_failures = list(failures or [])
-        if failed_tasks:
-            if not self.quiet:
-                for failed_task in failed_tasks:
-                    display_task = self._format_failed_task(failed_task, structured_failures)
-                    self._print(self.i18n.t("report.failed", task=display_task))
-                if structured_failures and all(failure.is_password_failure for failure in structured_failures):
-                    self._print(self.i18n.t("report.password_failure"))
-        else:
-            if not self.quiet:
-                self._print(self.i18n.t("report.partial_complete" if recovered else "report.all_success"))
+        if self.emit_errors:
+            for failed_task in archive_failed_tasks:
+                display_task = self._format_failed_task(failed_task, structured_failures)
+                self._print(self.i18n.t("report.failed", task=display_task), error=True)
+            for failure in scan_failures:
+                self._print(self.i18n.t("report.scan_error", task=failure.message), error=True)
+            if scan_failures:
+                self._print(self.i18n.t("report.scan_incomplete"), error=True)
+            if archive_failed_tasks and structured_failures and all(failure.is_password_failure for failure in structured_failures):
+                self._print(self.i18n.t("report.password_failure"), error=True)
+        if not failed_tasks and not scan_failures and not self.quiet:
+            self._print(self.i18n.t("report.partial_complete" if recovered else "report.all_success"))
 
         cleanup_failures = [
             item for item in cleanup_results or [] if item.status == "failed"
         ]
-        if cleanup_failures and not self.quiet:
-            self._print(self.i18n.t("cleanup.incomplete", count=len(cleanup_failures)))
+        if cleanup_failures and self.emit_errors:
+            self._print(self.i18n.t("report.postprocess_warning", message=self.i18n.t(
+                "cleanup.incomplete", count=len(cleanup_failures),
+            )), error=True)
             for item in cleanup_failures:
-                self._print(f"  {item.path}: {item.message}")
+                self._print(f"  {item.path}: {item.message}", error=True)
 
         if not self.quiet:
             self._print("-" * 54)
@@ -363,8 +374,8 @@ class RunReporter:
                 return f"{raw_task}: {reason}"
         return raw_task
 
-    def _print(self, value: str) -> None:
-        print(value, file=self.stdout, flush=True)
+    def _print(self, value: str, *, error: bool = False) -> None:
+        print(value, file=self.stderr if error else self.stdout, flush=True)
 
     def _lineage_for_path(self, path: str) -> tuple[str, ...]:
         if not path:

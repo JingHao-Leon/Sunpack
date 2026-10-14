@@ -56,6 +56,10 @@ For `extract`, `scan`, and `inspect`, the process-mode override remains effectiv
 
 `passwords` supports only `--json` plus the password input options; `config` supports `--json` and `--quiet`. JSON results use a unified outer set of fields: `command`, `inputs`, `summary`, `errors`, `items`, `tasks`, `logs`; each command fills `items` or `tasks` according to its own semantics.
 
+For `extract`, `scan`, and `inspect`, normal text goes to stdout and errors go to stderr. `[Scan error]` identifies filesystem scan failures; `[Extraction failed]` identifies archive processing failures. `[Scan incomplete]` means some paths could not be read and the discovered results may be incomplete. Readable inputs are still processed. `--quiet` hides progress while retaining errors and post-processing warnings; `--json` emits the JSON result without these text messages.
+
+JSON `summary.scan_error_count` counts filesystem scan errors, including errors whose individual details were omitted. For `extract`, `summary.failed_count` and each attempt's `failed_count` exclude these scan errors; attempts also include `scan_error_count`. Both error categories remain in `errors` and cause a nonzero exit code, even when other archives succeed.
+
 ## extract
 
 Usage:

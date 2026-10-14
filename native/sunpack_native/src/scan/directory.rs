@@ -1095,6 +1095,34 @@ pub(crate) fn scan_directory_snapshot(
     )
 }
 
+/// Filesystem target classification only; archive analysis remains in discovery.
+#[pyfunction]
+pub(crate) fn classify_scan_targets(
+    py: Python<'_>,
+    paths: Vec<String>,
+) -> (Vec<u8>, Vec<DirectoryReadError>) {
+    py.detach(|| {
+        let mut kinds = Vec::with_capacity(paths.len());
+        let mut errors = Vec::new();
+        for path in paths {
+            match fs::metadata(&path) {
+                Ok(metadata) => kinds.push(if metadata.is_file() {
+                    1
+                } else if metadata.is_dir() {
+                    2
+                } else {
+                    3
+                }),
+                Err(error) => {
+                    kinds.push(0);
+                    errors.push(("metadata".to_string(), path, error.to_string()));
+                }
+            }
+        }
+        (kinds, errors)
+    })
+}
+
 #[pyfunction]
 #[pyo3(signature = (root_path, max_depth, patterns, prune_dir_globs, blocked_extensions, blocked_file_names, size_ranges, mtime_ranges, whitelist_rules))]
 pub(crate) fn scan_directory_snapshots(
@@ -2245,7 +2273,7 @@ fn scan_directory_impl<const PROFILE: bool>(
 ) -> PyResult<DirectoryScanRecords> {
     let scan_started = Instant::now();
     let root = PathBuf::from(root_path);
-    let mut errors = DirectoryReadErrors::default();
+    let mut errors = DirectoryReadErrors::new(&root);
     let metadata = match fs::metadata(&root) {
         Ok(metadata) => Some(metadata),
         Err(error) => {

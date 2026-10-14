@@ -11,6 +11,8 @@ from sunpack.runtime.cli.cli_context import CliContext
 from sunpack.runtime.cli.cli_reporter import CliReporter
 from sunpack.runtime.cli.cli_runtime import build_password_summary
 from sunpack.runtime.cli.commands import extract
+from sunpack.core.support.filesystem_scan_errors import filesystem_scan_failure
+from sunpack.core.contracts.run_state import RunState
 from tests.helpers.fake_pipeline_engine import FakePipelineEngine
 
 
@@ -88,7 +90,7 @@ def test_extract_preserves_scan_failure_when_target_succeeds(tmp_path, monkeypat
                 target_results=(
                     TargetRunResult(str(target), OutcomeKind.COMPLETE_SUCCESS),
                 ),
-                scan_failed_tasks=("unreadable.bin [discovery failed]",),
+                scan_failures=(FailureInfo(FailureKind.DAMAGED, "embedded_boundary", "unreadable.bin [discovery failed]"),),
             )
 
     monkeypatch.setattr(extract, "pipeline_engine", lambda _config: FakePipelineEngine(FakeRunner))
@@ -114,6 +116,77 @@ def test_extract_preserves_scan_failure_when_target_succeeds(tmp_path, monkeypat
     assert exit_code != 0
     assert result.summary["success_count"] == 1
     assert result.errors == ["unreadable.bin [discovery failed]"]
+
+
+def test_extract_counts_do_not_classify_or_dedupe_by_display_text(tmp_path, monkeypatch):
+    # Same text in two categories must remain two errors and count once in
+    # each category; checking renderer labels alone misses JSON aggregation.
+    scan_failure = filesystem_scan_failure(("metadata", str(tmp_path / "missing"), "denied"), "en")
+
+    class Runner:
+        recent_passwords = []
+
+        def __init__(self, config):
+            pass
+
+        def run_targets(self, paths):
+            return RunSummary(scan_failures=(scan_failure,), target_results=(TargetRunResult(
+                paths[0], OutcomeKind.FAILURE, error=scan_failure.message,
+                failure=FailureInfo(FailureKind.DAMAGED, "extract", scan_failure.message),
+                failure_message=scan_failure.message,
+            ),))
+
+    monkeypatch.setattr(extract, "pipeline_engine", lambda config: FakePipelineEngine(Runner))
+    monkeypatch.setattr(extract, "collect_clipboard_passwords", lambda config: [])
+    args = SimpleNamespace(paths=[str(tmp_path / "archive")], password=[], password_file=None, prompt_passwords=False,
+                           no_builtin_passwords=True, json=True, quiet=False, verbose=False)
+    code, result = asyncio.run(extract.handle(args, CliContext(language="en", reporter=CliReporter(json_mode=True))))
+    assert code != 0
+    assert result.summary["failed_count"] == 1 and result.summary["scan_error_count"] == 1
+    assert result.errors == [scan_failure.message, scan_failure.message]
+
+
+def test_scan_diagnostic_budget_is_shared_across_password_retry_rounds(tmp_path, monkeypatch):
+    # Per-request budgets do not bound the final CLI report if each password
+    # round keeps its own full scan diagnostic list in attempt history.
+    target = tmp_path / "archive.zip"
+    target.write_bytes(b"archive")
+    rounds = []
+
+    class Runner:
+        recent_passwords = []
+
+        def __init__(self, config):
+            rounds.append(None)
+
+        def run_targets(self, paths):
+            state = RunState()
+            state.record_scan_errors((("metadata", str(tmp_path / f"missing-{len(rounds)}-{index}"), "denied")
+                                      for index in range(75)), "en")
+            failure = FailureInfo(FailureKind.WRONG_PASSWORD, "extract", "wrong password") if len(rounds) == 1 else None
+            return RunSummary(scan_failures=tuple(state.scan_failures), target_results=(TargetRunResult(
+                paths[0], OutcomeKind.FAILURE if failure else OutcomeKind.COMPLETE_SUCCESS,
+                failure=failure, error=failure.message if failure else "",
+            ),))
+
+    async def confirm(*args):
+        return True
+
+    async def password(*args, **kwargs):
+        return ["secret"]
+
+    monkeypatch.setattr(extract, "pipeline_engine", lambda config: FakePipelineEngine(Runner))
+    monkeypatch.setattr(extract, "collect_clipboard_passwords", lambda config: [])
+    monkeypatch.setattr(extract, "_confirm_password_retry", confirm)
+    monkeypatch.setattr(extract, "prompt_for_passwords_async", password)
+    args = SimpleNamespace(paths=[str(target)], password=[], password_file=None, prompt_passwords=False,
+                           no_builtin_passwords=True, json=False, quiet=False, verbose=False)
+    code, result = asyncio.run(extract.handle(args, CliContext(language="en", reporter=CliReporter(quiet=True))))
+    assert code != 0 and result.summary["success_count"] == 1
+    assert result.summary["scan_error_count"] == 150
+    assert len(result.summary["scan_failures"]) == len(result.errors) == 101
+    assert len(result.tasks) == 2
+    assert [len(attempt["failures"]) for attempt in result.tasks] == [1, 0]
 
 
 def test_extract_prompts_for_password_retry_after_wrong_password(tmp_path, monkeypatch):

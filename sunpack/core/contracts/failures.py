@@ -6,6 +6,7 @@ from typing import Any
 
 
 class FailureKind(str, Enum):
+    INVALID_INPUT = "invalid_input"
     PASSWORD_REQUIRED = "password_required"
     WRONG_PASSWORD = "wrong_password"
     PASSWORD_INCONCLUSIVE = "password_inconclusive"
@@ -35,6 +36,11 @@ class FailureInfo:
     user_action: str = ""
     causes: tuple["FailureInfo", ...] = field(default_factory=tuple)
     details: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def display_message(self) -> str:
+        path = self.details.get("path")
+        return f"{path}: {self.message}" if path and self.stage == "embedded_boundary" else self.message
 
     @property
     def is_password_failure(self) -> bool:

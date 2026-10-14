@@ -204,11 +204,7 @@ class PipelineEngine:
                         submission.request_id,
                         runtime.reporter.log_final_summary,
                         start_time,
-                        response.summary.success_count,
-                        response.summary.failed_tasks,
-                        recovered_outputs=response.summary.recovered_outputs,
-                        failures=response.summary.failures,
-                        cleanup_results=response.summary.cleanup_results,
+                        response.summary,
                         request_id=submission.request_id,
                         cancellation=cancellation,
                     )
@@ -1851,7 +1847,6 @@ class _RequestResults:
         request_results = list(context.target_results)
         summary = context.snapshot(
             target_results=request_results,
-            scan_failed_tasks=list(context.scan_failed_tasks),
             scan_failures=list(context.scan_failures),
             policy_skips=list(context.policy_skips),
         )

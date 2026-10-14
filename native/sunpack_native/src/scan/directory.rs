@@ -1103,7 +1103,7 @@ pub(crate) fn classify_scan_targets(
 ) -> (Vec<u8>, Vec<DirectoryReadError>) {
     py.detach(|| {
         let mut kinds = Vec::with_capacity(paths.len());
-        let mut errors = Vec::new();
+        let mut errors = DirectoryReadErrors::report();
         for path in paths {
             match fs::metadata(&path) {
                 Ok(metadata) => kinds.push(if metadata.is_file() {
@@ -1115,11 +1115,11 @@ pub(crate) fn classify_scan_targets(
                 }),
                 Err(error) => {
                     kinds.push(0);
-                    errors.push(("metadata".to_string(), path, error.to_string()));
+                    errors.push(Path::new(&path), "metadata", error);
                 }
             }
         }
-        (kinds, errors)
+        (kinds, errors.into_messages())
     })
 }
 

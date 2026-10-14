@@ -3,7 +3,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import List
 
-from sunpack.core.contracts.failures import FailureInfo
+from sunpack.core.contracts.failures import FailureInfo, FailureKind
+from sunpack.core.support.filesystem_scan_errors import is_filesystem_scan_failure, filesystem_scan_error_count
 
 
 class OutcomeKind(str, Enum):
@@ -66,14 +67,13 @@ class TargetRunResult:
 @dataclass(frozen=True)
 class RunSummary:
     target_results: tuple[TargetRunResult, ...] = ()
-    scan_failed_tasks: tuple[str, ...] = ()
     scan_failures: tuple[FailureInfo, ...] = ()
     policy_skips: tuple[dict, ...] = ()
     cleanup_results: tuple[ArchiveCleanupResult, ...] = ()
     postprocess_completed: bool = False
 
     def __post_init__(self) -> None:
-        for name in ("target_results", "scan_failed_tasks", "scan_failures", "policy_skips", "cleanup_results"):
+        for name in ("target_results", "scan_failures", "policy_skips", "cleanup_results"):
             object.__setattr__(self, name, tuple(getattr(self, name)))
 
     @property
@@ -89,9 +89,25 @@ class RunSummary:
         return sum(item.outcome_kind == OutcomeKind.PARTIAL_SUCCESS for item in self.target_results)
 
     @property
+    def failed_count(self) -> int:
+        return (sum(not is_filesystem_scan_failure(failure) for failure in self.scan_failures)
+                + sum(item.outcome_kind == OutcomeKind.FAILURE and (
+                    item.failure is None or item.failure.kind != FailureKind.INVALID_INPUT
+                ) for item in self.target_results))
+
+    @property
+    def input_error_count(self) -> int:
+        return sum(item.outcome_kind == OutcomeKind.FAILURE and item.failure is not None
+                   and item.failure.kind == FailureKind.INVALID_INPUT for item in self.target_results)
+
+    @property
+    def scan_error_count(self) -> int:
+        return filesystem_scan_error_count(self.scan_failures)
+
+    @property
     def failed_tasks(self) -> List[str]:
         return [
-            *self.scan_failed_tasks,
+            *(failure.display_message for failure in self.scan_failures),
             *(item.failure_message or f"{item.input_path} [{item.error}]"
               for item in self.target_results if item.outcome_kind == OutcomeKind.FAILURE),
         ]

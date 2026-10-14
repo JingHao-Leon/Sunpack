@@ -11,6 +11,7 @@ from sunpack.pipeline.coordinator.target_groups import filesystem_candidate, rel
 from sunpack.pipeline.discovery.filesystem.directory_scanner import DirectoryScanner
 from sunpack.pipeline.discovery.relations import CandidateGroup, RelationsScheduler
 from sunpack.core.support.path_keys import normalized_path, path_key, safe_relative_path
+from sunpack.core.support.filesystem_scan_errors import DirectoryErrorReport
 
 
 class DiscoveryScanSession:
@@ -31,15 +32,17 @@ class DiscoveryScanSession:
         self._relation_group_signatures: dict[str, str] = {}
         self._head_facts = NativeHeadFactCache()
         self._scan_roots: list[str] = []
-        self._scan_errors: list[tuple[str, str, str]] = []
+        self._scan_errors: DirectoryErrorReport | None = None
 
     def add_scan_errors(self, errors: Iterable[tuple[str, str, str]]) -> None:
+        if not errors:
+            return
+        if self._scan_errors is None:
+            self._scan_errors = DirectoryErrorReport()
         self._scan_errors.extend(errors)
 
     def take_scan_errors(self) -> list[tuple[str, str, str]]:
-        errors = self._scan_errors
-        self._scan_errors = []
-        return errors
+        return self._scan_errors.take() if self._scan_errors is not None else []
 
     @property
     def has_scan_errors(self) -> bool:

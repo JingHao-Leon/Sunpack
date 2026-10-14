@@ -58,7 +58,9 @@ For `extract`, `scan`, and `inspect`, the process-mode override remains effectiv
 
 For `extract`, `scan`, and `inspect`, normal text goes to stdout and errors go to stderr. `[Scan error]` identifies filesystem scan failures; `[Extraction failed]` identifies archive processing failures. `[Scan incomplete]` means some paths could not be read and the discovered results may be incomplete. Readable inputs are still processed. `--quiet` hides progress while retaining errors and post-processing warnings; `--json` emits the JSON result without these text messages.
 
-JSON `summary.scan_error_count` counts filesystem scan errors, including errors whose individual details were omitted. For `extract`, `summary.failed_count` and each attempt's `failed_count` exclude these scan errors; attempts also include `scan_error_count`. Both error categories remain in `errors` and cause a nonzero exit code, even when other archives succeed.
+JSON `summary.scan_error_count` counts filesystem scan errors, including errors whose individual details were omitted. Filesystem scan diagnostics retain at most 100 records per report, plus one total omission summary; the existing 20-detail limit per directory also applies. Above the report budget, only the omitted count is accumulated, without retaining each path or error identity. Archive task results remain available independently of this diagnostic budget.
+
+For `extract`, `summary.failed_count` and each attempt's `failed_count` count archive processing failures. `input_error_count` separately counts invalid inputs, such as a directory passed to `--direct-file`; these use `[Input error]` in text output. Attempts also include `scan_error_count` and `input_error_count`. Bounded filesystem diagnostic details are stored once in `summary.scan_failures`; each attempt's `failures` contains archive and input failures. Classification uses structured failure kinds and target results. All error categories remain in `errors` and cause a nonzero exit code, even when other archives succeed.
 
 ## extract
 

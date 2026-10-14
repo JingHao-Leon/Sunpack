@@ -6,6 +6,9 @@ from sunpack_native import classify_scan_targets, relations_logical_name
 from sunpack.core.contracts.archive_input import ArchiveInputDescriptor
 from sunpack.core.contracts.discovery import StageResult
 from sunpack.core.contracts.run_state import RunState
+from sunpack.core.contracts.failures import FailureInfo, FailureKind
+from sunpack.core.contracts.results import TargetRunResult, OutcomeKind
+from sunpack.core.i18n import I18nContext
 from sunpack.core.contracts.tasks import ArchiveTask
 from sunpack.pipeline.coordinator.task_provider import ArchiveTaskProvider
 from sunpack.pipeline.coordinator.scan_session import DiscoveryScanSession
@@ -58,7 +61,6 @@ class ArchiveTaskScanner:
     ) -> StageResult:
         """Return discovery facts for reporting without changing extraction semantics."""
 
-        self.provider.failed_candidates = []
         self.provider.failed_candidate_failures = []
         scan_session = scan_session or DiscoveryScanSession(config=self.config)
         self.last_scan_session = scan_session
@@ -103,12 +105,9 @@ class ArchiveTaskScanner:
         )
 
     def _record_provider_failures(self) -> None:
-        for failure in self.provider.failed_candidates:
-            if failure not in self.context.scan_failed_tasks:
-                self.context.scan_failed_tasks.append(failure)
-        for failure in self.provider.failed_candidate_failures:
-            if failure not in self.context.scan_failures:
-                self.context.scan_failures.append(failure)
+        self.context.record_failures(
+            self.provider.failed_candidate_failures, self.config.get("cli", {}).get("language", "en"),
+        )
 
     def direct_file_tasks(self, file_paths: list[str]) -> list[ArchiveTask]:
         tasks: list[ArchiveTask] = []
@@ -116,9 +115,16 @@ class ArchiveTaskScanner:
         kinds, errors = classify_scan_targets(paths)
         self.context.record_scan_errors(errors, self.config.get("cli", {}).get("language", "en"))
         normalized_paths = [path for path, kind in zip(paths, kinds) if kind == 1]
+        i18n = None
         for path, kind in zip(paths, kinds):
             if kind not in {0, 1}:
-                self.context.scan_failed_tasks.append(f"{path} [direct mode requires a file]")
+                i18n = i18n or I18nContext(self.config.get("cli", {}).get("language", "en"))
+                key = "failure.direct_file_required"
+                failure = FailureInfo(FailureKind.INVALID_INPUT, "input", i18n.t(key, path=path),
+                                      message_key=key, message_params={"path": path}, details={"path": path})
+                self.context.target_results.append(TargetRunResult(
+                    path, OutcomeKind.FAILURE, failure=failure, error=failure.message, failure_message=failure.message,
+                ))
 
         session = DiscoveryScanSession(config=self.config)
         discovered = self.provider.discover_targets(normalized_paths, scan_session=session)

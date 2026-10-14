@@ -1874,8 +1874,6 @@ class WatchScheduler:
                 summary,
                 scan_failures=tuple(failure for failure in summary.scan_failures
                                     if failure.kind != FailureKind.FILESYSTEM_ERROR),
-                scan_failed_tasks=tuple(message for message in summary.scan_failed_tasks
-                                        if message not in scan_errors),
             )
 
         results = target_results(summary)
@@ -2022,7 +2020,7 @@ class WatchScheduler:
             ]
             return WatchRunResult(processed=1, failed=1, errors=errors)
 
-        if retired_failures and not summary.scan_failed_tasks:
+        if retired_failures and not summary.scan_failures:
             self._notify("suppressed", request.notification_id)
             return WatchRunResult(processed=1)
 

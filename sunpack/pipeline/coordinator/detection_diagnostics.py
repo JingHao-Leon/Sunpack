@@ -38,7 +38,7 @@ class DetectionDiagnostics:
 
     @property
     def errors(self) -> list[str]:
-        return self.context.scan_failed_tasks
+        return [failure.display_message for failure in self.context.scan_failures]
 
     def collect(self, paths: list[str]) -> list[DiscoveryDiagnostic]:
         session = DiscoveryScanSession(config=self.provider.config)

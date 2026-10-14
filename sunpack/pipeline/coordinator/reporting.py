@@ -3,12 +3,12 @@ import shutil
 import sys
 import threading
 import time
-from typing import Any, List
+from typing import Any
 
-from sunpack.core.contracts.failures import FailureInfo
-from sunpack.core.contracts.results import ArchiveCleanupResult, DirectoryFlattenResult
+from sunpack.core.contracts.failures import FailureInfo, FailureKind
+from sunpack.core.contracts.results import DirectoryFlattenResult, RunSummary, OutcomeKind
 from sunpack.core.i18n import I18nContext
-from sunpack.core.support.filesystem_scan_errors import filesystem_scan_error_count, is_filesystem_scan_failure
+from sunpack.core.support.filesystem_scan_errors import is_filesystem_scan_failure
 
 # native 侧的空间事件名（与 sevenzip_runner 的 _SPACE_EVENTS 一致），表达等待状态而非 job 生命周期状态。
 _SPACE_EVENTS = frozenset({"space_blocked", "space_status", "space_resumed"})
@@ -281,20 +281,11 @@ class RunReporter:
     def log_final_summary(
         self,
         start_time: float,
-        success_count: int,
-        failed_tasks: List[str],
-        recovered_outputs: List[dict] | None = None,
-        failures: List[FailureInfo] | None = None,
-        cleanup_results: List[ArchiveCleanupResult] | None = None,
+        summary: RunSummary,
     ):
-        recovered = list(recovered_outputs or [])
+        recovered = summary.recovered_outputs
         partial_count = len(recovered)
-        complete_count = max(0, int(success_count))
-        structured_failures = list(failures or [])
-        scan_failures = [failure for failure in structured_failures if is_filesystem_scan_failure(failure)]
-        scan_messages = {failure.message for failure in scan_failures}
-        archive_failed_tasks = [task for task in failed_tasks if task not in scan_messages]
-        failed_count = len(archive_failed_tasks)
+        complete_count = summary.success_count
         elapsed = max(0.0, time.time() - start_time)
 
         if not self.quiet:
@@ -302,7 +293,8 @@ class RunReporter:
             self._print("-" * 54)
             self._print(self.i18n.t("report.time", duration=self.i18n.format_duration(elapsed)))
             self._print(self.i18n.t("report.counts", complete=complete_count, partial=partial_count,
-                                    failed=failed_count, scan_errors=filesystem_scan_error_count(scan_failures)))
+                                    failed=summary.failed_count, scan_errors=summary.scan_error_count,
+                                    input_errors=summary.input_error_count))
             if self._max_depth > 1:
                 self._print(self.i18n.t("report.recursion", levels=self._max_depth, count=self._nested_tasks))
             output_location = self._output_location()
@@ -319,20 +311,24 @@ class RunReporter:
                     self._print(self.i18n.t("report.partial_warning", warning=warning.message))
 
         if self.emit_errors:
-            for failed_task in archive_failed_tasks:
-                display_task = self._format_failed_task(failed_task, structured_failures)
-                self._print(self.i18n.t("report.failed", task=display_task), error=True)
-            for failure in scan_failures:
-                self._print(self.i18n.t("report.scan_error", task=failure.message), error=True)
-            if scan_failures:
+            for failure in summary.scan_failures:
+                key = "report.scan_error" if is_filesystem_scan_failure(failure) else "report.failed"
+                self._print(self.i18n.t(key, task=self._format_failure(failure)), error=True)
+            for result in summary.target_results:
+                if result.outcome_kind != OutcomeKind.FAILURE:
+                    continue
+                key = "report.input_error" if result.failure is not None and result.failure.kind == FailureKind.INVALID_INPUT else "report.failed"
+                message = result.failure_message or f"{result.input_path} [{result.error}]"
+                self._print(self.i18n.t(key, task=message), error=True)
+            if summary.scan_error_count:
                 self._print(self.i18n.t("report.scan_incomplete"), error=True)
-            if archive_failed_tasks and structured_failures and all(failure.is_password_failure for failure in structured_failures):
+            if summary.failed_count and summary.failures and all(failure.is_password_failure for failure in summary.failures):
                 self._print(self.i18n.t("report.password_failure"), error=True)
-        if not failed_tasks and not scan_failures and not self.quiet:
+        if not summary.failed_tasks and not self.quiet:
             self._print(self.i18n.t("report.partial_complete" if recovered else "report.all_success"))
 
         cleanup_failures = [
-            item for item in cleanup_results or [] if item.status == "failed"
+            item for item in summary.cleanup_results if item.status == "failed"
         ]
         if cleanup_failures and self.emit_errors:
             self._print(self.i18n.t("report.postprocess_warning", message=self.i18n.t(
@@ -344,35 +340,10 @@ class RunReporter:
         if not self.quiet:
             self._print("-" * 54)
 
-    def _format_failed_task(
-        self,
-        failed_task: str,
-        failures: list[FailureInfo],
-    ) -> str:
-        raw_task = str(failed_task)
-        try:
-            task_key = _absolute_key(raw_task)
-        except (OSError, ValueError):
-            task_key = ""
-        for failure in failures:
-            details = failure.details if isinstance(failure.details, dict) else {}
-            failure_path = str(details.get("path") or details.get("archive") or "")
-            if not failure_path:
-                continue
-            try:
-                same_path = bool(task_key) and _absolute_key(failure_path) == task_key
-            except (OSError, ValueError):
-                same_path = failure_path == raw_task
-            if not same_path:
-                continue
-            reason = (
-                self.i18n.t(failure.message_key, **failure.message_params)
-                if failure.message_key
-                else failure.message
-            )
-            if reason:
-                return f"{raw_task}: {reason}"
-        return raw_task
+    def _format_failure(self, failure: FailureInfo) -> str:
+        reason = self.i18n.t(failure.message_key, **failure.message_params) if failure.message_key else failure.message
+        path = failure.details.get("path")
+        return f"{path}: {reason}" if path and failure.stage == "embedded_boundary" else reason
 
     def _print(self, value: str, *, error: bool = False) -> None:
         print(value, file=self.stderr if error else self.stdout, flush=True)

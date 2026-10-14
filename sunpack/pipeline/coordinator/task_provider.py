@@ -28,7 +28,6 @@ class ArchiveTaskProvider:
             options,
         )
         self._relations = RelationsScheduler(config)
-        self.failed_candidates: list[str] = []
         self.failed_candidate_failures: list[FailureInfo] = []
 
     def discover_targets(
@@ -85,7 +84,6 @@ class ArchiveTaskProvider:
         *,
         is_recursive_scan: bool = False,
     ) -> list[ArchiveTask]:
-        self.failed_candidates = []
         self.failed_candidate_failures = []
         discovered = self.discover_targets(
             scan_roots,
@@ -133,8 +131,6 @@ class ArchiveTaskProvider:
             if failure is None:
                 continue
             kind, message_key, message, user_action = failure
-            if trace.entry_path not in self.failed_candidates:
-                self.failed_candidates.append(trace.entry_path)
             info = FailureInfo(
                 kind=kind,
                 stage="embedded_boundary",

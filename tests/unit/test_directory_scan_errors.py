@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from sunpack_native import NativeDirectoryScanOptions, scan_directory_snapshot
+from sunpack_native import NativeDirectoryScanOptions, scan_directory_snapshot, classify_scan_targets, scan_watch_candidates
 
 from sunpack.core.config.schema import normalize_config
 from sunpack.core.contracts.failures import FailureKind
@@ -19,6 +19,7 @@ from sunpack.core.i18n.context import validate_catalog
 from sunpack.core.support.filesystem_scan_errors import filesystem_scan_error_count
 from sunpack.pipeline.coordinator.output_scan_policy import NestedOutputScanPolicy
 from sunpack.pipeline.coordinator.task_scan import ArchiveTaskScanner
+from sunpack.pipeline.coordinator.scan_session import DiscoveryScanSession
 from sunpack.runtime.cli.cli_context import CliContext
 from sunpack.runtime.cli.cli_reporter import CliReporter
 from sunpack.runtime.cli.commands import inspect_command, scan
@@ -133,11 +134,14 @@ def test_extract_cli_keeps_valid_archive_when_an_explicit_target_is_missing(tmp_
     with zipfile.ZipFile(archive, "w") as output:
         output.writestr("payload.txt", "payload")
     options = ["--direct-file"] if direct else []
+    invalid = tmp_path / "directory-input"
+    invalid.mkdir()
+    paths = [str(missing), str(archive), *([str(invalid)] if direct else [])]
     if mode != "text":
         options.append("--" + mode)
     completed = subprocess.run([
         sys.executable, "-B", str(Path(__file__).resolve().parents[2] / "sunpack.py"),
-        "extract", "--no-pause", "--cleanup", "k", *options, str(missing), str(archive),
+        "extract", "--no-pause", "--cleanup", "k", *options, *paths,
     ], capture_output=True, text=True, encoding="utf-8", cwd=tmp_path)
     assert completed.returncode != 0
     if mode == "json":
@@ -145,12 +149,20 @@ def test_extract_cli_keeps_valid_archive_when_an_explicit_target_is_missing(tmp_
         assert result["summary"]["success_count"] == 1, completed.stderr
         assert result["summary"]["failed_count"] == 0
         assert result["summary"]["scan_error_count"] == 1
+        assert len(result["summary"]["scan_failures"]) == 1
+        assert result["summary"]["input_error_count"] == int(direct)
         assert result["tasks"][0]["scan_error_count"] == 1
-        assert len(result["errors"]) == 1 and str(missing) in result["errors"][0]
+        assert len(result["errors"]) == 1 + int(direct)
+        assert any(str(missing) in error for error in result["errors"])
+        if direct:
+            assert any(failure["kind"] == "invalid_input" for failure in result["tasks"][0]["failures"])
         assert completed.stderr == ""
     else:
         label = "[扫描错误]" if "[扫描错误]" in completed.stderr else "[Scan error]"
         assert completed.stderr.count(label) == 1 and str(missing) in completed.stderr
+        if direct:
+            assert ("[输入错误]" if label == "[扫描错误]" else "[Input error]") in completed.stderr
+            assert str(invalid) in completed.stderr
         assert label not in completed.stdout
         if mode == "quiet":
             assert completed.stdout == ""
@@ -182,12 +194,42 @@ def test_nested_scan_error_overflow_keeps_each_root_and_registers_once(tmp_path)
         state = RunState()
         scanner = ArchiveTaskScanner(config, state)
         scanner.record_scan_errors(work.session)
-        initial_errors = tuple(state.scan_failed_tasks)
+        initial_errors = tuple(state.scan_failures)
         tasks = scanner.discover_targets(list(work.roots), scan_session=work.session, is_recursive_scan=True)
         assert len(tasks) == 2
-        assert tuple(state.scan_failed_tasks) == initial_errors
+        assert tuple(state.scan_failures) == initial_errors
         omitted = [failure for failure in state.scan_failures if failure.details["operation"] == "omitted"]
         assert {failure.details["path"] for failure in omitted} == {str(root) for root in roots}
         assert all(failure.message_params["error"] == "2" for failure in omitted)
         assert len(state.scan_failures) == 42
         assert filesystem_scan_error_count(state.scan_failures) == 44
+
+
+def test_report_budget_bounds_native_batches_and_nested_handoffs(tmp_path):
+    # A root cap alone misses large explicit batches and accumulation across
+    # nested sessions. Check both native entry points and the report boundary.
+    good = tmp_path / "good.blob"
+    with zipfile.ZipFile(good, "w") as output:
+        output.writestr("payload.txt", "payload")
+    missing = [str(tmp_path / f"missing-{index}") for index in range(225)]
+    kinds, errors = classify_scan_targets([*missing, str(good)])
+    assert kinds == bytes(225) + b"\x01"
+    candidates, watch_errors = scan_watch_candidates([*missing, str(good)])
+    assert [row["path"] for row in candidates] == [str(good)]
+    for diagnostics in (errors, watch_errors):
+        assert len(diagnostics) == 101
+        assert diagnostics[-1] == ("report_omitted", "", "125")
+
+    combined = DiscoveryScanSession()
+    state = RunState()
+    for offset in range(0, 225, 75):
+        _, partial = classify_scan_targets(missing[offset:offset + 75])
+        combined.add_scan_errors(partial)
+        separate = DiscoveryScanSession()
+        separate.add_scan_errors(partial)
+        state.record_scan_errors(separate.take_scan_errors(), "en")
+    pending = combined.take_scan_errors()
+    assert len(pending) == 101 and pending[-1] == ("report_omitted", "", "125")
+    assert not combined.take_scan_errors()
+    assert len(state.scan_failures) == 101
+    assert filesystem_scan_error_count(state.scan_failures) == 225

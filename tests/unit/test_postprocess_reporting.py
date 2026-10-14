@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from sunpack.core.contracts.pipeline import PipelineTarget
-from sunpack.core.contracts.results import ArchiveCleanupResult, DirectoryFlattenResult, OutcomeKind, TargetRunResult
+from sunpack.core.contracts.results import ArchiveCleanupResult, DirectoryFlattenResult, OutcomeKind, TargetRunResult, RunSummary
 from sunpack.core.contracts.run_state import RunState
 from sunpack.pipeline.coordinator.engine import _RequestResults, _RequestRuntime
 from sunpack.pipeline.coordinator.reporting import RunReporter
@@ -108,9 +108,9 @@ def test_existing_final_report_shows_postprocess_warning_and_actual_output(quiet
     reporter = RunReporter("zh", stdout=stream, stderr=errors, quiet=quiet)
     reporter._top_level_outputs = ["C:/output"]
     reporter.relocate_outputs(DirectoryFlattenResult("C:/output", "C:/output.work", "C:/output"))
-    reporter.log_final_summary(0, 1, [], cleanup_results=[
+    reporter.log_final_summary(0, RunSummary(target_results=(TargetRunResult("archive", OutcomeKind.COMPLETE_SUCCESS),), cleanup_results=(
         ArchiveCleanupResult("C:/output.work", "flatten", "failed", message="publish failed"),
-    ])
+    )))
     assert "[后处理警告] 解压完成，1 项后处理操作失败" in errors.getvalue()
     assert "C:/output.work: publish failed" in errors.getvalue()
     if quiet:

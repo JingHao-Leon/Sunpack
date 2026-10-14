@@ -6,6 +6,7 @@ import pytest
 
 import sunpack.pipeline.coordinator.reporting as reporting
 from sunpack.core.contracts.failures import FailureInfo, FailureKind
+from sunpack.core.contracts.results import RunSummary, TargetRunResult, OutcomeKind
 from sunpack.pipeline.coordinator.reporting import RunReporter
 from sunpack.core.support.filesystem_scan_errors import filesystem_scan_failure
 
@@ -37,7 +38,10 @@ def test_progress_displays_nested_archive_parent_chain_and_final_page(tmp_path, 
     reporter.tasks_discovered(2, [inner])
     reporter.task_started(inner, 2)
     reporter.task_finished(inner, _outcome(inner_output), 2)
-    reporter.log_final_summary(0, 2, [])
+    reporter.log_final_summary(0, RunSummary(target_results=(
+        TargetRunResult(str(outer.main_path), OutcomeKind.COMPLETE_SUCCESS),
+        TargetRunResult(str(inner.main_path), OutcomeKind.COMPLETE_SUCCESS),
+    )))
 
     output = capsys.readouterr().out
     assert "[扫描中] 正在查找压缩包…" in output
@@ -76,14 +80,11 @@ def test_partial_recovery_prints_possible_missing_volume_warning(tmp_path, capsy
 
     RunReporter("zh").log_final_summary(
         0,
-        0,
-        [],
-        recovered_outputs=[{
+        RunSummary(target_results=(TargetRunResult(str(tmp_path / "sample.zip.001"), OutcomeKind.PARTIAL_SUCCESS, recovery={
             "archive": str(tmp_path / "sample.zip.001"),
             "completeness": 0.75,
             "warning": warning.to_dict(),
-        }],
-        failures=[warning],
+        }),)),
     )
 
     output = capsys.readouterr().out
@@ -109,12 +110,13 @@ def test_final_summary_distinguishes_scan_and_archive_errors(tmp_path, language,
         ("read_dir", str(tmp_path / "blocked"), "access denied"),
         ("omitted", str(tmp_path), "4"),
     )]
+    # Classification must survive a processing error sharing the scan text.
+    from dataclasses import replace
+    failure = replace(failure, message=scan_failures[0].message)
 
     RunReporter(language, quiet=quiet, emit_errors=emit_errors, stdout=output, stderr=errors).log_final_summary(
         0,
-        0,
-        [str(path), *(item.message for item in scan_failures)],
-        failures=[failure, *scan_failures],
+        RunSummary(scan_failures=(failure, *scan_failures)),
     )
 
     labels = ("[解压失败]", "[扫描错误]", "[扫描不完整]", "压缩包损坏", "解压失败：1  扫描错误：5") if language == "zh" else (

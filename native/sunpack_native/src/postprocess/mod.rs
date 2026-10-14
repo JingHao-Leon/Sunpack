@@ -155,7 +155,7 @@ fn scan_watch_candidate_rows(
     recursive: bool,
 ) -> PyResult<(Vec<WatchCandidateRow>, Vec<DirectoryReadError>)> {
     let mut candidates = Vec::new();
-    let mut messages = Vec::new();
+    let mut messages = DirectoryReadErrors::report();
     for root in roots {
         let path = PathBuf::from(root);
         let mut errors = DirectoryReadErrors::new(&path);
@@ -174,7 +174,7 @@ fn scan_watch_candidate_rows(
         messages.extend(errors.into_messages());
     }
     candidates.sort_by(|left, right| left.path.cmp(&right.path));
-    Ok((candidates, messages))
+    Ok((candidates, messages.into_messages()))
 }
 
 #[pyfunction]

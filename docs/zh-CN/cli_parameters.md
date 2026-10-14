@@ -58,7 +58,9 @@ sunpack w st
 
 `extract`、`scan` 和 `inspect` 的普通文本写入 stdout，错误写入 stderr。`[扫描错误]` 表示文件系统扫描失败，`[解压失败]` 表示归档处理失败；`[扫描不完整]` 表示部分路径无法读取，发现结果可能不完整，其余可读取的输入仍会继续处理。`--quiet` 隐藏进度，但保留错误和后处理警告；`--json` 输出 JSON 结果，不输出这些文本消息。
 
-JSON 的 `summary.scan_error_count` 统计文件系统扫描错误，包括省略了单独详情的错误。`extract` 的 `summary.failed_count` 和各轮处理的 `failed_count` 不再包含扫描错误，各轮处理另有 `scan_error_count`。两类错误均保留在 `errors` 中，并使退出码非零，即使其他归档处理成功也是如此。
+JSON 的 `summary.scan_error_count` 统计文件系统扫描错误，包括省略了单独详情的错误。每份报告最多保留 100 条文件系统扫描诊断记录，另加 1 条总省略摘要；单个目录仍适用原有的 20 条详情上限。超出报告预算后只累计省略数量，不再保留每条错误的路径或身份。归档任务结果独立于这项诊断预算保留。
+
+`extract` 的 `summary.failed_count` 和各轮处理的 `failed_count` 统计归档处理失败；`input_error_count` 单独统计无效输入，例如向 `--direct-file` 传入目录，文本中显示为 `[输入错误]`。各轮处理另有 `scan_error_count` 和 `input_error_count`。受预算限制的文件系统诊断详情集中保存在 `summary.scan_failures`，各轮的 `failures` 保存归档失败和输入错误。分类依据结构化错误类别和目标结果。所有错误类别均保留在 `errors` 中，并使退出码非零，即使其他归档处理成功也是如此。
 
 ## extract
 

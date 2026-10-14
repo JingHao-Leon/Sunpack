@@ -123,7 +123,7 @@ def test_scan_filesystem_errors_only_log_and_do_not_replace_archive_notification
         error=archive_error.message if archive_outcome == OutcomeKind.FAILURE else "",
     ),)
     summary = RunSummary(
-        target_results=results, scan_failed_tasks=(scan_error.message,), scan_failures=(scan_error,),
+        target_results=results, scan_failures=(scan_error,),
     )
     watcher = _watcher(tmp_path, cold_start_seconds=0)
     notices = []
@@ -848,6 +848,8 @@ def test_watch_missing_input_completion_uses_request_sources(tmp_path, case):
 
 
 def _nested_failure_summary(path: Path, failure: FailureInfo):
+    from dataclasses import replace
+    failure = replace(failure, message=f"{path.parent / 'nested-inner.7z.001'}: {failure.message}")
     return RunSummary(
         target_results=(
             TargetRunResult(
@@ -855,9 +857,6 @@ def _nested_failure_summary(path: Path, failure: FailureInfo):
                 OutcomeKind.COMPLETE_SUCCESS,
                 task_key=str(path),
             ),
-        ),
-        scan_failed_tasks=(
-            f"{path.parent / 'nested-inner.7z.001'}: {failure.message}",
         ),
         scan_failures=(failure,),
     )

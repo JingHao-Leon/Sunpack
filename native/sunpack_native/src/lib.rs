@@ -189,6 +189,10 @@ fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(scan::directory::scan_output_inventory, m)?)?;
     m.add_function(wrap_pyfunction!(scan::directory::classify_scan_targets, m)?)?;
+    m.add(
+        "DIRECTORY_ERROR_REPORT_LIMIT",
+        io::directory_errors::DIRECTORY_ERROR_REPORT_LIMIT,
+    )?;
     m.add_function(wrap_pyfunction!(
         scan::directory::output_inventory_from_serialized,
         m

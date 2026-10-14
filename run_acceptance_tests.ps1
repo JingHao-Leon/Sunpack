@@ -140,7 +140,7 @@ function Invoke-TestStep {
 
     $runnerArguments = @()
     if ($KeepElevationIfAdministrator -and $script:AcceptanceProcessIsAdministrator) {
-        Write-Host "    Running this step with the acceptance process administrator token." -ForegroundColor DarkGray
+        Write-Host "    Running this step with the acceptance process administrator token" -ForegroundColor DarkGray
         $runnerArguments = $argsList
     } else {
         # The acceptance script may itself require elevation to install the temporary
@@ -520,7 +520,7 @@ function Assert-AcceptanceTestTools {
             "`nRun scripts\setup_windows_dev.ps1 on a Windows x64 environment or configure the test tool paths."
         )
     }
-    Write-Host "    Acceptance generator tools are present and executable." -ForegroundColor Green
+    Write-Host "    Acceptance generator tools are present and executable" -ForegroundColor Green
 }
 
 function Get-EnvironmentRefreshReasons {
@@ -604,7 +604,7 @@ function Ensure-AcceptanceEnvironment {
     )
 
     if ($SkipEnvironmentRefresh) {
-        Write-Host "Skipping acceptance environment refresh by request." -ForegroundColor Yellow
+        Write-Host "Skipping acceptance environment refresh by request" -ForegroundColor Yellow
         return
     }
 
@@ -616,7 +616,7 @@ function Ensure-AcceptanceEnvironment {
 
     $reasons = @(Get-EnvironmentRefreshReasons -RepoRoot $RepoRoot -VenvPython $VenvPython)
     if ($reasons.Count -eq 0) {
-        Write-Host "    Environment is current." -ForegroundColor Green
+        Write-Host "    Environment is current" -ForegroundColor Green
         return
     }
 
@@ -821,9 +821,9 @@ if ($persistentRuntimeCleanupFailed) {
     $failedResults += [pscustomobject]@{ Label = "Source persistent runtime cleanup"; ExitCode = -1; DurationSeconds = 0 }
 }
 if ($failedResults.Count -gt 0) {
-    Write-Host ("{0} acceptance test step(s) failed; all scheduled steps have completed." -f $failedResults.Count) -ForegroundColor Red
+    Write-Host ("{0} acceptance test step(s) failed; all scheduled steps have completed" -f $failedResults.Count) -ForegroundColor Red
 } else {
-    Write-Host "All acceptance tests passed." -ForegroundColor Green
+    Write-Host "All acceptance tests passed" -ForegroundColor Green
 }
 if (-not $NoWait) {
     if ($failedResults.Count -gt 0) {

@@ -19,4 +19,4 @@ foreach ($key in $keys) {
     }
 }
 
-Write-Host "Context menu unregistration completed." -ForegroundColor Green
+Write-Host "Context menu unregistration completed" -ForegroundColor Green

@@ -580,7 +580,7 @@ function Build-SevenZipWorker {
     if ((Get-ProcessBuildArch) -eq $BuildArch) {
         Invoke-Native -FilePath $CTestCommand -Arguments @("--test-dir", $BuildDir, "-C", "Release", "--output-on-failure")
     } else {
-        Write-Host "Skipping C++ smoke test because $BuildArch binaries cannot run in the current process architecture." -ForegroundColor Yellow
+        Write-Host "Skipping C++ smoke test because $BuildArch binaries cannot run in the current process architecture" -ForegroundColor Yellow
     }
     $workerExe = Join-Path $BuildDir "Release\sunpack_sevenzip_worker.exe"
     $launcherExe = Join-Path $BuildDir "Release\sunpack_launcher.exe"
@@ -614,7 +614,7 @@ function Build-ToastLibrary {
     if ((Get-ProcessBuildArch) -eq $BuildArch) {
         Invoke-Native -FilePath $CTestCommand -Arguments @("--test-dir", $BuildDir, "-C", "Release", "--output-on-failure")
     } else {
-        Write-Host "Skipping toast library self-test because $BuildArch binaries cannot run in the current process architecture." -ForegroundColor Yellow
+        Write-Host "Skipping toast library self-test because $BuildArch binaries cannot run in the current process architecture" -ForegroundColor Yellow
     }
 
     $toastDll = Join-Path $BuildDir "Release\sunpack_toast.dll"
@@ -728,7 +728,7 @@ function Confirm-AcceptanceTests {
         if ($answer -match "^(?i:n|no)$") {
             return $false
         }
-        Write-Host "Please answer Y or N." -ForegroundColor Yellow
+        Write-Host "Please answer Y or N" -ForegroundColor Yellow
     }
 }
 
@@ -802,7 +802,7 @@ function Invoke-NuitkaStandaloneBuild {
         "--report=$ReportPath"
     )
     if ($EnableExperimentalCProfileGuidedOptimization) {
-        Write-Warning "C-level PGO is experimental and unsupported by Nuitka for standalone builds; do not publish this output without independent validation."
+        Write-Warning "C-level PGO is experimental and unsupported by Nuitka for standalone builds; do not publish this output without independent validation"
         $arguments += "--pgo-c"
         if ($PgoArgs) {
             $arguments += "--pgo-args=$PgoArgs"
@@ -1008,7 +1008,7 @@ Write-Step "Preparing build virtual environment"
 if (Test-Path -LiteralPath (Join-Path $venvPath "pyvenv.cfg")) {
     $venvConfig = Get-Content -LiteralPath (Join-Path $venvPath "pyvenv.cfg") -Raw
     if ($venvConfig -match "include-system-site-packages\s*=\s*true") {
-        Write-Host "Disabling global site-packages in the existing virtual environment." -ForegroundColor Yellow
+        Write-Host "Disabling global site-packages in the existing virtual environment" -ForegroundColor Yellow
         [IO.File]::WriteAllText((Join-Path $venvPath "pyvenv.cfg"), ($venvConfig -replace "include-system-site-packages\s*=\s*true", "include-system-site-packages = false"), [Text.UTF8Encoding]::new($false))
     }
 }
@@ -1098,7 +1098,7 @@ if ($runAcceptanceTests) {
         "-BuildProfile", "release"
     )
 } else {
-    Write-Host "Skipping acceptance tests by request." -ForegroundColor Yellow
+    Write-Host "Skipping acceptance tests by request" -ForegroundColor Yellow
 }
 
 Write-Step "Building Windows release with Nuitka"
@@ -1242,7 +1242,7 @@ if ($processArch -eq $buildArch) {
     }
 } else {
     Write-Step "Skipping packaged smoke tests"
-    Write-Host "Packaged executable is $buildArch and cannot run under the current $processArch process." -ForegroundColor Yellow
+    Write-Host "Packaged executable is $buildArch and cannot run under the current $processArch process" -ForegroundColor Yellow
 }
 
 Write-Step "Creating Windows installer"
@@ -1280,7 +1280,7 @@ try {
 Assert-PathExists -LiteralPath $releaseInstallerPath -Description "Windows installer"
 
 Write-Host ""
-Write-Host "Build completed successfully." -ForegroundColor Green
+Write-Host "Build completed successfully" -ForegroundColor Green
 Write-Host "Version: $versionValue"
 Write-Host "App directory: $distAppRoot"
 Write-Host "Windows installer: $releaseInstallerPath"

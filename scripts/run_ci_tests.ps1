@@ -131,4 +131,4 @@ foreach ($result in $script:StepResults) {
 }
 
 Write-Host ""
-Write-Host "V2 CI checks passed." -ForegroundColor Green
+Write-Host "V2 CI checks passed" -ForegroundColor Green

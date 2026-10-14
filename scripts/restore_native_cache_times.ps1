@@ -35,4 +35,4 @@ foreach ($relativePath in $tracked) {
 New-Item -ItemType Directory -Path (Split-Path -Parent $statePath) -Force | Out-Null
 @{ SourceKey = $SourceKey; Times = $times } | ConvertTo-Json -Depth 3 -Compress |
     Set-Content -LiteralPath $statePath -Encoding UTF8
-Write-Host "Restored $restored unchanged native input timestamps ($Arch/$BuildProfile)."
+Write-Host "Restored $restored unchanged native input timestamps ($Arch/$BuildProfile)"

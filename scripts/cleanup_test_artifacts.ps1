@@ -66,7 +66,7 @@ Remove-StaleWatchBrokerServices
 Remove-StaleTestVhds
 
 if ($script:CleanupFailures -gt 0) {
-    Write-Warning ("SunPack test artifact cleanup completed with {0} failure(s)." -f $script:CleanupFailures)
+    Write-Warning ("SunPack test artifact cleanup completed with {0} failure(s)" -f $script:CleanupFailures)
     exit 1
 }
-Write-Host "SunPack test artifact cleanup completed."
+Write-Host "SunPack test artifact cleanup completed"

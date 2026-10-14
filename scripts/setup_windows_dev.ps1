@@ -259,7 +259,7 @@ function Ensure-Bundled7ZipAssets {
 
     $licenseMissing = -not (Test-Path -LiteralPath $LicenseDestinationPath)
     if ($missingToolFiles.Count -eq 0 -and -not $licenseMissing) {
-        Write-Host "Bundled 7-Zip files are already present." -ForegroundColor Green
+        Write-Host "Bundled 7-Zip files are already present" -ForegroundColor Green
         return
     }
 
@@ -268,7 +268,7 @@ function Ensure-Bundled7ZipAssets {
         Write-Host ("Missing bundled 7-Zip files: {0}" -f ($missingToolFiles -join ", ")) -ForegroundColor Yellow
     }
     if ($licenseMissing) {
-        Write-Host "Missing 7-Zip license file." -ForegroundColor Yellow
+        Write-Host "Missing 7-Zip license file" -ForegroundColor Yellow
     }
 
     $downloadInfo = Get-7ZipWindowsDownloadInfo -BuildArch $BuildArch
@@ -361,7 +361,7 @@ function Invoke-VerifiedFileDownload {
             if ($attempt -eq 3) {
                 throw
             }
-            Write-Warning ("Download attempt {0} for {1} failed: {2}. Retrying." -f $attempt, $Description, $_.Exception.Message)
+            Write-Warning ("Download attempt {0} for {1} failed: {2}. Retrying" -f $attempt, $Description, $_.Exception.Message)
         }
     }
 }
@@ -396,7 +396,7 @@ function Ensure-AcceptanceTestTools {
         (Test-CommandRuns -FilePath $zstdPath -Arguments @("--version"))
     $sevenZipZstdReady = Test-SevenZipZstdGenerator -FilePath $sevenZipZstdPath
     if ($rarReady -and $zstdReady -and $sevenZipZstdReady) {
-        Write-Host "Acceptance archive generator tools are already present." -ForegroundColor Green
+        Write-Host "Acceptance archive generator tools are already present" -ForegroundColor Green
         return
     }
 
@@ -688,7 +688,7 @@ function Build-SevenZipWorker {
     if ((Get-ProcessBuildArch) -eq $BuildArch) {
         Invoke-Native -FilePath $CTestCommand -Arguments @("--test-dir", $BuildDir, "-C", "Release", "--output-on-failure")
     } else {
-        Write-Host "Skipping C++ smoke test because $BuildArch binaries cannot run in the current process architecture." -ForegroundColor Yellow
+        Write-Host "Skipping C++ smoke test because $BuildArch binaries cannot run in the current process architecture" -ForegroundColor Yellow
     }
 
     $workerExe = Join-Path $BuildDir "Release\sunpack_sevenzip_worker.exe"
@@ -866,7 +866,7 @@ $venvConfigPath = Join-Path $venvPath "pyvenv.cfg"
 if (Test-Path -LiteralPath $venvConfigPath) {
     $venvConfig = Get-Content -LiteralPath $venvConfigPath -Raw
     if ($venvConfig -match "include-system-site-packages\s*=\s*true") {
-        Write-Host "Disabling global site-packages in the existing virtual environment." -ForegroundColor Yellow
+        Write-Host "Disabling global site-packages in the existing virtual environment" -ForegroundColor Yellow
         [IO.File]::WriteAllText($venvConfigPath, ($venvConfig -replace "include-system-site-packages\s*=\s*true", "include-system-site-packages = false"), [Text.UTF8Encoding]::new($false))
     }
 }
@@ -886,7 +886,7 @@ if ($buildArch -eq "x64" -and -not $SkipAcceptanceTestTools) {
     Ensure-AcceptanceTestTools -RepoRoot $repoRoot -ToolsRoot $toolsRoot
 }
 if ($BootstrapOnly) {
-    Write-Host "Bootstrap complete; native compilation is deferred to build_windows.ps1." -ForegroundColor Green
+    Write-Host "Bootstrap complete; native compilation is deferred to build_windows.ps1" -ForegroundColor Green
     return
 }
 
@@ -972,6 +972,6 @@ Invoke-Native -FilePath $venvPython -Arguments @("sunpack.py", "--help")
 Invoke-Native -FilePath $venvPython -Arguments @("-m", "pytest", "--version")
 
 Write-Host ""
-Write-Host "Local development environment is ready." -ForegroundColor Green
+Write-Host "Local development environment is ready" -ForegroundColor Green
 Write-Host "Virtual env: $venvPath"
 Write-Host "Activate: $venvPath\\Scripts\\Activate.ps1"

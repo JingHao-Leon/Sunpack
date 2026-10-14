@@ -146,12 +146,12 @@ function Assert-SevenZipAsmSelection {
         $sourceName = "LzmaDecOpt.S"
         $asmObject = Join-Path $BuildDir "sunpack_7zip_arm64_asm\LzmaDecOpt.obj"
     } else {
-        Write-Host "7-Zip asm check skipped: unsupported target architecture '$BuildArch'." -ForegroundColor Yellow
+        Write-Host "7-Zip asm check skipped: unsupported target architecture '$BuildArch'" -ForegroundColor Yellow
         return
     }
 
     if ((Get-CachedCMakeOption -BuildDir $BuildDir -Name $optionName) -eq $false) {
-        Write-Host "7-Zip asm check skipped: $BuildDir was configured with $optionName=OFF." -ForegroundColor Yellow
+        Write-Host "7-Zip asm check skipped: $BuildDir was configured with $optionName=OFF" -ForegroundColor Yellow
         return
     }
 
@@ -183,6 +183,6 @@ function Assert-SevenZipAsmSelection {
         }
         Write-Host ("7-Zip asm check passed: $ExpectedSymbol present in " +
                     "$(Split-Path $target -Leaf) ($hits match(es), " +
-                    "$($symbol.Bytes.Length) byte prologue).") -ForegroundColor Green
+                    "$($symbol.Bytes.Length) byte prologue)") -ForegroundColor Green
     }
 }

@@ -353,7 +353,7 @@ Set-ContextMenuParent -KeyPath $fileKey -MenuLabel $resolvedMenuText -IconValue 
 Set-ContextMenuCommand -ParentKeyPath $fileSubCommandsKey -CommandName "PromptPassword" -MenuLabel $subMenuTexts.Prompt -CommandLine $filePromptCommand -IconValue $resolvedIconPath
 Set-ContextMenuCommand -ParentKeyPath $fileSubCommandsKey -CommandName "DirectExtract" -MenuLabel $subMenuTexts.Direct -CommandLine $fileDirectCommand -IconValue $resolvedIconPath
 
-Write-Host "Context menu registration completed." -ForegroundColor Green
+Write-Host "Context menu registration completed" -ForegroundColor Green
 Write-Host "Folder menu key:" $folderKey
 Write-Host "Directory background key:" $backgroundKey
 Write-Host "Folder submenu key:" $folderSubCommandsKey
@@ -366,4 +366,4 @@ if ($launcher.Mode -eq "app") {
     Write-Host "Script path:" $launcher.ScriptPath
 }
 Write-Host ""
-Write-Host ('You can now right-click a folder or directory background and choose "{0}" -> "{1}", "{2}", "{3}" or "{4}".' -f $resolvedMenuText, $subMenuTexts.Prompt, $subMenuTexts.Direct, $subMenuTexts.Watch, $subMenuTexts.Unwatch)
+Write-Host ('You can now right-click a folder or directory background and choose "{0}" -> "{1}", "{2}", "{3}" or "{4}"' -f $resolvedMenuText, $subMenuTexts.Prompt, $subMenuTexts.Direct, $subMenuTexts.Watch, $subMenuTexts.Unwatch)

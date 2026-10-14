@@ -519,14 +519,14 @@ void write_stream(DWORD handle_id, const std::string& text) {
 // cli.persistent_delivery_uncertain.
 constexpr wchar_t kPressEnterEn[] = L"Press Enter to continue...";
 constexpr wchar_t kPressEnterZh[] = L"按回车键继续...";
-constexpr wchar_t kPersistentTimeoutEn[] = L"SunPack persistent process did not start in time.";
-constexpr wchar_t kPersistentTimeoutZh[] = L"SunPack 持久进程未能及时启动。";
-constexpr wchar_t kRuntimeLaunchFailedEn[] = L"sunpack runtime failed to launch (Win32 error {error}).";
-constexpr wchar_t kRuntimeLaunchFailedZh[] = L"sunpack 运行时启动失败（Win32 错误 {error}）。";
-constexpr wchar_t kRuntimeExitedEn[] = L"sunpack runtime exited before becoming ready, exit code {code}.";
-constexpr wchar_t kRuntimeExitedZh[] = L"sunpack 运行时尚未就绪便已退出，退出码为 {code}。";
-constexpr wchar_t kDeliveryUncertainEn[] = L"SunPack persistent process disconnected after the command was submitted; it was not retried to avoid running it twice.";
-constexpr wchar_t kDeliveryUncertainZh[] = L"SunPack 持久进程在命令提交后断开连接；为避免重复执行，未重试该命令。";
+constexpr wchar_t kPersistentTimeoutEn[] = L"SunPack persistent process did not start in time";
+constexpr wchar_t kPersistentTimeoutZh[] = L"SunPack 持久进程未能及时启动";
+constexpr wchar_t kRuntimeLaunchFailedEn[] = L"sunpack runtime failed to launch (Win32 error {error})";
+constexpr wchar_t kRuntimeLaunchFailedZh[] = L"sunpack 运行时启动失败（Win32 错误 {error}）";
+constexpr wchar_t kRuntimeExitedEn[] = L"sunpack runtime exited before becoming ready, exit code {code}";
+constexpr wchar_t kRuntimeExitedZh[] = L"sunpack 运行时尚未就绪便已退出，退出码为 {code}";
+constexpr wchar_t kDeliveryUncertainEn[] = L"SunPack persistent process disconnected after the command was submitted; it was not retried to avoid running it twice";
+constexpr wchar_t kDeliveryUncertainZh[] = L"SunPack 持久进程在命令提交后断开连接；为避免重复执行，未重试该命令";
 
 std::string localized(const std::string& language, const wchar_t* english, const wchar_t* chinese) {
     return utf8(language == "zh" ? chinese : english);

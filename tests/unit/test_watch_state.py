@@ -151,6 +151,95 @@ def test_checkpoint_rotation_still_starts_a_new_wal_segment(tmp_path):
     reopened.close()
 
 
+@pytest.mark.parametrize("retry_at", ["idle", "startup"])
+def test_covered_wal_retirement_retries_without_rewriting_snapshot(tmp_path, monkeypatch, retry_at):
+    # Normal checkpoint tests never fail unlink: this catches lost retry state,
+    # needless snapshot rewrites, and deletion of a concurrently appended WAL.
+    # Three durable records keep this independent failure coverage inexpensive.
+    state_path = tmp_path / "state.json"
+    state = WatchStateStore(str(state_path))
+    candidates = [_candidate(tmp_path / f"{index}.bin", index + 1) for index in range(3)]
+    state.queue_active(candidates[0], durable=True)
+    covered = state.journal_path
+    real_unlink = Path.unlink
+    allow_removal = False
+    append_during_retirement = False
+
+    def unlink(path, *args, **kwargs):
+        nonlocal append_during_retirement
+        if path == covered:
+            if not allow_removal:
+                raise PermissionError("simulated sharing violation")
+            if append_during_retirement:
+                append_during_retirement = False
+                state.queue_active(candidates[2], durable=True)
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    state.save()
+    with state._checkpoint_condition:
+        assert state._checkpoint_condition.wait_for(lambda: not state._checkpoint_running, timeout=2)
+    assert covered.exists()
+    state.queue_active(candidates[1], durable=True)
+    active = state.journal_path
+    snapshot = state_path.read_bytes()
+    assert not state.compaction_due
+    allow_removal = True
+    if retry_at == "idle":
+        append_during_retirement = True
+        assert state.compact_if_needed()
+        with state._checkpoint_condition:
+            assert state._checkpoint_condition.wait_for(lambda: not state._checkpoint_running, timeout=2)
+        state.close()
+    else:
+        state.close()
+    recovered = WatchStateStore(str(state_path))
+    try:
+        assert not covered.exists()
+        assert active.exists()
+        assert state_path.read_bytes() == snapshot
+        expected = candidates if retry_at == "idle" else candidates[:2]
+        assert {item.path for item in recovered.pending_work_items()} == {item.path for item in expected}
+        assert not recovered.compact_if_needed()
+    finally:
+        recovered.close()
+
+
+def test_startup_retirement_preserves_sealed_segment_with_uncovered_suffix(tmp_path, monkeypatch):
+    # A filename's starting USN cannot prove its whole segment is redundant.
+    # Existing recovery tests lack a segment straddling the snapshot boundary.
+    # One three-record recovery fixture covers that data-loss risk cheaply.
+    state_path = tmp_path / "state.json"
+    state = WatchStateStore(str(state_path))
+    candidates = [_candidate(tmp_path / f"{index}.bin", index + 1) for index in range(3)]
+    state.queue_active(candidates[0], durable=True)
+    older = state.journal_path
+    real_unlink = Path.unlink
+    with monkeypatch.context() as patch:
+        def blocked_unlink(path, *args, **kwargs):
+            if path == older:
+                raise PermissionError("simulated sharing violation")
+            return real_unlink(path, *args, **kwargs)
+        patch.setattr(Path, "unlink", blocked_unlink)
+        state.save()
+        state.queue_active(candidates[1], durable=True)
+        state.queue_active(candidates[2], durable=True)
+        newer = state.journal_path
+        state.close()
+    second, third = newer.read_bytes().splitlines(keepends=True)
+    older.write_bytes(older.read_bytes() + second)
+    newest = state._segment_path(3)
+    newest.write_bytes(third)
+    newer.unlink()
+    recovered = WatchStateStore(str(state_path))
+    try:
+        assert older.exists() and newest.exists()
+        assert {item.path for item in recovered.pending_work_items()} == {item.path for item in candidates}
+        assert not recovered.compact_if_needed()
+    finally:
+        recovered.close()
+
+
 @pytest.mark.parametrize("has_valid_record", [False, True])
 def test_reopen_repairs_torn_tail_before_appending(tmp_path, has_valid_record):
     state_path = tmp_path / "state.json"

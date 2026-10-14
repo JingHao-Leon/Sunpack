@@ -203,9 +203,9 @@ class WatchScheduler:
                 else observer_stop_timeout_seconds
             ),
         )
-        self.state = WatchStateStore(state_path)
+        self.state = WatchStateStore(state_path, retirement_callback=self._schedule_journal_retirement)
         log_path = Path(state_path).with_name("events.jsonl")
-        self.log = WatchLogStore(str(log_path))
+        self.log = WatchLogStore(str(log_path), wake_callback=self._wake_service)
         state_parent = Path(state_path).parent
         self.metadata_dir = os.path.abspath(str(state_parent)) if state_parent.name == ".sunpack_watch" else ""
         self.metadata_files = {
@@ -705,6 +705,7 @@ class WatchScheduler:
         try:
             self.state.close()
         finally:
+            self.log.close()
             with self._claim_gate, self._lock:
                 self._pending.clear()
                 self._pending_by_key.clear()
@@ -953,11 +954,24 @@ class WatchScheduler:
             if self._cache_cleanup_deadline is not None:
                 cleanup_delay = max(0.0, self._cache_cleanup_deadline - monotonic_now)
                 delay = cleanup_delay if delay is None else min(delay, cleanup_delay)
-            return delay
+        history_expiry = self.log.next_history_expiry
+        if history_expiry is not None:
+            history_delay = max(0.0, history_expiry - monotonic_now)
+            delay = history_delay if delay is None else min(delay, history_delay)
+        return delay
 
     def _reset_idle_cache_cleanup(self) -> None:
         with self._lock:
             self._cache_cleanup_deadline = None
+
+    def _schedule_journal_retirement(self) -> None:
+        with self._lock:
+            if (self._closed or self._pending or self._inflight_requests
+                    or self._inflight_path_counts or self._external_activity_requested):
+                return  # Completion will arm maintenance after existing work.
+            if self._cache_cleanup_deadline is None:
+                self._cache_cleanup_deadline = time.monotonic() + self.runtime_cache_cleanup_idle_seconds
+        self._wake_service()
 
     def _arm_idle_cache_cleanup(self) -> None:
         with self._lock:
@@ -999,6 +1013,9 @@ class WatchScheduler:
                 self._runtime_cache_gate.release()
 
     async def _maybe_clear_idle_caches(self) -> None:
+        # Log expiry is independent of pipeline/foreground activity. Its exact
+        # deadline also wakes Watch when all events were ignored.
+        self.log.clear_expired_history()
         now = time.monotonic()
         with self._lock:
             if self._cache_cleanup_deadline is None or now < self._cache_cleanup_deadline:

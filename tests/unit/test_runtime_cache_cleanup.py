@@ -133,6 +133,101 @@ def test_watch_deadline_clears_only_after_idle_window(tmp_path):
     assert engine.clear_calls == 1
 
 
+@pytest.mark.parametrize("cache_cleanup_enabled", [False, True])
+def test_ignored_log_history_expires_without_pipeline_activity(tmp_path, monkeypatch, cache_cleanup_enabled):
+    # Store-only expiry tests cannot catch a sleeping Watch that never schedules
+    # cleanup after ignored events. Exercise real admission and next deadlines.
+    import sunpack.runtime.watch.scheduler as scheduler_module
+
+    async def scenario():
+        now = [100.0]
+        monkeypatch.setattr(scheduler_module.time, "monotonic", lambda: now[0])
+        wakeups = []
+        engine = _CleanupOnlyEngine()
+        watcher = WatchScheduler(
+            make_config({"watch": {"clipboard_monitor_enabled": False,
+                "runtime_cache_cleanup_enabled": cache_cleanup_enabled}}),
+            [str(tmp_path)], out_dir=str(tmp_path / "out"),
+            state_path=str(tmp_path / "state.json"), initial_scan=False,
+            pipeline_engine=engine, wake_callback=lambda: wakeups.append("wake"),
+        )
+        try:
+            watcher.enqueue(str(tmp_path / "missing.bin"))
+            assert wakeups == ["wake"]
+            assert watcher._cache_cleanup_deadline is None
+            assert watcher.next_delay_seconds() == 300.0
+            await watcher.set_external_activity(True)
+            now[0] = 110.0
+            await watcher.run_once()
+            watcher.enqueue(str(tmp_path / "missing.bin"))
+            assert len(wakeups) == 1
+            assert watcher.log._last_throttled_write
+            now[0] = 400.0
+            await watcher.run_once()
+            assert not watcher.log._last_throttled_write
+            assert watcher.next_delay_seconds() is None
+            assert engine.clear_calls == 0
+            watcher.enqueue(str(tmp_path / "missing.bin"))
+            assert len(wakeups) == 2
+            assert watcher.next_delay_seconds() == 300.0
+        finally:
+            watcher._close_blocking()
+        assert watcher.log.next_history_expiry is None
+        assert not watcher.log._last_throttled_write
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("still_blocked", [False, True])
+def test_failed_wal_retirement_schedules_one_idle_retry(tmp_path, monkeypatch, still_blocked):
+    # Direct store retries cannot catch a finished checkpoint that leaves Watch
+    # asleep, or a locked file turning retry scheduling into idle polling.
+    from pathlib import Path
+    from threading import Event
+    from sunpack.runtime.watch.scanner import WatchCandidate
+    import sunpack.runtime.watch.scheduler as scheduler_module
+
+    async def scenario():
+        now = [100.0]
+        monkeypatch.setattr(scheduler_module.time, "monotonic", lambda: now[0])
+        wake = Event()
+        watcher = WatchScheduler(
+            make_config({"watch": {"clipboard_monitor_enabled": False,
+                "runtime_cache_cleanup_enabled": False, "runtime_cache_cleanup_idle_seconds": 10}}),
+            [str(tmp_path)], out_dir=str(tmp_path / "out"),
+            state_path=str(tmp_path / "state.json"), initial_scan=False,
+            pipeline_engine=_CleanupOnlyEngine(), wake_callback=wake.set,
+        )
+        try:
+            watcher.state.queue_active(WatchCandidate(str(tmp_path / "archive.bin"), 1, 1.0), durable=True)
+            covered = watcher.state.journal_path
+            real_unlink = Path.unlink
+            blocked = True
+            def unlink(path, *args, **kwargs):
+                if path == covered and blocked:
+                    raise PermissionError("simulated sharing violation")
+                return real_unlink(path, *args, **kwargs)
+            monkeypatch.setattr(Path, "unlink", unlink)
+            watcher.state.save()
+            assert wake.wait(2)
+            assert watcher.next_delay_seconds() == 10.0
+            blocked = still_blocked
+            wake.clear()
+            now[0] = 110.0
+            await watcher.run_once()
+            with watcher.state._checkpoint_condition:
+                assert watcher.state._checkpoint_condition.wait_for(
+                    lambda: not watcher.state._checkpoint_running, timeout=2,
+                )
+            assert covered.exists() is still_blocked
+            assert watcher.next_delay_seconds() is None
+            assert not wake.is_set()
+        finally:
+            watcher._close_blocking()
+
+    asyncio.run(scenario())
+
+
 def test_completed_family_cache_waits_for_watch_callbacks_and_foreground(tmp_path):
     from sunpack.pipeline.coordinator.engine import PipelineEngine
 

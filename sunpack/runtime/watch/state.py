@@ -8,7 +8,7 @@ import threading
 import time
 import weakref
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from sunpack_native import NativeWatchState, watch_path_key
 
@@ -164,6 +164,7 @@ class WatchStateStore:
         compact_records: int = DEFAULT_JOURNAL_COMPACT_RECORDS,
         compact_bytes: int = DEFAULT_JOURNAL_COMPACT_BYTES,
         hard_compact_bytes: int = DEFAULT_JOURNAL_HARD_BYTES,
+        retirement_callback: Callable[[], None] | None = None,
     ):
         self.path = Path(path)
         self._path_coordinator = _state_path_coordinator(self.path)
@@ -190,6 +191,8 @@ class WatchStateStore:
         self._checkpoint_running = False
         self._checkpoint_requested = False
         self._checkpoint_error: BaseException | None = None
+        self._journal_retirement_pending = False
+        self._retirement_callback = retirement_callback
         self._persistence_fault: BaseException | None = None
         self._snapshot_exists = False
         self._external_sequence_gap = False
@@ -302,6 +305,10 @@ class WatchStateStore:
                 self._applied_seq, resume_segment=resume_segment,
             )
             self._update_compaction_due_locked()
+            self._journal_retirement_pending = self._retire_segments_through(
+                self._checkpoint_seq,
+                protected_starts=self._protected_journal_starts_locked(),
+            )
 
     def _load_journal_segments_locked(self) -> int | None:
         expected_seq = self._checkpoint_seq + 1
@@ -404,11 +411,11 @@ class WatchStateStore:
             self._raise_persistence_fault_locked()
 
     def compact_if_needed(self, *, force: bool = False) -> bool:
-        """Request a checkpoint without doing snapshot work on the caller."""
+        """Request a snapshot or covered-WAL cleanup on the checkpoint worker."""
 
         with self._state_lock:
             self._ensure_open_locked()
-            if not force and not self._compaction_due:
+            if not force and not self._compaction_due and not self._journal_retirement_pending:
                 return False
             self._request_checkpoint_locked(force=force)
             return True
@@ -438,6 +445,7 @@ class WatchStateStore:
                 self._native.reset()
                 self._segment_records.clear()
                 self._segment_bytes.clear()
+                self._retirement_callback = None
                 self._path_coordinator = None
                 self._checkpoint_condition.notify_all()
 
@@ -487,6 +495,7 @@ class WatchStateStore:
         self._journal_records = 0
         self._journal_bytes = 0
         self._compaction_due = False
+        self._journal_retirement_pending = False
         self._snapshot_exists = False
         self._external_sequence_gap = False
 
@@ -522,34 +531,59 @@ class WatchStateStore:
     def _request_checkpoint_locked(self, *, force: bool = False) -> None:
         if self._closing or self._closed:
             return
-        if (self._path_coordinator.next_sequence - 1) != self._applied_seq:
-            self._external_sequence_gap = True
-        if self._external_sequence_gap:
-            if force:
-                self._checkpoint_error = RuntimeError(
-                    "cannot checkpoint a WatchStateStore that does not own the full sequence prefix"
-                )
-                self._checkpoint_condition.notify_all()
-            return
+        retire_only = not force and not self._compaction_due
+        if not retire_only:
+            if (self._path_coordinator.next_sequence - 1) != self._applied_seq:
+                self._external_sequence_gap = True
+            if self._external_sequence_gap:
+                if force:
+                    self._checkpoint_error = RuntimeError(
+                        "cannot checkpoint a WatchStateStore that does not own the full sequence prefix"
+                    )
+                    self._checkpoint_condition.notify_all()
+                return
         if self._checkpoint_running:
-            self._checkpoint_requested = True
+            if not retire_only:
+                self._checkpoint_requested = True
             return
-        if not force and not self._compaction_due:
+        if retire_only and not self._journal_retirement_pending:
             return
         self._checkpoint_running = True
         self._checkpoint_requested = False
-        self._checkpoint_error = None
+        if not retire_only:
+            self._checkpoint_error = None
         threading.Thread(
             target=self._checkpoint_loop,
+            args=(retire_only,),
             name="sunpack-watch-checkpoint",
             daemon=True,
         ).start()
 
-    def _checkpoint_loop(self) -> None:
+    def _checkpoint_loop(self, retire_only: bool = False) -> None:
         # Acquire before capturing the view so an older store cannot publish
         # after a newer one. The existing prefix check rejects stale stores.
         with self._path_coordinator.checkpoint_lock:
+            if retire_only:
+                with self._state_lock:
+                    boundary = self._checkpoint_seq
+                    protected_starts = self._protected_journal_starts_locked()
+                pending = self._retire_segments_through(boundary, protected_starts=protected_starts)
+                with self._checkpoint_condition:
+                    self._journal_retirement_pending = pending
+                    if self._closing or not (self._checkpoint_requested or self._compaction_due):
+                        self._checkpoint_running = False
+                        self._checkpoint_condition.notify_all()
+                        return
             self._checkpoint_under_gate()
+            with self._state_lock:
+                callback = (
+                    self._retirement_callback
+                    if self._journal_retirement_pending and not self._closing else None
+                )
+        if callback is not None:
+            # A failed publication-time retirement gets one idle retry. The
+            # retire-only branch returns above, so failures never start polling.
+            callback()
 
     def _checkpoint_under_gate(self) -> None:
         while True:
@@ -590,12 +624,13 @@ class WatchStateStore:
                 if seal_ticket is not None:
                     seal_ticket.wait()
                 self._write_snapshot_view(view)
-                self._retire_segments_through(boundary)
+                retirement_pending = self._retire_segments_through(boundary)
             except BaseException as exc:
                 error = exc
 
             with self._checkpoint_condition:
                 if error is None:
+                    self._journal_retirement_pending = retirement_pending
                     self._snapshot_exists = True
                     self._checkpoint_seq = max(self._checkpoint_seq, boundary)
                     retired_record_starts = [
@@ -629,10 +664,24 @@ class WatchStateStore:
                 self._checkpoint_running = False
                 return
 
-    def _retire_segments_through(self, boundary: int) -> None:
-        for path in self._journal_paths():
+    def _protected_journal_starts_locked(self) -> set[int]:
+        # A segment can start before the snapshot and still contain newer
+        # records after a failed checkpoint. Replay counts protect that suffix.
+        return set(self._segment_records) | {
+            self._path_coordinator.current_segment(self._active_segment_start),
+        }
+
+    def _retire_segments_through(self, boundary: int, *, protected_starts: set[int] | None = None) -> bool:
+        if boundary < 1:
+            return False
+        try:
+            paths = self._journal_paths()
+        except OSError:
+            return True
+        pending = False
+        for path in paths:
             start = self._segment_start_from_path(path)
-            if start is None or start > boundary:
+            if start is None or start > boundary or (protected_starts is not None and start in protected_starts):
                 continue
             try:
                 path.unlink()
@@ -640,8 +689,10 @@ class WatchStateStore:
                 pass
             except OSError:
                 # Snapshot publication already made these segments redundant.
-                # A later checkpoint/startup may retry cleanup safely.
-                pass
+                # Retry on the next idle maintenance, checkpoint or load,
+                # without retaining historical paths or polling an idle store.
+                pending = True
+        return pending
 
     def _on_journal_written(self, segment_start: int, byte_count: int) -> None:
         with self._state_lock:

@@ -312,6 +312,7 @@ def _indexed_scheduler_for_test():
     watcher._latest_observations = {}
     watcher._password_dirty_dirs = {}
     watcher._cache_cleanup_deadline = None
+    watcher.log = SimpleNamespace(next_history_expiry=None, clear_expired_history=lambda: None)
     watcher.password_retry_debounce_seconds = 0.0
     return watcher
 

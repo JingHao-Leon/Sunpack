@@ -7,7 +7,7 @@ import time
 import weakref
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from sunpack.core.support.resource_lifecycle import open_service_file
 
@@ -69,13 +69,43 @@ class WatchLogStore:
         *,
         max_bytes: int = DEFAULT_EVENTS_MAX_BYTES,
         backup_count: int = DEFAULT_EVENTS_BACKUP_COUNT,
+        wake_callback: Callable[[], None] | None = None,
     ):
         self.path = Path(path)
         self._path_lock = _path_lock(self.path)
         self.max_bytes = max(1, int(max_bytes))
         self.backup_count = max(1, int(backup_count))
         self._throttle_lock = threading.Lock()
-        self._last_throttled_write: dict[tuple[str, str], float] = {}
+        self._last_throttled_write: dict[tuple[str, str], tuple[float, float]] = {}
+        self._next_throttle_expiry: float | None = None
+        self._wake_callback = wake_callback
+
+    @property
+    def next_history_expiry(self) -> float | None:
+        with self._throttle_lock:
+            return self._next_throttle_expiry
+
+    def clear_expired_history(self) -> None:
+        with self._throttle_lock:
+            self._clear_expired_history_locked(time.monotonic())
+
+    def _clear_expired_history_locked(self, now: float) -> None:
+        if self._next_throttle_expiry is None or now < self._next_throttle_expiry:
+            return
+        expired = [token for token, (_, expiry) in self._last_throttled_write.items() if expiry <= now]
+        for token in expired:
+            del self._last_throttled_write[token]
+        if not self._last_throttled_write:
+            self._last_throttled_write.clear()
+        self._next_throttle_expiry = min(
+            (expiry for _, expiry in self._last_throttled_write.values()), default=None,
+        )
+
+    def close(self) -> None:
+        with self._throttle_lock:
+            self._wake_callback = None
+            self._last_throttled_write.clear()
+            self._next_throttle_expiry = None
 
     def write(self, event: str, **payload: Any) -> None:
         record = {
@@ -102,14 +132,30 @@ class WatchLogStore:
         interval_seconds: float,
         **payload: Any,
     ) -> None:
-        now = time.monotonic()
         token = (event, str(throttle_key))
+        interval = max(0.0, float(interval_seconds))
+        wake_callback = None
         with self._throttle_lock:
+            now = time.monotonic()
+            self._clear_expired_history_locked(now)
             previous = self._last_throttled_write.get(token)
-            if previous is not None and now - previous < max(0.0, interval_seconds):
+            if previous is not None and now - previous[0] < interval:
+                self._last_throttled_write[token] = (previous[0], max(previous[1], previous[0] + interval))
                 return
-            self._last_throttled_write[token] = now
-            if len(self._last_throttled_write) > 2048:
-                oldest = min(self._last_throttled_write, key=self._last_throttled_write.get)
-                self._last_throttled_write.pop(oldest, None)
+            if interval > 0.0:
+                expiry = now + interval
+                self._last_throttled_write[token] = (now, expiry)
+                if len(self._last_throttled_write) > 2048:
+                    oldest = min(self._last_throttled_write, key=lambda key: self._last_throttled_write[key][0])
+                    del self._last_throttled_write[oldest]
+                if self._next_throttle_expiry is None or expiry < self._next_throttle_expiry:
+                    self._next_throttle_expiry = expiry
+                    wake_callback = self._wake_callback
+            else:
+                self._last_throttled_write.pop(token, None)
+                if not self._last_throttled_write:
+                    self._last_throttled_write.clear()
+                    self._next_throttle_expiry = None
+        if wake_callback is not None:
+            wake_callback()
         self.write(event, **payload)

@@ -282,7 +282,8 @@ impl NativeWorkerManifest {
     }
 }
 
-#[pyclass(module = "sunpack_native", frozen)]
+#[pyclass(module = "sunpack_native", frozen, skip_from_py_object)]
+#[derive(Clone)]
 pub(crate) struct NativeOutputInventory {
     root: String,
     exists: bool,
@@ -373,6 +374,130 @@ pub(crate) fn rebase_output_inventory_root(
     new_root: String,
 ) -> NativeOutputInventory {
     rebase_output_inventory_root_impl(&inventory, new_root)
+}
+
+/// Compose disjoint, already inventoried child directories without filesystem I/O.
+#[pyfunction]
+pub(crate) fn merge_output_inventories(
+    py: Python<'_>,
+    root: String,
+    inventories: Vec<Py<NativeOutputInventory>>,
+) -> PyResult<NativeOutputInventory> {
+    let inventories: Vec<_> = inventories
+        .iter()
+        .map(|inventory| inventory.borrow(py).clone())
+        .collect();
+    py.detach(move || {
+        if inventories.is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "output inventory merge requires child inventories",
+            ));
+        }
+        let root_path = lexical_normalize_path(Path::new(&root));
+        let root_depth = root_path.components().count();
+        let mut child_roots: Vec<PathBuf> = Vec::with_capacity(inventories.len());
+        for inventory in &inventories {
+            let child = lexical_normalize_path(Path::new(&inventory.root));
+            if !path_is_within_root(&child, &root_path)
+                || child_roots.iter().any(|previous| {
+                    path_is_within_root(previous, &child) || path_is_within_root(&child, previous)
+                })
+            {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "output inventory roots must be disjoint and within the merged root",
+                ));
+            }
+            child_roots.push(child);
+        }
+        let mut files = Vec::with_capacity(
+            inventories
+                .iter()
+                .map(|inventory| inventory.files.len())
+                .sum(),
+        );
+        let mut container_dirs = HashSet::new();
+        let mut dir_count = 0;
+        let mut total_size = 0u64;
+        let mut unreadable_count = 0;
+        let mut worker_inventory_complete = true;
+        let mut worker_crc_available = true;
+        for (inventory, child_root) in inventories.iter().zip(&child_roots) {
+            let prefix = normalize_path_separator(path_to_string(
+                &child_root
+                    .components()
+                    .skip(root_depth)
+                    .collect::<PathBuf>(),
+            ));
+            dir_count += inventory.dir_count;
+            total_size = total_size.saturating_add(inventory.total_size);
+            unreadable_count += inventory.unreadable_count;
+            worker_inventory_complete &= inventory.worker_inventory_complete;
+            if !inventory.files.is_empty() {
+                worker_crc_available &= inventory.worker_crc_available;
+            }
+            if inventory.exists && inventory.is_dir {
+                let mut directory = child_root.as_path();
+                while directory.components().count() > root_depth {
+                    container_dirs.insert(inventory_path_key(&path_to_string(directory)));
+                    directory = directory
+                        .parent()
+                        .expect("child inventory is below merge root");
+                }
+            }
+            for item in inventory.files.iter() {
+                let physical = item.output_path.as_ref().unwrap_or(&item.path);
+                let relative = if !physical.is_empty()
+                    && Path::new(physical)
+                        .components()
+                        .all(|component| matches!(component, std::path::Component::Normal(_)))
+                {
+                    let mut relative = String::with_capacity(prefix.len() + 1 + physical.len());
+                    if !prefix.is_empty() {
+                        relative.push_str(&prefix);
+                        relative.push('/');
+                    }
+                    relative.extend(physical.chars().map(|ch| if ch == '\\' { '/' } else { ch }));
+                    relative
+                } else {
+                    let actual = inventory_file_path(child_root, item).ok_or_else(|| {
+                        pyo3::exceptions::PyValueError::new_err(
+                            "output inventory file is outside its child root",
+                        )
+                    })?;
+                    normalize_path_separator(path_to_string(
+                        &actual.components().skip(root_depth).collect::<PathBuf>(),
+                    ))
+                };
+                files.push(OutputFileRecord {
+                    index: files.len() as u32,
+                    path: relative,
+                    abs_path: None,
+                    output_path: None,
+                    size: item.size,
+                    bytes_written: item.bytes_written,
+                    crc32: item.crc32,
+                    output_crc32: item.output_crc32,
+                    crc_ok: item.crc_ok,
+                    status: item.status,
+                    mtime_ns: item.mtime_ns,
+                    magic: item.magic.clone(),
+                });
+            }
+        }
+        Ok(NativeOutputInventory {
+            root: path_to_string(&root_path),
+            exists: true,
+            is_dir: true,
+            file_count: files.len(),
+            dir_count: dir_count + container_dirs.len(),
+            total_size,
+            unreadable_count,
+            worker_crc_available: worker_crc_available && !files.is_empty(),
+            worker_inventory_complete,
+            identity_paths: true,
+            files: Arc::new(files),
+        })
+    })
 }
 
 #[pymethods]
@@ -538,18 +663,20 @@ impl NativeOutputInventory {
         py: Python<'_>,
         options: PyRef<'_, NativeDirectoryScanOptions>,
     ) -> PyResult<(Py<NativeDirectorySnapshot>, Py<NativeDirectorySnapshot>)> {
-        let mut records =
-            build_inventory_snapshot_views(&self.root, self.files.as_ref(), &options.options);
-        if self.unreadable_count != 0 {
-            records.errors.push_detail(
-                Path::new(&self.root),
-                "output_scan",
-                self.unreadable_count.to_string(),
-            );
-        }
-        populate_relation_anchors(&mut records.raw);
-        let (filtered, raw) =
-            NativeDirectorySnapshot::from_views(records.filtered, records.raw, records.errors);
+        let options = &options.options;
+        let (filtered, raw) = py.detach(|| {
+            let mut records =
+                build_inventory_snapshot_views(&self.root, self.files.as_ref(), options);
+            if self.unreadable_count != 0 {
+                records.errors.push_detail(
+                    Path::new(&self.root),
+                    "output_scan",
+                    self.unreadable_count.to_string(),
+                );
+            }
+            populate_relation_anchors(&mut records.raw);
+            NativeDirectorySnapshot::from_views(records.filtered, records.raw, records.errors)
+        });
         Ok((Py::new(py, filtered)?, Py::new(py, raw)?))
     }
 
@@ -1057,10 +1184,15 @@ fn scan_snapshots_with_options(
     max_depth: Option<usize>,
     options: &DirectoryScanOptions,
 ) -> PyResult<(Py<NativeDirectorySnapshot>, Py<NativeDirectorySnapshot>)> {
-    let mut records = scan_directory_views(root_path, max_depth, options)?;
-    populate_relation_anchors(&mut records.raw);
-    let (filtered, raw) =
-        NativeDirectorySnapshot::from_views(records.filtered, records.raw, records.errors);
+    let (filtered, raw) = py.detach(|| {
+        let mut records = scan_directory_views(root_path, max_depth, options)?;
+        populate_relation_anchors(&mut records.raw);
+        Ok::<_, PyErr>(NativeDirectorySnapshot::from_views(
+            records.filtered,
+            records.raw,
+            records.errors,
+        ))
+    })?;
     Ok((Py::new(py, filtered)?, Py::new(py, raw)?))
 }
 
@@ -1087,12 +1219,16 @@ pub(crate) fn scan_directory_snapshot(
         mtime_ranges,
         whitelist_rules,
     )?;
-    let mut records = scan_directory_impl::<false>(root_path, max_depth, &options, false, None)?;
-    populate_relation_anchors(&mut records.filtered);
-    Py::new(
-        py,
-        NativeDirectorySnapshot::from_records(records.filtered, records.errors),
-    )
+    let snapshot = py.detach(|| {
+        let mut records =
+            scan_directory_impl::<false>(root_path, max_depth, &options, false, None)?;
+        populate_relation_anchors(&mut records.filtered);
+        Ok::<_, PyErr>(NativeDirectorySnapshot::from_records(
+            records.filtered,
+            records.errors,
+        ))
+    })?;
+    Py::new(py, snapshot)
 }
 
 /// Filesystem target classification only; archive analysis remains in discovery.
@@ -1189,11 +1325,11 @@ pub(crate) fn directory_snapshot_from_columns(
             },
         )
         .collect::<Vec<_>>();
-    populate_relation_anchors(&mut records);
-    Py::new(
-        py,
-        NativeDirectorySnapshot::from_records(records, DirectoryReadErrors::default()),
-    )
+    let snapshot = py.detach(move || {
+        populate_relation_anchors(&mut records);
+        NativeDirectorySnapshot::from_records(records, DirectoryReadErrors::default())
+    });
+    Py::new(py, snapshot)
 }
 
 #[pyfunction]
@@ -1224,26 +1360,27 @@ pub(crate) fn profile_directory_scan(
     )?;
     let options_compile = options_started.elapsed();
 
-    let mut profile = DirectoryScanProfile::default();
-    let mut entries = scan_directory_impl::<true>(
-        root_path,
-        max_depth,
-        &options,
-        include_relation_anchors,
-        Some(&mut profile),
-    )?;
-    if include_relation_anchors {
-        let started = Instant::now();
-        populate_relation_anchors(&mut entries.raw);
-        profile.file_probe_population = started.elapsed();
-    }
-
-    let snapshot_started = Instant::now();
-    let snapshot = Py::new(
-        py,
-        NativeDirectorySnapshot::from_records(entries.filtered, entries.errors),
-    )?;
-    let snapshot_building = snapshot_started.elapsed();
+    let (profile, snapshot, snapshot_building) = py.detach(|| {
+        let mut profile = DirectoryScanProfile::default();
+        let mut entries = scan_directory_impl::<true>(
+            root_path,
+            max_depth,
+            &options,
+            include_relation_anchors,
+            Some(&mut profile),
+        )?;
+        if include_relation_anchors {
+            let started = Instant::now();
+            populate_relation_anchors(&mut entries.raw);
+            profile.file_probe_population = started.elapsed();
+        }
+        let snapshot_started = Instant::now();
+        let snapshot = NativeDirectorySnapshot::from_records(entries.filtered, entries.errors);
+        Ok::<_, PyErr>((profile, snapshot, snapshot_started.elapsed()))
+    })?;
+    let python_started = Instant::now();
+    let snapshot = Py::new(py, snapshot)?;
+    let snapshot_building = snapshot_building + python_started.elapsed();
     let profiled_call_total = call_started.elapsed();
     let profile =
         profile.into_py_dict(py, options_compile, snapshot_building, profiled_call_total)?;

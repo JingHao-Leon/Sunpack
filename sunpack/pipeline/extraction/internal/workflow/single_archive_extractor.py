@@ -700,6 +700,7 @@ class SingleArchiveExtractor:
             saved_knowledge = task.knowledge().to_dict()
         segment_results: list[dict[str, Any]] = []
         embedded_results: list[tuple[dict[str, Any], ExtractionResult]] = []
+        segment_inventories: list[OutputInventory] = []
         password_used = None
         selected_codepage = None
         any_success = False
@@ -780,10 +781,14 @@ class SingleArchiveExtractor:
                     result.output_inventory,
                     expected_root=segment_dir,
                 )
+                if segment_inventory is None:
+                    segment_inventory = collect_output_inventory(segment_dir)
+                    result.output_inventory = segment_inventory
+                segment_inventories.append(segment_inventory)
                 stats = {
                     "file_count": segment_inventory.stats.file_count,
                     "total_bytes": segment_inventory.stats.total_size,
-                } if segment_inventory is not None else self._directory_stats(segment_dir)
+                }
             segment_success = bool(result.success)
             segment_partial = bool(result.partial_outputs or stats["file_count"] > 0)
             embedded_results.append(({
@@ -817,7 +822,7 @@ class SingleArchiveExtractor:
             })
 
         with _phase(phase_timer, f"{phase_prefix}_directory_stats_total"):
-            output_inventory = collect_output_inventory(out_dir)
+            output_inventory = OutputInventory.merge(out_dir, segment_inventories)
             totals = {
                 "file_count": output_inventory.stats.file_count,
                 "total_bytes": output_inventory.stats.total_size,

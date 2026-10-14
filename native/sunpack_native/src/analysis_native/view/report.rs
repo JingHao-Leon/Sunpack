@@ -8,7 +8,7 @@ use crate::io::reader::FileIdentity;
 use pyo3::types::PyTuple;
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 const DEFAULT_PREPASS_BYTES: usize = 1024 * 1024;
 const DEFAULT_EXTRACTABLE_CONFIDENCE: f64 = 0.85;
@@ -1158,20 +1158,11 @@ impl<'a, 'py> ReportContext<'a, 'py> {
         }
         let structure = if stream_family(&self.view.reader.read_at(0, 32).unwrap_or_default()) {
             let identity = self.view.reader.file_identity().ok();
-            let cached = identity
-                .as_ref()
-                .and_then(|identity| stream_structure_cache_get(self.py, identity));
-            Some(match cached {
-                Some(structure) => structure,
+            Some(match identity {
+                Some(identity) => stream_structure_cached(self.py, identity, path)?,
                 None => {
-                    let structure = crate::analysis_native::inspect_compression_stream_structure(
-                        self.py, path,
-                    )?
-                    .into_bound(self.py);
-                    if let Some(identity) = identity {
-                        stream_structure_cache_put(identity, &structure);
-                    }
-                    structure
+                    crate::analysis_native::inspect_compression_stream_structure(self.py, path)?
+                        .into_bound(self.py)
                 }
             })
         } else {
@@ -2036,36 +2027,63 @@ pub(crate) fn confirm_format_identity_native(path: &str, format: &str) -> bool {
 
 // ---- Full-stream structure cache -----------------------------------------
 
-type StreamStructureEntry = (FileIdentity, Py<PyDict>);
+type StreamStructureSlot = OnceLock<PyResult<Py<PyDict>>>;
+type StreamStructureEntry = (FileIdentity, Arc<StreamStructureSlot>);
 
 fn stream_structure_cache() -> &'static Mutex<VecDeque<StreamStructureEntry>> {
     static CACHE: OnceLock<Mutex<VecDeque<StreamStructureEntry>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(VecDeque::new()))
 }
 
-fn stream_structure_cache_get<'py>(
+fn stream_structure_cached<'py>(
     py: Python<'py>,
-    identity: &FileIdentity,
-) -> Option<Bound<'py, PyDict>> {
+    identity: FileIdentity,
+    path: &str,
+) -> PyResult<Bound<'py, PyDict>> {
+    let slot = {
+        let mut entries = stream_structure_cache()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        entries.retain(|(key, _)| key.path != identity.path || *key == identity);
+        let slot = entries
+            .iter()
+            .position(|(key, _)| *key == identity)
+            .and_then(|index| entries.remove(index))
+            .map(|(_, slot)| slot)
+            .unwrap_or_else(|| Arc::new(OnceLock::new()));
+        entries.push_back((identity.clone(), Arc::clone(&slot)));
+        slot
+    };
+    // Waiting for another initializer must release the GIL: its final Python
+    // result cannot be published until the initializer reacquires it.
+    let result = py.detach(|| {
+        slot.get_or_init(|| {
+            Python::attach(|py| {
+                crate::analysis_native::inspect_compression_stream_structure(py, path)
+            })
+        })
+    });
     let mut entries = stream_structure_cache()
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let index = entries.iter().position(|(key, _)| key == identity)?;
-    let entry = entries.remove(index)?;
-    let value = entry.1.clone_ref(py).into_bound(py);
-    entries.push_back(entry);
-    Some(value)
-}
-
-fn stream_structure_cache_put(identity: FileIdentity, structure: &Bound<'_, PyDict>) {
-    let mut entries = stream_structure_cache()
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    // A new generation of the same path replaces every older one.
-    entries.retain(|(key, _)| key.path != identity.path);
-    entries.push_back((identity, structure.clone().unbind()));
+    if result.is_err() {
+        entries.retain(|(key, current)| *key != identity || !Arc::ptr_eq(current, &slot));
+    }
+    // Active slots stay discoverable, including under cache pressure. Once
+    // their users finish, the existing bounded cache can evict them normally.
     while entries.len() > STREAM_STRUCTURE_CACHE_ENTRIES {
-        entries.pop_front();
+        let Some(index) = entries
+            .iter()
+            .position(|(_, slot)| Arc::strong_count(slot) == 1 && slot.get().is_some())
+        else {
+            break;
+        };
+        entries.remove(index);
+    }
+    drop(entries);
+    match result {
+        Ok(value) => Ok(value.clone_ref(py).into_bound(py)),
+        Err(error) => Err(error.clone_ref(py)),
     }
 }
 

@@ -2043,6 +2043,7 @@ impl HandlePool {
         let generation = self.generation;
         self.entries.get_mut(identity)?.generation = generation;
         self.order.push_back((identity.clone(), generation));
+        self.compact_order();
         Some(source)
     }
 
@@ -2068,6 +2069,20 @@ impl HandlePool {
             if self.by_path.get(&old_identity.path) == Some(&old_identity) {
                 self.by_path.remove(&old_identity.path);
             }
+        }
+        self.compact_order();
+    }
+
+    fn compact_order(&mut self) {
+        // Cache hits create stale history too, even when no eviction occurs.
+        // Amortize compaction while keeping one current row per live handle.
+        if self.order.len() > self.capacity.max(self.entries.len()).saturating_mul(2) {
+            let entries = &self.entries;
+            self.order.retain(|(identity, generation)| {
+                entries
+                    .get(identity)
+                    .is_some_and(|entry| entry.generation == *generation)
+            });
         }
     }
 }
@@ -2905,7 +2920,32 @@ mod tests {
         drop(first);
         let second = manager().open_file(&path).unwrap();
         assert_eq!(first_ptr, Arc::as_ptr(&second));
+        // The old reuse check alone cannot catch unbounded hit history. Use a
+        // local pool so concurrent tests cannot affect its retention or LRU.
+        let other = temp_file("managed_reader_other_handle", b"second");
+        let third = manager().open_file(&other).unwrap();
+        let mut pool = HandlePool {
+            entries: HashMap::new(),
+            by_path: HashMap::new(),
+            order: VecDeque::new(),
+            generation: 0,
+            capacity: 2,
+        };
+        pool.insert(second.identity.clone(), Arc::clone(&second));
+        pool.insert(third.identity.clone(), Arc::clone(&third));
+        for _ in 0..2000 {
+            assert_eq!(
+                Arc::as_ptr(&pool.touch(&second.identity).unwrap()),
+                first_ptr
+            );
+        }
+        assert!(pool.order.len() <= pool.capacity * 2);
+        pool.capacity = 1;
+        pool.insert(second.identity.clone(), Arc::clone(&second));
+        assert!(pool.entries.contains_key(&second.identity));
+        assert!(!pool.entries.contains_key(&third.identity));
         let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(other);
     }
 
     #[test]

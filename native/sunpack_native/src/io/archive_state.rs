@@ -1,10 +1,14 @@
 use crate::io::resource_lifecycle::TrackedFile;
 use crate::password::zip::{zip_password_bytes, ZipCryptoDecryptor};
 use crate::verification::archive_manifest::{ManifestEntry, NativeArchiveManifest};
+use crate::verification::paths::{
+    clean_relative_archive_path, unsafe_archive_path, windows_output_relative_path,
+    OutputPathAllocator,
+};
 use encoding_rs::{BIG5, GBK, SHIFT_JIS, UTF_8};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
@@ -180,7 +184,7 @@ fn tar_manifest_from_reader(
     let mut total_unpacked_size = 0u64;
     let mut zero_blocks = 0usize;
     let mut entries = Vec::<ManifestEntry>::new();
-    let mut used_paths = HashSet::<String>::new();
+    let mut output_paths = OutputPathAllocator::default();
     let mut global_pax = HashMap::<String, String>::new();
     let mut next_pax = HashMap::<String, String>::new();
     let mut long_name = None::<String>;
@@ -371,13 +375,15 @@ fn tar_manifest_from_reader(
         if !matches!(typeflag, b'5' | b'3' | b'4' | b'6') && !path.is_empty() {
             file_count += 1;
             let archive_path = path.clone();
-            let mut projected = archive_path.clone();
-            let mut index = 1usize;
-            while used_paths.contains(&tar_path_key(&projected)) {
-                projected = tar_duplicate_path(&archive_path, index);
-                index += 1;
-            }
-            used_paths.insert(tar_path_key(&projected));
+            let projected = if unsafe_archive_path(&archive_path) {
+                // Rejected names own no worker output slot.
+                archive_path.clone()
+            } else {
+                output_paths.allocate(
+                    windows_output_relative_path(clean_relative_archive_path(&archive_path))
+                        .into_owned(),
+                )
+            };
             let size = if matches!(typeflag, b'1' | b'2') {
                 0
             } else {
@@ -620,23 +626,6 @@ fn tar_sparse_map(value: &str) -> Option<Vec<(u64, u64)>> {
         previous_end = end;
     }
     Some(extents)
-}
-
-fn tar_path_key(path: &str) -> String {
-    path.replace('\\', "/").to_lowercase()
-}
-
-fn tar_duplicate_path(path: &str, index: usize) -> String {
-    let slash = path.rfind('/');
-    let prefix = slash.map(|value| &path[..=value]).unwrap_or("");
-    let name = slash.map(|value| &path[value + 1..]).unwrap_or(path);
-    let dot = name.rfind('.');
-    let suffix = match dot {
-        Some(value) if value > 0 => &name[value..],
-        _ => "",
-    };
-    let stem = &name[..name.len() - suffix.len()];
-    format!("{prefix}{stem}({index}){suffix}")
 }
 
 pub(crate) fn build_segments(source: &Bound<'_, PyDict>) -> PyResult<Vec<Segment>> {

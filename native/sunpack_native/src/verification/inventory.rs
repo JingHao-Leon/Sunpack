@@ -1,3 +1,6 @@
+use super::paths::{
+    clean_relative_archive_path, unsafe_archive_path, windows_output_relative_path,
+};
 use crate::io::reader::ManagedReader;
 use crate::scan::directory::{
     NativeOutputInventory, OutputFileRecord, OutputInventoryVerificationSnapshot,
@@ -707,10 +710,9 @@ fn archive_file<'a>(
     if path.is_empty() {
         return None;
     }
-    let raw_cleaned = clean_relative_archive_path(&raw_path);
     Some(ArchiveFile {
         path,
-        unsafe_path: unsafe_archive_path(&raw_path, &raw_cleaned),
+        unsafe_path: unsafe_archive_path(&raw_path),
         raw_path,
         size,
         has_crc,
@@ -789,27 +791,6 @@ fn py_u32(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<u32>> {
     Ok(py_u64(dict, key)?.map(|value| (value & 0xFFFF_FFFF) as u32))
 }
 
-fn clean_relative_archive_path(value: &str) -> Cow<'_, str> {
-    if !value.contains('\\')
-        && value.trim() == value
-        && value
-            .split('/')
-            .all(|part| !part.is_empty() && part != "." && part != "..")
-    {
-        return Cow::Borrowed(value);
-    }
-    Cow::Owned(
-        value
-            .replace('\\', "/")
-            .trim()
-            .trim_matches('/')
-            .split('/')
-            .filter(|part| !part.is_empty() && *part != "." && *part != "..")
-            .collect::<Vec<_>>()
-            .join("/"),
-    )
-}
-
 fn normalize_match_name(value: &str) -> String {
     // Non-ASCII names must retain their actual code points. Unicode text
     // equivalence is not evidence that two filesystem entries are identical.
@@ -827,98 +808,6 @@ fn normalize_match_path(value: &str) -> String {
 
 fn basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
-}
-
-/// Names the extraction worker refuses to write (see `safe_relative_item_path`
-/// in the 7z bridge): rooted paths, drive-qualified names and `..` traversal.
-fn unsafe_archive_path(raw_path: &str, cleaned: &str) -> bool {
-    let text = if raw_path.contains('\\') {
-        Cow::Owned(raw_path.replace('\\', "/"))
-    } else {
-        Cow::Borrowed(raw_path)
-    };
-    if text.is_empty() {
-        return false;
-    }
-    if text.starts_with('/') {
-        return true;
-    }
-    let bytes = text.as_bytes();
-    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
-        return true;
-    }
-    if text.split('/').any(|part| part == "..") {
-        return true;
-    }
-    !cleaned.is_empty() && cleaned != text.trim().trim_matches('/')
-}
-
-fn is_windows_invalid_name_char(value: char) -> bool {
-    (value as u32) < 0x20 || matches!(value, '<' | '>' | ':' | '"' | '|' | '?' | '*')
-}
-
-/// Mirrors `is_windows_reserved_device_name` in the 7z bridge.
-fn is_windows_reserved_device_name(part: &str) -> bool {
-    let bytes = part.as_bytes();
-    let mut stem = part.find('.').unwrap_or(bytes.len());
-    while stem > 0 && bytes[stem - 1] == b' ' {
-        stem -= 1;
-    }
-    if stem != 3 && stem != 4 {
-        return false;
-    }
-    let prefix = [
-        bytes[0].to_ascii_lowercase(),
-        bytes[1].to_ascii_lowercase(),
-        bytes[2].to_ascii_lowercase(),
-    ];
-    if stem == 3 {
-        return matches!(&prefix, b"con" | b"prn" | b"aux" | b"nul");
-    }
-    matches!(bytes[3], b'1'..=b'9') && matches!(&prefix, b"com" | b"lpt")
-}
-
-fn windows_output_part_needs_mapping(part: &str) -> bool {
-    part.chars().any(is_windows_invalid_name_char)
-        || part.ends_with(['.', ' '])
-        || is_windows_reserved_device_name(part)
-}
-
-/// Mirrors `make_windows_safe_path_part` in the 7z bridge.
-fn windows_output_part(part: &str) -> String {
-    let mut mapped: String = part
-        .chars()
-        .map(|value| {
-            if is_windows_invalid_name_char(value) {
-                '_'
-            } else {
-                value
-            }
-        })
-        .collect();
-    let kept = mapped.trim_end_matches(['.', ' ']).len();
-    let trailing = mapped.len() - kept;
-    mapped.truncate(kept);
-    mapped.extend(std::iter::repeat('_').take(trailing));
-    if is_windows_reserved_device_name(&mapped) {
-        mapped.insert(0, '_');
-    }
-    mapped
-}
-
-/// Project a cleaned archive path onto the name the worker writes on disk.
-/// The mapping is idempotent, so already-projected output paths pass through.
-fn windows_output_relative_path(cleaned: Cow<'_, str>) -> Cow<'_, str> {
-    if !cleaned.split('/').any(windows_output_part_needs_mapping) {
-        return cleaned;
-    }
-    Cow::Owned(
-        cleaned
-            .split('/')
-            .map(windows_output_part)
-            .collect::<Vec<_>>()
-            .join("/"),
-    )
 }
 
 fn size_progress(actual_size: Option<u64>, expected_size: Option<u64>) -> Option<f64> {
@@ -978,8 +867,13 @@ mod windows_output_name_tests {
             ("dir/file.txt", "dir/file.txt"),
             ("é/e\u{301}.txt", "é/e\u{301}.txt"),
             ("dir\\file.txt", "dir/file.txt"),
-            (" /dir//./../file.txt/ ", "dir/file.txt"),
-            ("\u{2003}dir/file.txt\u{2003}", "dir/file.txt"),
+            // Spaces are filesystem name bytes, not display padding. The
+            // worker maps trailing spaces and preserves leading spaces.
+            (" /dir//./../file.txt/ ", " /dir/file.txt/ "),
+            (
+                "\u{2003}dir/file.txt\u{2003}",
+                "\u{2003}dir/file.txt\u{2003}",
+            ),
             ("dir/ name .txt", "dir/ name .txt"),
             ("", ""),
             ("./", ""),
@@ -1147,16 +1041,17 @@ mod windows_output_name_tests {
             "../escape.txt",
             "a/../b.txt",
         ] {
-            assert!(
-                unsafe_archive_path(raw, &clean_relative_archive_path(raw)),
-                "{raw}"
-            );
+            assert!(unsafe_archive_path(raw), "{raw}");
         }
-        for raw in ["con.txt", "logs/12:30.log", "name. ", "a?b.txt"] {
-            assert!(
-                !unsafe_archive_path(raw, &clean_relative_archive_path(raw)),
-                "{raw}"
-            );
+        for raw in [
+            "con.txt",
+            "logs/12:30.log",
+            "name. ",
+            "a?b.txt",
+            "./file.txt",
+            "dir//file.txt",
+        ] {
+            assert!(!unsafe_archive_path(raw), "{raw}");
         }
     }
 }

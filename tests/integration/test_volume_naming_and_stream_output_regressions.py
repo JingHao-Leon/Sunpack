@@ -69,6 +69,46 @@ def _assert_extracted(results, files: dict[str, bytes], logical_name: str) -> No
         assert (output / name).read_bytes() == data
 
 
+def test_tar_windows_name_collisions_keep_complete_output_in_both_origins(tmp_path):
+    # Ordinary duplicate-name and ZIP mapping tests do not combine Windows
+    # projection collisions with the source-side TAR verification/cleanup path.
+    entries = [
+        ("a?.txt", "a_.txt"), ("a*.txt", "a_(1).txt"),
+        ("a_(2).txt", "a_(2).txt"), ("a?.txt", "a_(3).txt"),
+        ("con.txt", "_con.txt"), ("_con.txt", "_con(1).txt"),
+        ("./same.txt", "same.txt"), ("same.txt", "same(1).txt"),
+        ("sub//file.txt", "sub/file.txt"), ("sub/file.txt", "sub/file(1).txt"),
+        (" leading.txt", " leading.txt"), ("trailing.txt ", "trailing.txt_"),
+    ]
+    expected = {output: f"payload-{index}".encode() for index, (_, output) in enumerate(entries)}
+    config = normalize_config(with_detection_pipeline({
+        "output": {"root": str(tmp_path / "out")},
+        "post_extract": {"archive_cleanup_mode": "k", "flatten_single_directory": False},
+    }))
+
+    async def run():
+        async with PipelineEngine(config) as engine:
+            for origin in ("foreground", "watch"):
+                # The disguised extension forces the regular Rust planning path.
+                archive_path = tmp_path / f"{origin}.bin"
+                with tarfile.open(archive_path, "w") as archive:
+                    for index, (name, _) in enumerate(entries):
+                        payload = f"payload-{index}".encode()
+                        info = tarfile.TarInfo(name)
+                        info.size = len(payload)
+                        archive.addfile(info, io.BytesIO(payload))
+                response = await engine.run([str(archive_path)], direct=True, origin=origin)
+                results = response.summary.target_results
+                assert len(results) == 1
+                assert results[0].outcome_kind == OutcomeKind.COMPLETE_SUCCESS
+                output = Path(results[0].output_dir)
+                assert {p.relative_to(output).as_posix() for p in output.rglob("*") if p.is_file()} == set(expected)
+                for name, payload in expected.items():
+                    assert (output / name).read_bytes() == payload
+
+    asyncio.run(run())
+
+
 def test_old_numbering_rar4_set_with_disguised_head_extracts(tmp_path):
     volumes, files = _rar_volumes(tmp_path, "oldset", "-ma4", "-vn")
     head = volumes / "oldset.rar"

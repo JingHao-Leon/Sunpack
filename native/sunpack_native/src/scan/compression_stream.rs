@@ -829,8 +829,7 @@ fn parse_deflate(
     }
 }
 
-fn gzip_header(cursor: &mut ByteCursor<'_>) -> ValidationResult<()> {
-    let fixed = cursor.read_array::<10>()?;
+pub(crate) fn gzip_fixed_header_flags(fixed: &[u8; 10]) -> ValidationResult<u8> {
     if !fixed.starts_with(GZIP_MAGIC) {
         return invalid("gzip_magic_not_found");
     }
@@ -838,6 +837,12 @@ fn gzip_header(cursor: &mut ByteCursor<'_>) -> ValidationResult<()> {
     if flags & 0xe0 != 0 {
         return invalid("gzip_reserved_flags_set");
     }
+    Ok(flags)
+}
+
+fn gzip_header(cursor: &mut ByteCursor<'_>) -> ValidationResult<()> {
+    let fixed = cursor.read_array::<10>()?;
+    let flags = gzip_fixed_header_flags(&fixed)?;
     let has_crc = flags & 0x02 != 0;
     let mut hasher = Hasher::new();
     if has_crc {
@@ -1049,6 +1054,13 @@ pub(crate) fn validate_bzip2_structure(
     validate_bzip2_structure_observed(reader, offset, limit, |_| Ok(()))
 }
 
+pub(crate) fn bzip2_header_block_limit(header: &[u8; 4]) -> ValidationResult<usize> {
+    if !header.starts_with(BZIP2_MAGIC) || !(b'1'..=b'9').contains(&header[3]) {
+        return invalid("bzip2_magic_not_found");
+    }
+    Ok(usize::from(header[3] - b'0') * 100_000)
+}
+
 pub(crate) fn validate_bzip2_structure_observed(
     reader: &ManagedReader,
     offset: u64,
@@ -1061,10 +1073,7 @@ pub(crate) fn validate_bzip2_structure_observed(
     loop {
         visit(cursor.position())?;
         let header = cursor.read_array::<4>()?;
-        if !header.starts_with(BZIP2_MAGIC) || !(b'1'..=b'9').contains(&header[3]) {
-            return invalid("bzip2_magic_not_found");
-        }
-        let block_limit = usize::from(header[3] - b'0') * 100_000;
+        let block_limit = bzip2_header_block_limit(&header)?;
         let mut bits = MsbBits::new(&mut cursor);
         let mut combined_crc = 0u32;
         loop {
@@ -1385,16 +1394,24 @@ fn read_xz_index_boundary(
         return invalid("xz_stream_start_out_of_range");
     }
     let header = reader.read_cached_at(stream_start, 12)?;
+    validate_xz_header(&header)?;
+    if header[6..8] != footer.flags {
+        return invalid("xz_stream_flags_mismatch");
+    }
+    Ok(stream_start)
+}
+
+pub(crate) fn validate_xz_header(header: &[u8]) -> ValidationResult<()> {
     if header.len() != 12 || !header.starts_with(XZ_MAGIC) {
         return invalid("xz_header_magic_invalid");
     }
-    if header[6..8] != footer.flags {
-        return invalid("xz_stream_flags_mismatch");
+    if header[6] != 0 || header[7] & 0xf0 != 0 {
+        return invalid("xz_stream_flags_invalid");
     }
     if u32::from_le_bytes(header[8..12].try_into().unwrap()) != crc32(&header[6..8]) {
         return invalid("xz_header_crc_bad");
     }
-    Ok(stream_start)
+    Ok(())
 }
 
 pub(crate) fn validate_xz_structure_exact(

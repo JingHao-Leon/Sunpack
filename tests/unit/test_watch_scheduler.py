@@ -108,6 +108,48 @@ def test_existing_watch_success_notification_includes_postprocess_warning(tmp_pa
     assert cleanup_log["results"][0]["message"] == "postprocess failed"
 
 
+@pytest.mark.parametrize("archive_outcome", [None, OutcomeKind.COMPLETE_SUCCESS, OutcomeKind.FAILURE])
+def test_scan_filesystem_errors_only_log_and_do_not_replace_archive_notifications(tmp_path, monkeypatch, archive_outcome):
+    # The native scan test covers standalone scans. This covers the separate
+    # pipeline completion path, including coexistence with real archive results.
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+    source = tmp_path / "archive.blob"
+    source.write_text("source")
+    scan_error = FailureInfo(FailureKind.FILESYSTEM_ERROR, "filesystem_scan", "blocked directory: access denied")
+    archive_error = FailureInfo(FailureKind.DAMAGED, "extract", "archive damaged")
+    results = () if archive_outcome is None else (TargetRunResult(
+        str(source), archive_outcome,
+        failure=archive_error if archive_outcome == OutcomeKind.FAILURE else None,
+        error=archive_error.message if archive_outcome == OutcomeKind.FAILURE else "",
+    ),)
+    summary = RunSummary(
+        target_results=results, scan_failed_tasks=(scan_error.message,), scan_failures=(scan_error,),
+    )
+    watcher = _watcher(tmp_path)
+    notices = []
+    events = []
+    watcher._notify = lambda *args: notices.append(args)
+    monkeypatch.setattr(watcher.log, "write", lambda event, **fields: events.append((event, fields)))
+    monkeypatch.setattr(watcher, "enqueue", lambda *_args, **_kwargs: pytest.fail("scan error retried"))
+
+    async def scenario():
+        async def complete():
+            return PipelineResponse("request", summary, PipelineArtifacts())
+        request = scheduler_module._ActivePipelineRequest(
+            "notice", WatchCandidate(str(source), 6, 1.0), asyncio.create_task(complete()),
+            password_generation=watcher.state.password_generation,
+        )
+        return await watcher._complete_candidate(request)
+
+    _await(scenario())
+    expected = {None: "suppressed", OutcomeKind.COMPLETE_SUCCESS: "succeeded", OutcomeKind.FAILURE: "failed"}
+    assert notices[-1][0] == expected[archive_outcome]
+    assert all(scan_error.message not in str(notice) for notice in notices)
+    assert any(event == "filesystem_scan_failed" and fields["errors"] == [scan_error.message]
+               for event, fields in events)
+    assert summary.scan_failures == (scan_error,)
+
+
 def test_usn_close_accumulated_data_reason_does_not_restart_content_quiet_window():
     previous = WatchCandidate("sample.zip", 100, 10.0, "file", 100)
     current = WatchCandidate(

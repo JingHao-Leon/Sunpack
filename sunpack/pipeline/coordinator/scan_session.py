@@ -30,6 +30,7 @@ class DiscoveryScanSession:
         self._relation_group_signatures: dict[str, str] = {}
         self._head_facts = NativeHeadFactCache()
         self._scan_roots: list[str] = []
+        self.scan_errors: list[tuple[str, str, str]] = []
 
     def set_scan_roots(self, roots: list[str]) -> None:
         self._scan_roots = []
@@ -46,6 +47,7 @@ class DiscoveryScanSession:
             self._scan_roots.append(normalized)
 
     def prime_snapshot(self, directory: str, snapshot: DirectorySnapshot) -> None:
+        self.scan_errors.extend(snapshot.native_snapshot.scan_errors())
         self._snapshots[self._snapshot_key(directory, max_depth=None)] = snapshot
 
     def prime_output_inventory(self, inventory: Any) -> None:
@@ -81,6 +83,7 @@ class DiscoveryScanSession:
                 config=self.config,
                 include_raw_snapshot=self.include_raw_snapshots,
             ).scan()
+            self.scan_errors.extend(self._snapshots[key].native_snapshot.scan_errors())
         return self._snapshots[key]
 
     def relation_groups_for_directory(

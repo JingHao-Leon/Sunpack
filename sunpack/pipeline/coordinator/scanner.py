@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List
 
 from sunpack.core.contracts.discovery import DiscoveryFinding
+from sunpack.core.contracts.failures import FailureKind
 from sunpack.core.contracts.run_state import RunState
 from sunpack.pipeline.coordinator.task_scan import ArchiveTaskScanner
 from sunpack.pipeline.discovery.embedded.options import EmbeddedOptions
@@ -22,6 +23,7 @@ class ScanResult:
 class ScanReport:
     tasks: List[ScanResult]
     findings: List[DiscoveryFinding]
+    errors: List[str]
 
 
 class ScanOrchestrator:
@@ -65,6 +67,10 @@ class ScanOrchestrator:
         return ScanReport(
             tasks=[_scan_result_from_task(task) for task in tasks],
             findings=findings,
+            errors=[
+                failure.message for failure in self.task_scanner.context.scan_failures
+                if failure.kind == FailureKind.FILESYSTEM_ERROR
+            ],
         )
 
 

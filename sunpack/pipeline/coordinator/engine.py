@@ -36,6 +36,7 @@ from sunpack.core.support.output_reservation import OutputReservationRegistry, b
 from sunpack.pipeline.extraction.internal.sevenzip.sevenzip_runner import SevenZipRunner
 from sunpack.core.support.output_paths import default_output_dir_for_task
 from sunpack.core.support.path_keys import path_key
+from sunpack.core.support.filesystem_scan_errors import filesystem_scan_failure
 from sunpack.core.support.archive_sessions import release_archive_sessions_under_roots
 from sunpack.core.support.resource_lifecycle import TaskResourceScope, promotion_barrier
 from sunpack.pipeline.discovery.embedded.options import EmbeddedOptions
@@ -1545,11 +1546,18 @@ class _RequestRuntime:
             )
             if inventory is not None:
                 inventories[os.path.normcase(os.path.abspath(logical_root))] = inventory
-        return self.output_scan_policy.prepare_scan(
+        work = self.output_scan_policy.prepare_scan(
             [output_dir],
             inventories=inventories,
             logical_roots=logical_roots,
         )
+        for error in work.errors:
+            failure = filesystem_scan_failure(error, self.language)
+            with self.context.lock:
+                if failure.message not in self.context.scan_failed_tasks:
+                    self.context.scan_failed_tasks.append(failure.message)
+                    self.context.scan_failures.append(failure)
+        return work
 
     async def _allow_recursive_depth(self, depth: int) -> bool:
         if self.recursion.mode != "prompt":

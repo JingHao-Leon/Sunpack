@@ -1,3 +1,4 @@
+use crate::io::directory_errors::{DirectoryReadError, DirectoryReadErrors};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use rayon::prelude::*;
@@ -27,6 +28,7 @@ struct DirectoryEntryRecord {
 
 #[derive(Debug)]
 pub(crate) struct DirectorySnapshotTable {
+    scan_errors: Vec<DirectoryReadError>,
     pub(crate) paths: Vec<String>,
     pub(crate) is_dirs: Vec<bool>,
     pub(crate) sizes: Vec<Option<u64>>,
@@ -48,8 +50,10 @@ pub(crate) struct NativeDirectorySnapshot {
 }
 
 impl NativeDirectorySnapshot {
-    fn from_records(records: Vec<DirectoryEntryRecord>) -> Self {
-        let table = Arc::new(Self::build_table(records));
+    fn from_records(records: Vec<DirectoryEntryRecord>, errors: DirectoryReadErrors) -> Self {
+        let mut table = Self::build_table(records);
+        table.scan_errors = errors.into_messages();
+        let table = Arc::new(table);
         let rows = (0..table.paths.len()).collect();
         Self { table, rows }
     }
@@ -57,8 +61,11 @@ impl NativeDirectorySnapshot {
     fn from_views(
         filtered: Vec<DirectoryEntryRecord>,
         raw: Vec<DirectoryEntryRecord>,
+        errors: DirectoryReadErrors,
     ) -> (Self, Self) {
-        let table = Arc::new(Self::build_table(raw));
+        let mut table = Self::build_table(raw);
+        table.scan_errors = errors.into_messages();
+        let table = Arc::new(table);
         let rows_by_path: HashMap<&str, usize> = table
             .paths
             .iter()
@@ -84,6 +91,7 @@ impl NativeDirectorySnapshot {
 
     fn build_table(records: Vec<DirectoryEntryRecord>) -> DirectorySnapshotTable {
         let mut table = DirectorySnapshotTable {
+            scan_errors: Vec::new(),
             paths: Vec::with_capacity(records.len()),
             is_dirs: Vec::with_capacity(records.len()),
             sizes: Vec::with_capacity(records.len()),
@@ -171,6 +179,7 @@ pub(crate) fn filesystem_logical_name(path: &str) -> String {
 struct DirectoryScanRecords {
     filtered: Vec<DirectoryEntryRecord>,
     raw: Vec<DirectoryEntryRecord>,
+    errors: DirectoryReadErrors,
 }
 
 #[derive(Debug, Clone)]
@@ -531,8 +540,16 @@ impl NativeOutputInventory {
     ) -> PyResult<(Py<NativeDirectorySnapshot>, Py<NativeDirectorySnapshot>)> {
         let mut records =
             build_inventory_snapshot_views(&self.root, self.files.as_ref(), &options.options);
+        if self.unreadable_count != 0 {
+            records.errors.push_detail(
+                Path::new(&self.root),
+                "output_scan",
+                self.unreadable_count.to_string(),
+            );
+        }
         populate_relation_anchors(&mut records.raw);
-        let (filtered, raw) = NativeDirectorySnapshot::from_views(records.filtered, records.raw);
+        let (filtered, raw) =
+            NativeDirectorySnapshot::from_views(records.filtered, records.raw, records.errors);
         Ok((Py::new(py, filtered)?, Py::new(py, raw)?))
     }
 
@@ -600,6 +617,10 @@ fn output_file_dict(py: Python<'_>, item: &OutputFileRecord) -> PyResult<Py<PyDi
 
 #[pymethods]
 impl NativeDirectorySnapshot {
+    fn scan_errors(&self) -> Vec<DirectoryReadError> {
+        self.table.scan_errors.clone()
+    }
+
     fn __len__(&self) -> usize {
         self.rows.len()
     }
@@ -1038,7 +1059,8 @@ fn scan_snapshots_with_options(
 ) -> PyResult<(Py<NativeDirectorySnapshot>, Py<NativeDirectorySnapshot>)> {
     let mut records = scan_directory_views(root_path, max_depth, options)?;
     populate_relation_anchors(&mut records.raw);
-    let (filtered, raw) = NativeDirectorySnapshot::from_views(records.filtered, records.raw);
+    let (filtered, raw) =
+        NativeDirectorySnapshot::from_views(records.filtered, records.raw, records.errors);
     Ok((Py::new(py, filtered)?, Py::new(py, raw)?))
 }
 
@@ -1065,9 +1087,12 @@ pub(crate) fn scan_directory_snapshot(
         mtime_ranges,
         whitelist_rules,
     )?;
-    let mut records = scan_directory(root_path, max_depth, &options)?;
-    populate_relation_anchors(&mut records);
-    Py::new(py, NativeDirectorySnapshot::from_records(records))
+    let mut records = scan_directory_impl::<false>(root_path, max_depth, &options, false, None)?;
+    populate_relation_anchors(&mut records.filtered);
+    Py::new(
+        py,
+        NativeDirectorySnapshot::from_records(records.filtered, records.errors),
+    )
 }
 
 #[pyfunction]
@@ -1137,7 +1162,10 @@ pub(crate) fn directory_snapshot_from_columns(
         )
         .collect::<Vec<_>>();
     populate_relation_anchors(&mut records);
-    Py::new(py, NativeDirectorySnapshot::from_records(records))
+    Py::new(
+        py,
+        NativeDirectorySnapshot::from_records(records, DirectoryReadErrors::default()),
+    )
 }
 
 #[pyfunction]
@@ -1183,7 +1211,10 @@ pub(crate) fn profile_directory_scan(
     }
 
     let snapshot_started = Instant::now();
-    let snapshot = Py::new(py, NativeDirectorySnapshot::from_records(entries.filtered))?;
+    let snapshot = Py::new(
+        py,
+        NativeDirectorySnapshot::from_records(entries.filtered, entries.errors),
+    )?;
     let snapshot_building = snapshot_started.elapsed();
     let profiled_call_total = call_started.elapsed();
     let profile =
@@ -1356,7 +1387,11 @@ fn build_inventory_snapshot_views(
                 .then_some(record)
             }),
     );
-    DirectoryScanRecords { filtered, raw }
+    DirectoryScanRecords {
+        filtered,
+        raw,
+        errors: DirectoryReadErrors::default(),
+    }
 }
 
 fn inventory_file_path(root: &Path, item: &OutputFileRecord) -> Option<PathBuf> {
@@ -2157,14 +2192,6 @@ fn normalize_extensions(extensions: Vec<String>) -> HashSet<String> {
         .collect()
 }
 
-fn scan_directory(
-    root_path: &str,
-    max_depth: Option<usize>,
-    options: &DirectoryScanOptions,
-) -> PyResult<Vec<DirectoryEntryRecord>> {
-    Ok(scan_directory_impl::<false>(root_path, max_depth, options, false, None)?.filtered)
-}
-
 fn populate_relation_anchors(records: &mut [DirectoryEntryRecord]) {
     let eligible_indices: Vec<usize> = records
         .iter()
@@ -2218,7 +2245,15 @@ fn scan_directory_impl<const PROFILE: bool>(
 ) -> PyResult<DirectoryScanRecords> {
     let scan_started = Instant::now();
     let root = PathBuf::from(root_path);
-    if !root.exists() {
+    let mut errors = DirectoryReadErrors::default();
+    let metadata = match fs::metadata(&root) {
+        Ok(metadata) => Some(metadata),
+        Err(error) => {
+            errors.push(&root, "metadata", error);
+            None
+        }
+    };
+    if metadata.is_none() {
         if PROFILE {
             if let Some(profile) = profile.as_deref_mut() {
                 profile.scan_total = scan_started.elapsed();
@@ -2227,9 +2262,10 @@ fn scan_directory_impl<const PROFILE: bool>(
         return Ok(DirectoryScanRecords {
             filtered: Vec::new(),
             raw: Vec::new(),
+            errors,
         });
     }
-    if root.is_file() {
+    if metadata.as_ref().is_some_and(|metadata| metadata.is_file()) {
         let match_root = root.parent().unwrap_or_else(|| Path::new(""));
         let raw = collect_raw
             .then(|| {
@@ -2256,6 +2292,7 @@ fn scan_directory_impl<const PROFILE: bool>(
         return Ok(DirectoryScanRecords {
             filtered,
             raw: raw.into_iter().collect(),
+            errors,
         });
     }
 
@@ -2270,7 +2307,10 @@ fn scan_directory_impl<const PROFILE: bool>(
                 fs::read_dir(&dir)
             }) {
                 Ok(entries) => entries,
-                Err(_) => continue,
+                Err(error) => {
+                    errors.push(&dir, "read_dir", error);
+                    continue;
+                }
             };
         if PROFILE {
             if let Some(profile) = profile.as_deref_mut() {
@@ -2287,8 +2327,12 @@ fn scan_directory_impl<const PROFILE: bool>(
             let Some(item) = item else {
                 break;
             };
-            let Ok(entry) = item else {
-                continue;
+            let entry = match item {
+                Ok(entry) => entry,
+                Err(error) => {
+                    errors.push(&dir, "read_dir_entry", error);
+                    continue;
+                }
             };
             if PROFILE {
                 if let Some(profile) = profile.as_deref_mut() {
@@ -2304,7 +2348,10 @@ fn scan_directory_impl<const PROFILE: bool>(
                     entry.metadata()
                 }) {
                     Ok(metadata) => metadata,
-                    Err(_) => continue,
+                    Err(error) => {
+                        errors.push(&path, "metadata", error);
+                        continue;
+                    }
                 };
             if PROFILE {
                 if let Some(profile) = profile.as_deref_mut() {
@@ -2469,6 +2516,7 @@ fn scan_directory_impl<const PROFILE: bool>(
     Ok(DirectoryScanRecords {
         filtered: records,
         raw: raw_records,
+        errors,
     })
 }
 

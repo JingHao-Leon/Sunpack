@@ -7,7 +7,7 @@ import os
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum, auto
 from pathlib import Path
 from typing import Callable, Iterable
@@ -18,6 +18,7 @@ from sunpack.core.config.fields.watch import DEFAULT_WATCH_CONFIG
 from sunpack.core.config.detection_view import discovery_run_config
 from sunpack.pipeline.discovery.embedded.options import EmbeddedOptions
 from sunpack.core.contracts.failures import FailureInfo, FailureKind
+from sunpack.core.support.filesystem_scan_errors import filesystem_scan_failure
 from sunpack.core.contracts.retry_targets import (
     failure_contains,
     failure_is_password,
@@ -371,7 +372,7 @@ class WatchScheduler:
         self._recover_usn_startup_gap()
         if self.initial_scan or self.initial_scan_roots is not None:
             scan_roots = self.watch_roots if self.initial_scan_roots is None else self.initial_scan_roots
-            for candidate in scan_watch_candidates(scan_roots, recursive=self.recursive):
+            for candidate in self._scan_candidates(scan_roots, recursive=self.recursive):
                 self.enqueue(candidate.path, event_type="initial_scan")
         self.log.write(
             "scheduler_started",
@@ -390,6 +391,15 @@ class WatchScheduler:
     def _watch_root_directory(self, root: str) -> str:
         root = os.path.abspath(root)
         return root if os.path.isdir(root) else os.path.dirname(root)
+
+    def _scan_candidates(self, roots: list[str], *, recursive: bool) -> list[WatchCandidate]:
+        errors: list[tuple[str, str, str]] = []
+        candidates = scan_watch_candidates(roots, recursive=recursive, errors=errors)
+        if errors:
+            self.log.write("filesystem_scan_failed", roots=roots, errors=[
+                filesystem_scan_failure(error, self.i18n.language).message for error in errors
+            ])
+        return candidates
 
     def _prepare_usn_startup_baseline(self) -> None:
         """Durably establish first-run cursors before the observer can miss a gap."""
@@ -440,7 +450,7 @@ class WatchScheduler:
 
         for root in sorted(fallback_roots):
             try:
-                for candidate in scan_watch_candidates([root], recursive=False):
+                for candidate in self._scan_candidates([root], recursive=False):
                     changed_paths.setdefault(path_key(candidate.path), candidate.path)
             except OSError as exc:
                 self.log.write("usn_fallback_scan_failed", root=root, error=str(exc))
@@ -557,7 +567,7 @@ class WatchScheduler:
                 if not os.path.isdir(root):
                     continue
                 try:
-                    candidates = scan_watch_candidates([root], recursive=True)
+                    candidates = self._scan_candidates([root], recursive=True)
                 except OSError as exc:
                     self.log.write(
                         "crash_resume_scan_failed",
@@ -1852,6 +1862,25 @@ class WatchScheduler:
             )
             self._notify("suppressed", request.notification_id)
             return WatchRunResult(processed=1)
+
+        scan_errors = {
+            failure.message for failure in summary.scan_failures
+            if failure.kind == FailureKind.FILESYSTEM_ERROR
+        }
+        if scan_errors:
+            self.log.write("filesystem_scan_failed", path=candidate.path, errors=sorted(scan_errors))
+            # Only the Watch notification projection omits scan diagnostics.
+            # The pipeline response and CLI error reporting retain them.
+            summary = replace(
+                summary,
+                scan_failures=tuple(failure for failure in summary.scan_failures
+                                    if failure.kind != FailureKind.FILESYSTEM_ERROR),
+                scan_failed_tasks=tuple(message for message in summary.scan_failed_tasks
+                                        if message not in scan_errors),
+            )
+            if not summary.target_results and not summary.failed_tasks:
+                self._notify("suppressed", request.notification_id)
+                return WatchRunResult(processed=1, failed=1, errors=sorted(scan_errors))
 
         results = target_results(summary)
         target_result = _target_result_for_path(summary, candidate.path)

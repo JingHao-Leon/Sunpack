@@ -36,7 +36,7 @@ def test_scan_localizes_discovery_without_changing_machine_results(monkeypatch, 
 
     def scan_report(paths):
         calls.append(paths)
-        return SimpleNamespace(tasks=[], findings=findings)
+        return SimpleNamespace(tasks=[], findings=findings, errors=[])
 
     monkeypatch.setattr(scan, "load_request_config", lambda _cwd: {})
     monkeypatch.setattr(scan, "ScanOrchestrator", lambda *_args: SimpleNamespace(scan_report=scan_report))

@@ -15,6 +15,7 @@ from sunpack.pipeline.extraction.output_inventory import OutputInventory
 class NestedScanWork:
     roots: tuple[str, ...]
     session: DiscoveryScanSession | None
+    errors: tuple[tuple[str, str, str], ...] = ()
 
 
 class NestedOutputScanPolicy:
@@ -52,6 +53,7 @@ class NestedOutputScanPolicy:
     ) -> NestedScanWork:
         roots = []
         seen = set()
+        errors: list[tuple[str, str, str]] = []
         inventories = inventories or {}
         # A carrier can contain several independently extracted archives.  In
         # that case the carrier output directory is only a physical container;
@@ -73,6 +75,7 @@ class NestedOutputScanPolicy:
             )
             snapshot = self._snapshot_from_inventory(inventory, scan_session)
             if snapshot is not None:
+                errors.extend(snapshot.native_snapshot.scan_errors())
                 if not snapshot.has_files:
                     continue
                 root = os.path.abspath(output_dir)
@@ -84,6 +87,7 @@ class NestedOutputScanPolicy:
                 has_primed_snapshot = True
                 continue
             snapshot = self._scan_output(output_dir)
+            errors.extend(snapshot.native_snapshot.scan_errors())
             if not snapshot.has_files:
                 continue
             root = os.path.abspath(output_dir)
@@ -96,7 +100,7 @@ class NestedOutputScanPolicy:
         session = scan_session if has_primed_snapshot else None
         if session is not None:
             session.set_scan_roots(roots)
-        return NestedScanWork(tuple(roots), session)
+        return NestedScanWork(tuple(roots), session, tuple(errors))
 
     @staticmethod
     def project_logical_scan_roots(

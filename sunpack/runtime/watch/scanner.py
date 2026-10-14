@@ -26,8 +26,8 @@ class WatchCandidate:
     change_reason_error: str = ""
 
 
-def scan_watch_candidates(roots: list[str], *, recursive: bool = True) -> list[WatchCandidate]:
-    return _scan_filesystem_candidates(list(roots or []), bool(recursive))
+def scan_watch_candidates(roots: list[str], *, recursive: bool = True, errors: list[tuple[str, str, str]] | None = None) -> list[WatchCandidate]:
+    return _scan_filesystem_candidates(list(roots or []), bool(recursive), errors)
 
 
 def _candidate_for(path: str, *, since_usn: int = 0) -> WatchCandidate | None:
@@ -57,10 +57,10 @@ def _candidate_from_native(item: dict) -> WatchCandidate:
     )
 
 
-def _scan_filesystem_candidates(roots: list[str], recursive: bool) -> list[WatchCandidate]:
+def _scan_filesystem_candidates(roots: list[str], recursive: bool, errors: list[tuple[str, str, str]] | None) -> list[WatchCandidate]:
     from sunpack_native import scan_watch_candidates as native_scan_watch_candidates
 
-    return [_candidate_from_native(item) for item in native_scan_watch_candidates(roots, recursive)]
+    return [_candidate_from_native(item) for item in native_scan_watch_candidates(roots, recursive, errors)]
 
 
 def validate_ntfs_watch_roots(roots: list[str]) -> None:

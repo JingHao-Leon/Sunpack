@@ -8,6 +8,7 @@ from sunpack.runtime.cli.cli_runtime import (
     scan_result_to_item,
 )
 from sunpack.runtime.cli.cli_types import CliCommandResult
+from sunpack.runtime.cli.cli_constants import EXIT_TASK_FAILED
 from sunpack.runtime.cli.persistent_runtime import load_request_config
 from sunpack.pipeline.coordinator.scanner import ScanOrchestrator
 from sunpack.pipeline.discovery.embedded.options import EmbeddedOptions
@@ -105,10 +106,14 @@ def handle(args, ctx):
                 reason = ctx.t(reason_key) if reason_key else item["discovery_reason"]
                 reporter.info(ctx.t("cli.scan.reason", reason=reason))
 
-    return 0, CliCommandResult(
+        for error in report.errors:
+            reporter.error(error)
+
+    return (EXIT_TASK_FAILED if report.errors else 0), CliCommandResult(
         command=COMMAND,
         inputs={"paths": target_paths, "common_root": resolve_common_root(target_paths), "config_overrides": {}, "deep_detect": bool(args.deep_detect)},
         summary=summary,
         items=finding_items,
         tasks=task_items,
+        errors=report.errors,
     )

@@ -1,4 +1,5 @@
 pub(crate) mod archive_state;
+pub(crate) mod directory_errors;
 #[cfg(windows)]
 pub(crate) mod file_generation;
 #[cfg(windows)]

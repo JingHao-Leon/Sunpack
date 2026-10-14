@@ -7,6 +7,7 @@ from sunpack.core.config.detection_view import discovery_run_config
 from sunpack.core.contracts.discovery import StageResult
 from sunpack.core.contracts.failures import FailureInfo, FailureKind
 from sunpack.core.contracts.tasks import ArchiveTask
+from sunpack.core.support.filesystem_scan_errors import filesystem_scan_failure
 from sunpack.pipeline.coordinator.discovery import ArchiveDiscoveryPipeline
 from sunpack.pipeline.coordinator.scan_session import DiscoveryScanSession
 from sunpack.pipeline.coordinator.target_scan import build_native_table_for_targets
@@ -75,6 +76,12 @@ class ArchiveTaskProvider:
                 include_details=include_details,
             )
         self._record_discovery_failures(result)
+        for error in session.scan_errors:
+            failure = filesystem_scan_failure(error, self.config.get("cli", {}).get("language", "en"))
+            if failure.message not in self.failed_candidates:
+                self.failed_candidates.append(failure.message)
+                self.failed_candidate_failures.append(failure)
+        session.scan_errors.clear()
         return result
 
     def scan_targets(

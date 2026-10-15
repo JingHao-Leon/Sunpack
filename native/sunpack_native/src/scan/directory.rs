@@ -1592,8 +1592,8 @@ fn path_is_within_root(path: &Path, root: &Path) -> bool {
     let mut path_components = path.components();
     root.components().all(|root_component| {
         path_components.next().is_some_and(|path_component| {
-            path_component.as_os_str().to_string_lossy().to_lowercase()
-                == root_component.as_os_str().to_string_lossy().to_lowercase()
+            crate::path_keys::case_key(&path_component.as_os_str().to_string_lossy())
+                == crate::path_keys::case_key(&root_component.as_os_str().to_string_lossy())
         })
     })
 }
@@ -1624,9 +1624,8 @@ fn ancestor_directory_records<'a>(
             .count()
             .cmp(&right.components().count())
             .then_with(|| {
-                left.to_string_lossy()
-                    .to_lowercase()
-                    .cmp(&right.to_string_lossy().to_lowercase())
+                crate::path_keys::case_key(&left.to_string_lossy())
+                    .cmp(&crate::path_keys::case_key(&right.to_string_lossy()))
             })
     });
     directories
@@ -2841,7 +2840,7 @@ fn path_to_string(path: &Path) -> String {
 fn inventory_path_key(path: &str) -> String {
     #[cfg(windows)]
     {
-        path.replace('/', "\\").to_ascii_lowercase()
+        crate::path_keys::path_key(path)
     }
     #[cfg(not(windows))]
     {

@@ -10,9 +10,9 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 import sunpack_native
+from sunpack.core.support.path_keys import absolute_path_key, path_key_is_under
 from sunpack_native import NativeArchiveSession, clear_reader_resources
 
-from sunpack.core.support.path_keys import absolute_path_key
 from sunpack.core.support.resource_lifecycle import (
     ResourceBusyError,
     ResourceKind,
@@ -230,10 +230,7 @@ def clear_archive_sessions() -> dict:
 def _is_under(candidate: str, root: str) -> bool:
     candidate_key = absolute_path_key(candidate)
     root_key = absolute_path_key(root)
-    try:
-        return os.path.commonpath((candidate_key, root_key)) == root_key
-    except ValueError:
-        return False
+    return path_key_is_under(candidate_key, root_key)
 
 
 def _merge_release_roots(

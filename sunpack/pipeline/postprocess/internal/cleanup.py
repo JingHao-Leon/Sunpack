@@ -3,13 +3,14 @@ import sys
 from typing import Iterable
 
 from send2trash import send2trash
+from sunpack.core.support.path_keys import case_key
 from sunpack_native import delete_files_batch as _native_delete_files_batch
 from sunpack.core.contracts.results import ArchiveCleanupResult
 from sunpack.core.i18n import I18nContext
 
 
 def _path_key(path: str) -> str:
-    return os.path.normcase(os.path.abspath(path))
+    return case_key(os.path.abspath(path))
 
 
 class ArchiveCleanup:

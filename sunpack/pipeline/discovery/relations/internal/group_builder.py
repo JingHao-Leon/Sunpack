@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from typing import Iterable, List, Optional
 
+from sunpack.core.support.path_keys import case_key, path_key
 from sunpack_native import (
     NativeCandidateTable,
     list_regular_files_in_directory as _native_list_regular_files_in_directory,
@@ -19,7 +20,6 @@ from sunpack.core.passwords.internal.store import PasswordStore
 from sunpack.core.passwords.relation_prober import RelationsPasswordProber
 from sunpack.pipeline.discovery.relations.internal.models import CandidateGroup, FileRelation, SplitVolumeEntry
 from sunpack.pipeline.discovery.relations.internal.archive_input import archive_input_for_group
-from sunpack.core.support.path_keys import path_key
 
 
 class RelationsGroupBuilder:
@@ -169,7 +169,7 @@ class RelationsGroupBuilder:
         format_hint: str = "",
     ) -> CandidateGroup | None:
         directories = {
-            os.path.normcase(os.path.abspath(os.path.dirname(path) or os.getcwd()))
+            case_key(os.path.abspath(os.path.dirname(path) or os.getcwd()))
             for path in current_paths
             if path
         }

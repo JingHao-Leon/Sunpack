@@ -10,6 +10,7 @@ import weakref
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from sunpack.core.support.path_keys import case_key, absolute_path_key, path_key_is_under
 from sunpack_native import NativeWatchState, watch_path_key
 
 from sunpack.runtime.watch.journal_commit import (
@@ -25,6 +26,7 @@ from sunpack.core.support.resource_lifecycle import (
     open_service_file,
     task_scandir,
 )
+
 
 DEFAULT_JOURNAL_COMPACT_RECORDS = 8192
 DEFAULT_JOURNAL_COMPACT_BYTES = 8 * 1024 * 1024
@@ -75,7 +77,7 @@ _STATE_PATH_COORDINATORS: weakref.WeakValueDictionary[str, _StatePathCoordinator
 
 
 def _state_path_key(path: Path) -> str:
-    return os.path.normcase(os.path.abspath(str(path)))
+    return case_key(os.path.abspath(str(path)))
 
 
 def _state_path_coordinator(path: Path) -> _StatePathCoordinator:
@@ -1272,7 +1274,4 @@ def _recorded_file_presence(path: str) -> bool | None:
 
 
 def _is_path_under(path: str, root: str) -> bool:
-    try:
-        return os.path.commonpath([path, root]) == root
-    except ValueError:
-        return False
+    return path_key_is_under(absolute_path_key(path), absolute_path_key(root))

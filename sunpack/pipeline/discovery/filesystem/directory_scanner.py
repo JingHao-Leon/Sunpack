@@ -1,6 +1,7 @@
 from pathlib import Path
 import re
 
+from sunpack.core.support.path_keys import case_key
 from sunpack_native import (
     NativeDirectoryScanOptions,
     filter_inventory_file_indices as _NATIVE_FILTER_INVENTORY_FILE_INDICES,
@@ -328,7 +329,7 @@ def _under_any_key(path: Path, parent_keys: set[str]) -> bool:
 
 
 def _path_key(path: Path) -> str:
-    return str(path).replace("\\", "/").rstrip("/").lower()
+    return case_key(path).replace("\\", "/").rstrip("/")
 
 
 def _path_glob_to_regex(pattern: str) -> str:

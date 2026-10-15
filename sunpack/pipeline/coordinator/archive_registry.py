@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass
 from typing import Iterable
 
+from sunpack.core.support.path_keys import path_key_is_under
 from sunpack.core.support.resource_lifecycle import FileIdentity
 
 
@@ -77,7 +78,4 @@ class ActiveArchiveRegistry:
 
 
 def _is_under(candidate: str, root: str) -> bool:
-    try:
-        return os.path.commonpath((candidate, root)) == root
-    except ValueError:
-        return False
+    return path_key_is_under(candidate, root)

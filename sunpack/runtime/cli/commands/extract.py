@@ -1,3 +1,4 @@
+from sunpack.core.support.path_keys import case_key
 from sunpack.runtime.cli.cli_aliases import COMMAND_ALIASES
 from sunpack.runtime.cli.cli_constants import EXIT_TASK_FAILED, EXIT_USAGE
 from sunpack.runtime.cli.cli_parsers import (
@@ -35,6 +36,7 @@ from sunpack.pipeline.discovery.embedded.options import EmbeddedOptions
 import asyncio
 import os
 import uuid
+
 
 COMMAND = "extract"
 ORDER = 10
@@ -160,7 +162,7 @@ async def handle(args, ctx):
                 if item not in all_recovered_outputs:
                     all_recovered_outputs.append(item)
             for item in list(getattr(summary, "cleanup_results", []) or []):
-                cleanup_results_by_path[os.path.normcase(os.path.abspath(item.path))] = item
+                cleanup_results_by_path[case_key(os.path.abspath(item.path))] = item
             retry_targets = [path for path in password_retry_paths(summary) if os.path.exists(path)]
             attempts.append({
                 "success_count": summary.success_count,

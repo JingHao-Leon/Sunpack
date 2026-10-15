@@ -5,6 +5,7 @@ import threading
 import time
 from typing import Any
 
+from sunpack.core.support.path_keys import case_key, path_key_is_under
 from sunpack.core.contracts.failures import FailureInfo, FailureKind
 from sunpack.core.contracts.results import DirectoryFlattenResult, RunSummary, OutcomeKind
 from sunpack.core.i18n import I18nContext
@@ -355,10 +356,7 @@ class RunReporter:
         best_root = ""
         best_lineage: tuple[str, ...] = ()
         for output_root, lineage in self._output_lineages.items():
-            try:
-                inside = os.path.commonpath([candidate, output_root]) == output_root
-            except ValueError:
-                inside = False
+            inside = path_key_is_under(candidate, output_root)
             if inside and len(output_root) > len(best_root):
                 best_root = output_root
                 best_lineage = lineage
@@ -469,7 +467,7 @@ def _task_name(task: Any) -> str:
 
 
 def _absolute_key(path: str) -> str:
-    return os.path.normcase(os.path.abspath(os.path.normpath(path)))
+    return case_key(os.path.abspath(os.path.normpath(path)))
 
 
 def _terminal_supports_updates(stream: Any) -> bool:

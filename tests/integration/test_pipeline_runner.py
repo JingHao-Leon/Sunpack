@@ -10,6 +10,55 @@ from tests.helpers.detection_config import with_detection_pipeline
 from tests.helpers.fs_builder import make_zip
 
 
+def test_unicode_inputs_and_output_collisions_across_concurrent_origins(tmp_path):
+    """Cover distinct NTFS names and non-ASCII output collisions together.
+
+    Existing ASCII/canonical-Unicode cases miss both failures; four small real
+    carrier requests justify their cost by checking discovery through cleanup.
+    """
+    from sunpack.core.contracts.pipeline import PipelineTarget
+    from tests.helpers.config_factory import make_config
+
+    jobs = []
+    for origin in ("foreground", "watch"):
+        sources = tmp_path / origin
+        sources.mkdir()
+        for index, name in enumerate(("İ.bin", "i\u0307.bin")):
+            archive = sources / name
+            entries = {
+                "É.txt": f"{origin}-{index}-upper".encode(),
+                "é.txt": f"{origin}-{index}-lower".encode(),
+                "İ.txt": b"single code point",
+                "i\u0307.txt": b"two code points",
+            }
+            archive.write_bytes(b"carrier prefix\0" * 20 + make_zip(entries) + b"carrier tail" * 20)
+            jobs.append((origin, archive, entries))
+    config = make_config({
+        "recursive_extract": 1,
+        "post_extract": {"archive_cleanup_mode": "d", "flatten_single_directory": False},
+    })
+
+    async def run():
+        async with PipelineEngine(config) as engine:
+            return await asyncio.gather(*(
+                engine.run(
+                    [PipelineTarget(str(archive), {"root": str(tmp_path / "out" / origin)})],
+                    origin=origin, stdout=io.StringIO(), stderr=io.StringIO(),
+                )
+                for origin, archive, _entries in jobs
+            ))
+
+    for (_origin, archive, entries), response in zip(jobs, asyncio.run(run())):
+        assert response.summary.success_count == 1
+        result = response.summary.target_results[0]
+        assert result.input_path == str(archive)
+        assert not archive.exists()
+        assert {path.name: path.read_bytes() for path in Path(result.output_dir).iterdir()} == {
+            "É.txt": entries["É.txt"], "é(1).txt": entries["é.txt"],
+            "İ.txt": entries["İ.txt"], "i\u0307.txt": entries["i\u0307.txt"],
+        }
+
+
 def test_sunpack_payload_recurses_across_concurrent_origins(tmp_path):
     # One real pipeline case covers scan, matching, nested authorization and
     # generated-output ownership together; individual inventory tests cannot.

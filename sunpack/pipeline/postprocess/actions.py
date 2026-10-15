@@ -2,6 +2,7 @@ import os
 import sys
 from typing import Any, Dict, Iterable
 
+from sunpack.core.support.path_keys import case_key
 from sunpack.core.contracts.results import ArchiveCleanupResult
 from sunpack.pipeline.postprocess.internal.cleanup import ArchiveCleanup
 from sunpack.pipeline.postprocess.internal.flatten import DirectoryFlattener
@@ -60,5 +61,5 @@ class PostProcessActions:
         unique: dict[str, str] = {}
         for target in flatten_targets or ():
             value = str(target)
-            unique.setdefault(os.path.normcase(os.path.abspath(value)), value)
+            unique.setdefault(case_key(os.path.abspath(value)), value)
         return sorted(unique.values(), key=lambda item: item.count(os.sep))

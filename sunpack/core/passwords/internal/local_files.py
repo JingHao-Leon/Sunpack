@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from sunpack.core.support.path_keys import case_key
 from sunpack.core.config.advanced_defaults import advanced_config_value
 from sunpack.core.passwords.internal.lists import dedupe_passwords, read_password_file
 
@@ -37,7 +38,7 @@ def is_directory_password_file(path: str, config: dict | None = None) -> bool:
     password_config = _password_config(config)
     if not password_config["directory_passwords_enabled"]:
         return False
-    return os.path.normcase(Path(path).name) == DIRECTORY_PASSWORD_FILE_NAME
+    return case_key(Path(path).name) == DIRECTORY_PASSWORD_FILE_NAME
 
 
 def directory_password_context_from_task(task: Any) -> list[str]:

@@ -9,6 +9,7 @@ from ctypes import wintypes
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from sunpack.core.support.path_keys import case_key, path_key
 from sunpack_native import fast_hash64
 
 from sunpack.core.config.fields.watch import DEFAULT_WATCH_CONFIG
@@ -20,7 +21,6 @@ from sunpack.runtime.watch.scheduler import WatchScheduler
 from sunpack.runtime.watch.roots import WatchRootEntry
 from sunpack.runtime.watch.toast import WatchToastCoordinator
 from sunpack.core.passwords.internal.local_files import DIRECTORY_PASSWORD_FILE_NAME
-from sunpack.core.support.path_keys import path_key
 from sunpack.core.support.resources import get_resource_path
 from sunpack.core.support.resource_lifecycle import (
     read_task_text,
@@ -99,7 +99,7 @@ def existing_roots(roots: list[str]) -> list[str]:
     seen = set()
     for root in roots:
         normalized = normalize_root(root)
-        key = os.path.normcase(normalized)
+        key = case_key(normalized)
         if key in seen or not os.path.isdir(normalized):
             continue
         seen.add(key)
@@ -123,7 +123,7 @@ def _normalize_scan_roots(roots) -> list[str]:
         if not value:
             continue
         normalized = normalize_root(value)
-        key = os.path.normcase(normalized)
+        key = case_key(normalized)
         if key in seen:
             continue
         seen.add(key)
@@ -1018,7 +1018,7 @@ class WatchService:
 
 def watch_roots_mutex_name(path: Path | None = None) -> str:
     roots_path = path or watch_roots_path()
-    identity = os.path.abspath(str(roots_path)).lower()
+    identity = case_key(os.path.abspath(str(roots_path)))
     digest = fast_hash64(identity.encode("utf-8", errors="surrogatepass"))
     return f"{ROOTS_MUTEX_PREFIX}-{digest}"
 

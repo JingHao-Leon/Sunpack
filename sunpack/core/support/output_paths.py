@@ -4,8 +4,8 @@ import re
 from collections import OrderedDict
 from collections.abc import Container, MutableSet
 
+from sunpack.core.support.path_keys import absolute_path_key, path_key_is_under
 from sunpack.core.contracts.tasks import ArchiveTask
-from sunpack.core.support.path_keys import absolute_path_key
 
 
 def default_output_dir_for_task(task: ArchiveTask, output_config: dict | None = None) -> str:
@@ -53,10 +53,7 @@ def _safe_path_component(value: str) -> str:
 def _is_relative_to(path: str, root: str) -> bool:
     candidate = absolute_path_key(path)
     normalized_root = absolute_path_key(root)
-    try:
-        return os.path.commonpath((candidate, normalized_root)) == normalized_root
-    except ValueError:
-        return False
+    return path_key_is_under(candidate, normalized_root)
 
 
 def normalized_output_dir(path: str) -> str:

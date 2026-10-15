@@ -5,7 +5,7 @@ use crate::io::read_fault::ReadFault;
 use crate::io::reader::{FileIdentity, ManagedReader};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -153,28 +153,33 @@ pub(crate) fn verify_prepared(
     }
     let slot = {
         let mut entries = cache().lock().unwrap_or_else(|error| error.into_inner());
-        // A changed member retires every view of its old generation. Adding or
-        // removing parts also retires the previous set of this logical input.
-        retain(&mut entries, |old, _| {
-            let membership_changed = old.format == key.format
-                && old.mode == key.mode
-                && old.members.len() != key.members.len()
-                && old.members.first() == key.members.first();
-            !membership_changed
-                && !old.members.iter().any(|left| {
-                    key.members.iter().any(|right| {
-                        left.generation.path == right.generation.path
-                            && left.generation != right.generation
+        let entry = if let Some(index) = entries.iter().position(|(old, _)| *old == key) {
+            // Insertion already retired conflicting generations. A current
+            // exact hit only refreshes the existing slot's LRU position.
+            entries.remove(index).unwrap()
+        } else {
+            // Index once per miss, not once per cached member or password batch.
+            let generations: HashMap<_, _> = key
+                .members
+                .iter()
+                .map(|member| (&member.generation.path, &member.generation))
+                .collect();
+            retain(&mut entries, |old, _| {
+                let membership_changed = old.format == key.format
+                    && old.mode == key.mode
+                    && old.members.len() != key.members.len()
+                    && old.members.first() == key.members.first();
+                !membership_changed
+                    && !old.members.iter().any(|left| {
+                        generations
+                            .get(&left.generation.path)
+                            .is_some_and(|right| left.generation != **right)
                     })
-                })
-        });
-        let slot = entries
-            .iter()
-            .position(|(old, _)| *old == key)
-            .and_then(|index| entries.remove(index))
-            .map(|(_, slot)| slot)
-            .unwrap_or_else(|| Arc::new(PreparedSlot::default()));
-        entries.push_back((key.clone(), slot.clone()));
+            });
+            (key.clone(), Arc::new(PreparedSlot::default()))
+        };
+        let slot = Arc::clone(&entry.1);
+        entries.push_back(entry);
         slot
     };
     let prepared = py.detach(|| slot.value.get_or_init(prepare));

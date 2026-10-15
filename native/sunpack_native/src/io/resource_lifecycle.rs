@@ -240,7 +240,7 @@ fn normalized_path(path: PathBuf) -> PathBuf {
     };
     #[cfg(windows)]
     {
-        PathBuf::from(resolved.to_string_lossy().to_lowercase())
+        PathBuf::from(crate::path_keys::path_key(&resolved.to_string_lossy()))
     }
     #[cfg(not(windows))]
     {

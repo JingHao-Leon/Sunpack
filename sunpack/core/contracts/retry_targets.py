@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 
+from sunpack.core.support.path_keys import case_key
 from sunpack.core.contracts.failures import FailureInfo, FailureKind
 from sunpack.core.contracts.results import OutcomeKind, RunSummary, TargetRunResult
 
@@ -44,11 +45,11 @@ def password_retry_results(summary: RunSummary) -> list[TargetRunResult]:
 
 
 def password_retry_paths(summary: RunSummary) -> list[str]:
-    paths = {os.path.normcase(os.path.abspath(result.input_path)): result.input_path
+    paths = {case_key(os.path.abspath(result.input_path)): result.input_path
              for result in password_retry_results(summary)}
     return list(paths.values())
 
 
 def merge_latest_results(latest: dict[str, TargetRunResult], summary: RunSummary) -> None:
     for result in summary.target_results:
-        latest[os.path.normcase(os.path.abspath(result.input_path))] = result
+        latest[case_key(os.path.abspath(result.input_path))] = result

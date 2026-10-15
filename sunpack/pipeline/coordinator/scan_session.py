@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
+from sunpack.core.support.path_keys import normalized_path, path_key, safe_relative_path
 from sunpack_native import NativeCandidateTable, NativeHeadFactCache
 
 from sunpack.core.contracts.discovery import DiscoveryCandidate
@@ -10,7 +11,6 @@ from sunpack.core.contracts.filesystem import DirectorySnapshot, FILESYSTEM_ROUT
 from sunpack.pipeline.coordinator.target_groups import filesystem_candidate, relation_group_to_candidate
 from sunpack.pipeline.discovery.filesystem.directory_scanner import DirectoryScanner
 from sunpack.pipeline.discovery.relations import CandidateGroup, RelationsScheduler
-from sunpack.core.support.path_keys import normalized_path, path_key, safe_relative_path
 from sunpack.core.support.filesystem_scan_errors import DirectoryErrorReport
 
 
@@ -207,7 +207,7 @@ def _password_signature(path_passwords: dict[str, str] | None) -> str:
     if not path_passwords:
         return ""
     return repr(sorted(
-        (str(path).lower(), str(password))
+        (path_key(path), str(password))
         for path, password in path_passwords.items()
         if str(password)
     ))

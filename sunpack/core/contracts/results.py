@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import List
 
+from sunpack.core.support.path_keys import case_key, path_key_is_under
 from sunpack.core.contracts.failures import FailureInfo, FailureKind
 from sunpack.core.support.filesystem_scan_errors import is_filesystem_scan_failure, filesystem_scan_error_count
 
@@ -35,16 +36,16 @@ class DirectoryFlattenResult:
         """Project a recorded output through the native directory rename."""
         if not path or not self.source_dir:
             return path
-        candidate = os.path.normcase(os.path.abspath(path))
-        source = os.path.normcase(os.path.abspath(self.source_dir))
-        root = os.path.normcase(os.path.abspath(self.path))
+        candidate = case_key(os.path.abspath(path))
+        source = case_key(os.path.abspath(self.source_dir))
+        root = case_key(os.path.abspath(self.path))
         try:
-            if os.path.commonpath((candidate, source)) == source:
+            if path_key_is_under(candidate, source):
                 relative = os.path.relpath(path, self.source_dir)
                 return os.path.normpath(os.path.join(self.output_dir, relative))
             # Removed wrapper directories now refer to the promoted payload root.
-            if (self.moved and os.path.commonpath((candidate, root)) == root
-                    and os.path.commonpath((candidate, source)) == candidate):
+            if (self.moved and path_key_is_under(candidate, root)
+                    and path_key_is_under(source, candidate)):
                 return self.output_dir
         except ValueError:
             pass

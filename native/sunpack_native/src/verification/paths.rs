@@ -19,7 +19,7 @@ pub(crate) struct OutputPathAllocator {
 
 impl OutputPathAllocator {
     pub(crate) fn allocate(&mut self, requested: String) -> String {
-        let key = requested.to_lowercase();
+        let key = crate::path_keys::case_key(&requested);
         if self.used.insert(key.clone()) {
             return requested;
         }
@@ -32,7 +32,7 @@ impl OutputPathAllocator {
         loop {
             let candidate = format!("{}({}){}", &requested[..split], *next, &requested[split..]);
             *next += 1;
-            if self.used.insert(candidate.to_lowercase()) {
+            if self.used.insert(crate::path_keys::case_key(&candidate)) {
                 return candidate;
             }
         }

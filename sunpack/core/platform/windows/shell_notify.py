@@ -5,6 +5,7 @@ import sys
 from functools import lru_cache
 from typing import Iterable
 
+from sunpack.core.support.path_keys import case_key
 # SHCNE_UPDATEDIR: directory contents changed; Explorer refreshes open views.
 _SHCNE_UPDATEDIR = 0x00001000
 # SHCNF_PATHW: dwItem1/dwItem2 are Unicode path strings.
@@ -36,7 +37,7 @@ def _unique_existing_directories(paths: Iterable[str]) -> list[str]:
     ordered: list[str] = []
     for raw in paths:
         for directory in _refresh_directories_for_path(str(raw or "").strip()):
-            key = os.path.normcase(directory)
+            key = case_key(directory)
             if key in seen:
                 continue
             seen.add(key)
@@ -54,7 +55,7 @@ def _refresh_directories_for_path(path: str) -> list[str]:
     if os.path.isdir(absolute):
         directories = [absolute]
         parent = os.path.dirname(absolute.rstrip("\\/"))
-        if parent and os.path.normcase(parent) != os.path.normcase(absolute):
+        if parent and case_key(parent) != case_key(absolute):
             directories.append(parent)
     else:
         parent = os.path.dirname(absolute)

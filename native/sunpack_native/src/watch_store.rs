@@ -431,7 +431,7 @@ impl NativeWatchState {
     }
 }
 
-/// ``os.path.normcase(os.path.abspath(path))`` for Watch record keys.
+/// Absolute Windows filesystem key shared with discovery and Python.
 #[pyfunction]
 pub(crate) fn watch_path_key(path: &str) -> String {
     path_key(path)
@@ -443,7 +443,7 @@ fn path_key(path: &str) -> String {
     } else {
         std::path::absolute(path).unwrap_or_else(|_| Path::new(path).to_path_buf())
     };
-    absolute.to_string_lossy().replace('/', "\\").to_lowercase()
+    crate::path_keys::path_key(&absolute.to_string_lossy())
 }
 
 fn is_path_under(path: &str, root: &str) -> bool {

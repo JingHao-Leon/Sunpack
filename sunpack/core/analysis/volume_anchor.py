@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable
 import os
 
+from sunpack.core.support.path_keys import case_key
 from sunpack_native import probe_volume_anchors as _native_probe_volume_anchors
 
 
@@ -121,4 +122,4 @@ def probe_volume_anchor_paths(
 
 
 def _path_key(path: str) -> str:
-    return os.path.normcase(os.path.normpath(os.path.abspath(path)))
+    return case_key(os.path.normpath(os.path.abspath(path)))

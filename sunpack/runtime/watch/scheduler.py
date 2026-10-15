@@ -12,6 +12,7 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import Callable, Iterable
 
+from sunpack.core.support.path_keys import case_key, path_key
 from sunpack_native import fast_hash128
 
 from sunpack.core.config.fields.watch import DEFAULT_WATCH_CONFIG
@@ -55,7 +56,6 @@ from sunpack.core.passwords.internal.local_files import (
     is_directory_password_file,
 )
 from sunpack.core.passwords.internal.store import MAX_RECENT_PASSWORDS
-from sunpack.core.support.path_keys import path_key
 from sunpack.core.support.collections import dedupe_normalized_paths
 from sunpack.core.support.resource_lifecycle import (
     ResourceKind,
@@ -346,9 +346,9 @@ class WatchScheduler:
         for root in self.watch_roots:
             watch_path = root if os.path.isdir(root) else os.path.dirname(root)
             self._observer.schedule(handler, watch_path, recursive=self.recursive and os.path.isdir(root))
-            scheduled_paths.add(os.path.normcase(os.path.abspath(watch_path)))
+            scheduled_paths.add(case_key(os.path.abspath(watch_path)))
         builtin_password_dir = os.path.dirname(self.builtin_password_file)
-        builtin_password_dir_key = os.path.normcase(os.path.abspath(builtin_password_dir))
+        builtin_password_dir_key = case_key(os.path.abspath(builtin_password_dir))
         if os.path.isdir(builtin_password_dir) and builtin_password_dir_key not in scheduled_paths:
             self._observer.schedule(handler, builtin_password_dir, recursive=False)
         with lifecycle_registration(self.watch_roots):
@@ -837,7 +837,7 @@ class WatchScheduler:
 
     @staticmethod
     def _scheduler_path_key(path: str) -> str:
-        return os.path.normcase(os.path.abspath(path))
+        return case_key(os.path.abspath(path))
 
     def _inflight_path_keys_locked(self) -> set[str]:
         return set(self._inflight_path_counts)
@@ -1324,7 +1324,7 @@ class WatchScheduler:
         return self._is_under_metadata_dir(path)
 
     def _log_candidate_ignored(self, path: str, reason: str, **payload) -> None:
-        normalized = os.path.normcase(os.path.abspath(str(path))) if path else ""
+        normalized = case_key(os.path.abspath(str(path))) if path else ""
         self.log.write_throttled(
             "candidate_ignored",
             throttle_key=f"{normalized}|{reason}",
@@ -1337,7 +1337,7 @@ class WatchScheduler:
     def is_builtin_password_file(self, path: str) -> bool:
         if not path:
             return False
-        return os.path.normcase(os.path.abspath(path)) == os.path.normcase(self.builtin_password_file)
+        return case_key(os.path.abspath(path)) == case_key(self.builtin_password_file)
 
     def enqueue_many(self, paths: Iterable[str]):
         for path in paths:
@@ -1502,7 +1502,7 @@ class WatchScheduler:
                         )
                         self.log.write_throttled(
                             "candidate_busy",
-                            throttle_key=os.path.normcase(os.path.abspath(path)),
+                            throttle_key=case_key(os.path.abspath(path)),
                             interval_seconds=30.0,
                             path=path,
                         )
@@ -2171,11 +2171,11 @@ class WatchScheduler:
         return self._common_root_for(path)
 
     def _is_under_watched_root(self, path: str) -> bool:
-        normalized = os.path.normcase(os.path.abspath(path))
+        normalized = case_key(os.path.abspath(path))
         for root in self.watch_roots:
-            normalized_root = os.path.normcase(os.path.abspath(root))
+            normalized_root = case_key(os.path.abspath(root))
             if os.path.isdir(root):
-                if os.path.normcase(os.path.dirname(normalized)) == normalized_root:
+                if case_key(os.path.dirname(normalized)) == normalized_root:
                     return True
             elif normalized == normalized_root:
                 return True
@@ -2315,7 +2315,7 @@ def _candidate_observation_changed(previous: WatchCandidate | _CandidateObservat
 
 def _candidate_matches_password_failure(candidate: WatchCandidate, entry: WatchStateEntry) -> bool:
     return (
-        os.path.normcase(os.path.abspath(candidate.path)) == os.path.normcase(os.path.abspath(entry.path))
+        case_key(os.path.abspath(candidate.path)) == case_key(os.path.abspath(entry.path))
         and _candidate_change_kind(_candidate_from_state_entry(entry), candidate)
         != _CandidateChangeKind.CONTENT_CHANGED
     )
@@ -2380,7 +2380,7 @@ def _is_relative_to(path: str, root: str) -> bool:
 def _paths_match(path: str, expected: str, *, recursive: bool) -> bool:
     normalized = os.path.abspath(path)
     expected = os.path.abspath(expected)
-    return os.path.normcase(normalized) == os.path.normcase(expected) or (
+    return case_key(normalized) == case_key(expected) or (
         recursive and _is_relative_to(normalized, expected)
     )
 

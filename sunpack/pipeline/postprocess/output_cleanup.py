@@ -8,6 +8,7 @@ import shutil
 from dataclasses import asdict, dataclass
 from enum import Enum
 
+from sunpack.core.support.path_keys import case_key, path_key_is_under
 from sunpack.core.support.resource_lifecycle import promotion_barrier, task_walk
 
 
@@ -251,7 +252,7 @@ def _absolute(path: str) -> str:
 
 
 def _same_path(left: str, right: str) -> bool:
-    return os.path.normcase(_absolute(left)) == os.path.normcase(_absolute(right))
+    return case_key(_absolute(left)) == case_key(_absolute(right))
 
 
 def _is_strict_descendant(path: str, root: str) -> bool:
@@ -259,10 +260,7 @@ def _is_strict_descendant(path: str, root: str) -> bool:
     root = _absolute(root)
     if not path or not root or _same_path(path, root):
         return False
-    try:
-        return os.path.normcase(os.path.commonpath((path, root))) == os.path.normcase(root)
-    except ValueError:
-        return False
+    return path_key_is_under(case_key(path), case_key(root))
 
 
 def _is_filesystem_root(path: str) -> bool:

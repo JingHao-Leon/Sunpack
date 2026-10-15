@@ -432,11 +432,11 @@ fn semantic_scope(path: &Path, root: &Path) -> Option<(PathBuf, bool)> {
 }
 
 fn path_key(path: &Path) -> String {
-    path.to_string_lossy().replace('/', "\\").to_lowercase()
+    crate::path_keys::path_key(&path.to_string_lossy())
 }
 
 fn path_key_from_str(path: &str) -> String {
-    path.replace('/', "\\").to_lowercase()
+    crate::path_keys::path_key(path)
 }
 
 fn relative_key<'a>(path: &'a str, root: &str) -> Option<&'a str> {

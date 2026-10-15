@@ -36,26 +36,33 @@ def test_native_state_replay_preserves_fractional_mtime_identity(tmp_path, stora
     state = WatchStateStore(str(state_path))
     # Real timestamp from the split-volume recovery failure: default JSON
     # float decoding changed this value by one binary64 precision unit.
-    candidate = WatchCandidate(
-        str(tmp_path / "archive.7z.001"), 65536, 1791458483.9542453,
+    # These NTFS-distinct paths also exercise identity collisions during replay;
+    # isolated one-path timestamp tests cannot detect a merged retry record.
+    candidates = [WatchCandidate(
+        str(tmp_path / name), 65536, 1791458483.9542453,
         file_id="same-file", change_usn=600524574000,
-    )
-    state.queue_active(candidate, durable_owner=True, durable=True)
-    state.mark(
-        candidate.path, candidate.size, candidate.mtime,
-        file_id=candidate.file_id, change_usn=candidate.change_usn,
-        status="suspended_missing_volume",
-    )
+    ) for name in ("archive.7z.001", "İ.7z.001", "i\u0307.7z.001")]
+    for candidate in candidates:
+        state.queue_active(candidate, durable_owner=True, durable=True)
+        state.mark(
+            candidate.path, candidate.size, candidate.mtime,
+            file_id=candidate.file_id, change_usn=candidate.change_usn,
+            status="suspended_missing_volume",
+        )
     if storage == "checkpoint":
         state.save()
     else:
         state.flush()
 
     recovered = WatchStateStore(str(state_path))
-    assert recovered.pending_work_for_path(candidate.path).mtime.hex() == candidate.mtime.hex()
-    assert recovered.latest_entry_for_path(candidate.path).mtime.hex() == candidate.mtime.hex()
-    recovered.complete_work_if_matches(candidate)
+    assert recovered.pending_work_count == recovered.entry_count == len(candidates)
+    for candidate in candidates:
+        assert recovered.pending_work_for_path(candidate.path).mtime.hex() == candidate.mtime.hex()
+        assert recovered.latest_entry_for_path(candidate.path).mtime.hex() == candidate.mtime.hex()
+        recovered.complete_work_if_matches(candidate)
     assert recovered.pending_work_count == 0
+    recovered.close()
+    state.close()
 
 
 def test_idle_trim_releases_peak_capacity_without_losing_live_or_frozen_state(tmp_path):

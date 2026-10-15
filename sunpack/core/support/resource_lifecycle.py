@@ -17,6 +17,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Sequence
 
+from sunpack.core.support.path_keys import case_key, path_key_is_under
+
 
 class ResourceLifecycleError(RuntimeError):
     """Base error for a lifecycle invariant violation."""
@@ -61,14 +63,11 @@ class ScopeState(str, Enum):
 
 
 def _normalized_path(path: os.PathLike[str] | str) -> str:
-    return os.path.normcase(os.path.abspath(os.path.normpath(os.fspath(path))))
+    return case_key(os.path.abspath(os.path.normpath(os.fspath(path))))
 
 
 def _is_path_under(candidate: str, root: str) -> bool:
-    try:
-        return os.path.commonpath((candidate, root)) == root
-    except ValueError:
-        return False
+    return path_key_is_under(candidate, root)
 
 
 @dataclass(frozen=True)

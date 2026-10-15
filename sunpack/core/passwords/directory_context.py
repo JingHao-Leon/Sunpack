@@ -6,6 +6,7 @@ from concurrent.futures import Future
 from threading import RLock
 from typing import Any
 
+from sunpack.core.support.path_keys import case_key
 from sunpack_native import file_generation_tokens
 
 from sunpack.core.passwords.internal.lists import dedupe_passwords
@@ -28,7 +29,7 @@ class DirectoryPasswordContextStore:
 
     def annotate(self, tasks: list[Any]) -> None:
         directories = dict.fromkeys(
-            os.path.normcase(os.path.dirname(os.path.abspath(task.main_path)))
+            case_key(os.path.dirname(os.path.abspath(task.main_path)))
             for task in tasks
         )
         local_by_directory = {}
@@ -38,7 +39,7 @@ class DirectoryPasswordContextStore:
                 local_by_directory[directory] = self._local_for(directory, generation)
         for task in tasks:
             inherited = self.inherited_for(task.main_path)
-            directory = os.path.normcase(os.path.dirname(os.path.abspath(task.main_path)))
+            directory = case_key(os.path.dirname(os.path.abspath(task.main_path)))
             local = local_by_directory.get(directory, [])
             task.runtime[DIRECTORY_PASSWORD_CONTEXT_KEY] = dedupe_passwords([*inherited, *local])
 
@@ -84,12 +85,12 @@ class DirectoryPasswordContextStore:
             return
         context = dedupe_passwords([str(value) for value in values if isinstance(value, str)])
         with self._lock:
-            self._contexts[os.path.normcase(os.path.abspath(output_dir))] = context
+            self._contexts[case_key(os.path.abspath(output_dir))] = context
 
     def inherited_for(self, archive_path: str) -> list[str]:
         if not archive_path:
             return []
-        archive_key = os.path.normcase(os.path.abspath(archive_path))
+        archive_key = case_key(os.path.abspath(archive_path))
         with self._lock:
             while True:
                 context = self._contexts.get(archive_key)

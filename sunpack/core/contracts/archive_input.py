@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 import os
 from typing import Any, Literal
 
+from sunpack.core.support.path_keys import case_key
+
 
 ArchiveOpenMode = Literal[
     "file",
@@ -90,7 +92,7 @@ class ArchiveInputDescriptor:
                 raise ValueError("structured volume parts require unique positive volume numbers")
             if any(not part.canonical_name for part in ordered):
                 raise ValueError("structured volume parts require canonical_name")
-            canonical_keys = [part.canonical_name.casefold() for part in ordered]
+            canonical_keys = [case_key(part.canonical_name) for part in ordered]
             if len(set(canonical_keys)) != len(canonical_keys):
                 raise ValueError("structured volume canonical names must be unique")
             if not self.volume_style:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from sunpack.core.support.path_keys import case_key
 from sunpack.core.contracts.tasks import ArchiveTask
 from sunpack.core.support.archive_knowledge_writer import commit_task_knowledge, ensure_knowledge, write_payload
 
@@ -451,9 +452,9 @@ def _first_present(primary: dict[str, Any], secondary: dict[str, Any], *keys: st
 
 def _path_identity(path: str) -> str:
     try:
-        return str(Path(path).resolve()).lower()
+        return case_key(Path(path).resolve())
     except Exception:
-        return str(path).lower()
+        return case_key(path)
 
 
 def _dict_at(knowledge: Any, path: str) -> dict[str, Any]:

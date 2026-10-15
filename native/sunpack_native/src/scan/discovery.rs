@@ -1,4 +1,5 @@
 use crate::analysis_native::confirm_format_identity_native;
+use crate::path_keys::{case_key, path_key};
 use crate::relations::{
     build_native_candidate_groups_from_snapshot,
     build_native_candidate_groups_from_snapshot_cached, relation_group_cached_anchors,
@@ -314,7 +315,7 @@ impl NativeCandidateTable {
         let expected: HashSet<String> = targets
             .into_iter()
             .filter(|(path, _)| !physical_matches.contains(&path_key(path)))
-            .map(|(_, name)| name.to_lowercase())
+            .map(|(_, name)| case_key(&name))
             .collect();
         self.rows = self
             .rows
@@ -327,7 +328,7 @@ impl NativeCandidateTable {
                             data.is_split
                                 && Path::new(data.logical_name().as_ref())
                                     .file_name()
-                                    .is_some_and(|name| expected.contains(&name.to_string_lossy().to_lowercase()))
+                                    .is_some_and(|name| expected.contains(&case_key(&name.to_string_lossy())))
                         });
                 (contains || logical_match).then_some(row)
             })
@@ -362,7 +363,7 @@ impl NativeCandidateTable {
                             &parent
                                 .join(format!(
                                     "{}\x1f{}",
-                                    data.logical_name().to_lowercase(),
+                                    case_key(&data.logical_name()),
                                     family
                                 ))
                                 .to_string_lossy(),
@@ -769,12 +770,4 @@ fn relation_path_keys<'a>(
         .filter(|path| !path.is_empty())
         .map(path_key)
         .collect()
-}
-
-fn path_key(path: &str) -> String {
-    if path.contains('/') {
-        path.replace('/', "\\").to_lowercase()
-    } else {
-        path.to_lowercase()
-    }
 }

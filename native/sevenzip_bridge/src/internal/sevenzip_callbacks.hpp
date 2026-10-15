@@ -1,6 +1,7 @@
 #pragma once
 
 #include "sevenzip_properties.hpp"
+#include "sevenzip_paths.hpp"
 
 #include "sevenzip_streams.hpp"
 
@@ -212,11 +213,7 @@ namespace sunpack::sevenzip
     private:
         static std::wstring lower_path(std::wstring value)
         {
-
-            std::transform(value.begin(), value.end(), value.begin(), [](wchar_t ch)
-                           { return static_cast<wchar_t>(::towlower(ch)); });
-
-            return value;
+            return lower_text(std::move(value));
         }
 
 
@@ -434,10 +431,7 @@ namespace sunpack::sevenzip
 
     inline std::wstring normalized_output_path_key(const std::filesystem::path &path)
     {
-        auto key = path.lexically_normal().wstring();
-        std::transform(key.begin(), key.end(), key.begin(), [](wchar_t value)
-                       { return static_cast<wchar_t>(std::towlower(value)); });
-        return key;
+        return lower_text(path.lexically_normal().wstring());
     }
 
     class OutputPathAllocator

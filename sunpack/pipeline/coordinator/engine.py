@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable, TextIO
 
+from sunpack.core.support.path_keys import case_key, path_key_is_under, path_key
 from sunpack.pipeline.discovery.detection.input_planning import ArchiveInputPlanningStage
 from sunpack.core.config.detection_view import discovery_run_config
 from sunpack.core.contracts.pipeline import PipelineArtifacts, PipelineDiscovery, PipelineResponse, PipelineTarget
@@ -35,7 +36,6 @@ from sunpack.core.platform.windows.shell_notify import notify_shell_directories_
 from sunpack.core.support.output_reservation import OutputReservationRegistry, build_output_dir_resolver
 from sunpack.pipeline.extraction.internal.sevenzip.sevenzip_runner import SevenZipRunner
 from sunpack.core.support.output_paths import default_output_dir_for_task
-from sunpack.core.support.path_keys import path_key
 from sunpack.core.support.archive_sessions import release_archive_sessions_under_roots
 from sunpack.core.support.resource_lifecycle import TaskResourceScope, promotion_barrier
 from sunpack.pipeline.discovery.embedded.options import EmbeddedOptions
@@ -998,7 +998,7 @@ class _ShellUpdateBatch:
         for path in paths:
             if path:
                 absolute = os.path.abspath(path)
-                self._paths.setdefault(os.path.normcase(absolute), absolute)
+                self._paths.setdefault(case_key(absolute), absolute)
         if self._paths and self._handle is None:
             self._handle = asyncio.get_running_loop().call_soon(self.flush)
 
@@ -1320,22 +1320,40 @@ class _RequestRuntime:
                 cancellation=cancellation,
             )
 
+        # Bound waiting coroutine state by the existing stage queue budget.
+        # Each recursive batch owns its consumers, so a parent never holds a
+        # global admission slot while waiting for its children.
+        remaining = iter(enumerate(tasks))
+        first_failure = None
+
+        async def consume():
+            nonlocal first_failure
+            complete = True
+            for index, task in remaining:
+                try:
+                    result = await self._execute_job(
+                        task, depth=depth, ownership=ownership,
+                        broker=broker, cancellation=cancellation,
+                    )
+                    complete = bool(result) and complete
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    # Match gather's original input-order error reporting while
+                    # allowing independent jobs to finish and release sources.
+                    if first_failure is None or index < first_failure[0]:
+                        first_failure = (index, exc)
+            return complete
+
         results = await asyncio.gather(
-            *(
-                self._execute_job(
-                    task,
-                    depth=depth,
-                    ownership=ownership,
-                    broker=broker,
-                    cancellation=cancellation,
-                )
-                for task in tasks
-            ),
+            *(consume() for _ in range(min(len(tasks), broker.max_pending_jobs))),
             return_exceptions=True,
         )
         for result in results:
             if isinstance(result, BaseException):
                 raise result
+        if first_failure is not None:
+            raise first_failure[1]
         return all(results)
 
     def _claim_tasks(self, tasks):
@@ -1542,7 +1560,7 @@ class _RequestRuntime:
                 expected_root=logical_root,
             )
             if inventory is not None:
-                inventories[os.path.normcase(os.path.abspath(logical_root))] = inventory
+                inventories[case_key(os.path.abspath(logical_root))] = inventory
         work = self.output_scan_policy.prepare_scan(
             [output_dir],
             inventories=inventories,
@@ -1630,12 +1648,9 @@ class _RequestRuntime:
 
     @staticmethod
     def _cleanup_path_is_under(path: str, root: str) -> bool:
-        candidate = os.path.normcase(os.path.abspath(path))
-        normalized_root = os.path.normcase(os.path.abspath(root))
-        try:
-            return os.path.commonpath((candidate, normalized_root)) == normalized_root
-        except ValueError:
-            return False
+        candidate = case_key(os.path.abspath(path))
+        normalized_root = case_key(os.path.abspath(root))
+        return path_key_is_under(candidate, normalized_root)
 
     def _replace_target_result(self, old, new) -> None:
         with self.context.lock:
@@ -1793,18 +1808,27 @@ class _RequestResults:
         self.config = config
         self._task_targets: dict[str, PipelineTarget] = {}
         self._output_targets: dict[str, PipelineTarget] = {}
+        self._exact_targets: dict[str, PipelineTarget] = {}
+        self._directory_targets: dict[str, PipelineTarget] = {}
         self._claimed_paths: list[str] = []
         self._task_paths: dict[str, tuple[str, ...]] = {}
         self._target_input_dirs = {
             path_key(target.path): os.path.abspath(target.path if os.path.isdir(target.path) else os.path.dirname(target.path))
             for target in submission.targets
         }
+        for target in submission.targets:
+            self._exact_targets.setdefault(path_key(target.path), target)
+            if os.path.isdir(target.path):
+                key = _resolved_path_key(target.path)
+                previous = self._directory_targets.get(key)
+                if previous is None or len(target.path) > len(previous.path):
+                    self._directory_targets[key] = target
 
     def input_dir_for_task(self, task) -> str:
         return self._target_input_dirs[path_key(self._target_for_path(task.main_path).path)]
 
     def forget_output(self, output_dir: str) -> None:
-        self._output_targets.pop(path_key(output_dir), None)
+        self._output_targets.pop(_resolved_path_key(output_dir), None)
 
     def remap_task(self, task, old_path: str) -> None:
         target = self._target_for_path(old_path)
@@ -1825,11 +1849,18 @@ class _RequestResults:
             if not result.output_dir:
                 continue
             target = self._target_for_path(result.input_path)
-            self._output_targets[path_key(result.output_dir)] = target
+            self._output_targets[_resolved_path_key(result.output_dir)] = target
 
     def relocate_outputs(self, result: DirectoryFlattenResult) -> None:
         if not result.source_dir:
             return
+        # The index uses resolved roots, including outputs reached through a
+        # junction. Project those same coordinates through the directory move.
+        result = replace(
+            result, path=_resolved_path_key(result.path),
+            source_dir=_resolved_path_key(result.source_dir),
+            output_dir=_resolved_path_key(result.output_dir),
+        )
         self._output_targets = {
             path_key(result.relocate(path)): target
             for path, target in self._output_targets.items()
@@ -1896,35 +1927,26 @@ class _RequestResults:
         if known is not None:
             return known
 
-        exact = [
-            target
-            for target in self.submission.targets
-            if path_key(target.path) == key
-        ]
-        if exact:
-            return exact[0]
+        exact = self._exact_targets.get(key)
+        if exact is not None:
+            return exact
 
-        output_matches = [
-            (len(output_root), target)
-            for output_root, target in self._output_targets.items()
-            if output_root == key or _is_relative_to(normalized, output_root)
-        ]
-        if output_matches:
-            return max(output_matches, key=lambda item: item[0])[1]
-
-        containing = [
-            target
-            for target in self.submission.targets
-            if os.path.isdir(target.path) and _is_relative_to(normalized, target.path)
-        ]
-        if containing:
-            return max(containing, key=lambda target: len(target.path))
+        resolved = _resolved_path_key(normalized)
+        for roots in (self._output_targets, self._directory_targets):
+            ancestor = resolved
+            while True:
+                target = roots.get(ancestor)
+                if target is not None:
+                    return target
+                parent = os.path.dirname(ancestor)
+                if parent == ancestor:
+                    break
+                ancestor = parent
         return self.submission.targets[0]
 
 
-def _is_relative_to(path: str, root: str) -> bool:
+def _resolved_path_key(path: str) -> str:
     try:
-        Path(path).resolve().relative_to(Path(root).resolve())
-        return True
+        return path_key(Path(path).resolve())
     except (OSError, ValueError):
-        return False
+        return path_key(os.path.abspath(path))

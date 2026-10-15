@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
+from sunpack.core.support.path_keys import case_key
 from sunpack_native import (
     NativeOutputInventory,
     NativeWorkerManifest,
@@ -157,4 +158,4 @@ def _complete_worker_inventory(worker_result: dict[str, Any] | None) -> NativeWo
 
 
 def _path_key(path: str) -> str:
-    return os.path.normcase(os.path.abspath(path)) if path else ""
+    return case_key(os.path.abspath(path)) if path else ""

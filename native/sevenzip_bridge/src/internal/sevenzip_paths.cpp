@@ -8,6 +8,8 @@
 
 #include <filesystem>
 
+extern "C" __declspec(dllimport) WCHAR NTAPI RtlDowncaseUnicodeChar(WCHAR source);
+
 #endif
 
 namespace sunpack::sevenzip
@@ -53,7 +55,8 @@ namespace sunpack::sevenzip
     {
 
         std::transform(value.begin(), value.end(), value.begin(), [](wchar_t ch)
-                       { return static_cast<wchar_t>(::towlower(ch)); });
+                       { return ch < 128 ? ((ch >= L'A' && ch <= L'Z') ? ch + (L'a' - L'A') : ch)
+                                         : RtlDowncaseUnicodeChar(ch); });
 
         return value;
     }
@@ -249,12 +252,7 @@ namespace sunpack::sevenzip
     std::wstring lower_extension(const std::wstring &path)
     {
 
-        std::wstring ext = std::filesystem::path(path).extension().wstring();
-
-        std::transform(ext.begin(), ext.end(), ext.begin(), [](wchar_t ch)
-                       { return static_cast<wchar_t>(::towlower(ch)); });
-
-        return ext;
+        return lower_text(std::filesystem::path(path).extension().wstring());
     }
 
 

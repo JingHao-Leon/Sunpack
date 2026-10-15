@@ -6,6 +6,8 @@ import os
 from collections.abc import Iterable
 from typing import Any
 
+from sunpack.core.support.path_keys import case_key
+
 
 def dedupe_strings(values: Iterable[Any]) -> list[str]:
     """Return non-empty string values once, preserving first-seen order."""
@@ -44,7 +46,7 @@ def dedupe_normalized_paths(paths: Iterable[Any]) -> list[str]:
         if not value:
             continue
         normalized = os.path.abspath(value)
-        key = os.path.normcase(normalized)
+        key = case_key(normalized)
         if key in seen:
             continue
         seen.add(key)

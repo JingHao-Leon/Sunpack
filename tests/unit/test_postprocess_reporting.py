@@ -101,6 +101,44 @@ def test_flatten_projection_handles_removed_wrappers_and_other_drives():
     assert result.relocate("C:/output-sibling") == "C:/output-sibling"
 
 
+def test_output_target_ownership_survives_junction_flatten_and_forget(tmp_path):
+    """Cover alias lookup, nearest ownership and index retirement in one move.
+
+    Existing relocation tests only inspect reported paths, so deleting this
+    leaves target routing untested; a small directory rename is sufficient.
+    """
+    import subprocess
+    from sunpack.pipeline.postprocess.internal.flatten import DirectoryFlattener
+
+    first = tmp_path / "source-one"
+    second = tmp_path / "source-two"
+    physical = tmp_path / "published"
+    for path in (first, second, physical):
+        path.mkdir()
+    alias = tmp_path / "alias"
+    subprocess.run(["cmd", "/c", "mklink", "/J", str(alias), str(physical)],
+                   check=True, capture_output=True)
+    one, two = PipelineTarget(str(first)), PipelineTarget(str(second))
+    ownership = _RequestResults(SimpleNamespace(targets=(two, one)), {})
+    output = alias / "result"
+    leaf = output / "wrapper" / "inner"
+    child = leaf / "child"
+    child.mkdir(parents=True)
+    (leaf / "payload.txt").write_text("payload", encoding="utf-8")
+    ownership.remember_results([
+        TargetRunResult(str(first / "one.zip"), OutcomeKind.COMPLETE_SUCCESS, output_dir=str(output)),
+        TargetRunResult(str(second / "two.zip"), OutcomeKind.COMPLETE_SUCCESS, output_dir=str(child)),
+    ])
+    assert ownership._target_for_path(str(physical / "result" / "wrapper" / "inner" / "child" / "new.zip")) is two
+    flattened = DirectoryFlattener().flatten_dirs(str(output), announce=False)
+    assert not flattened.errors
+    ownership.relocate_outputs(flattened)
+    assert ownership._target_for_path(str(physical / "result" / "new.zip")) is one
+    assert ownership._target_for_path(str(physical / "result" / "child" / "new.zip")) is two
+    ownership.forget_output(str(alias / "result" / "child"))
+    assert ownership._target_for_path(str(physical / "result" / "child" / "new.zip")) is one
+
+
 @pytest.mark.parametrize("quiet", [False, True])
 def test_existing_final_report_shows_postprocess_warning_and_actual_output(quiet):
     stream = io.StringIO()

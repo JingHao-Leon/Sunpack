@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from sunpack.core.support.path_keys import case_key
 from sunpack.core.support.resource_lifecycle import open_service_file
 
 
@@ -45,7 +46,7 @@ def append_jsonl_record(
 
 
 def _path_lock(path: Path) -> threading.Lock:
-    key = os.path.normcase(os.path.abspath(str(path)))
+    key = case_key(os.path.abspath(str(path)))
     with _PATH_LOCKS_GUARD:
         lock = _PATH_LOCKS.get(key)
         if lock is None:

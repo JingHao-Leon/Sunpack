@@ -5,6 +5,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Iterable
 
+from sunpack.core.support.path_keys import case_key
 from sunpack.core.contracts.filesystem import DirectorySnapshot
 from sunpack.pipeline.coordinator.scan_session import DiscoveryScanSession
 from sunpack.pipeline.discovery.filesystem.directory_scanner import DirectoryScanner
@@ -67,7 +68,7 @@ class NestedOutputScanPolicy:
             if not output_dir:
                 continue
             inventory = OutputInventory.from_value(
-                inventories.get(os.path.normcase(os.path.abspath(output_dir))),
+                inventories.get(case_key(os.path.abspath(output_dir))),
                 expected_root=output_dir,
             )
             snapshot = self._snapshot_from_inventory(inventory, scan_session)
@@ -77,7 +78,7 @@ class NestedOutputScanPolicy:
             scan_session.prime_snapshot(root, snapshot)
             if not snapshot.has_files:
                 continue
-            key = os.path.normcase(root)
+            key = case_key(root)
             if key not in seen:
                 seen.add(key)
                 roots.append(root)

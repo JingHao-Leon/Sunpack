@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import asdict, dataclass
 
+from sunpack.core.support.path_keys import case_key
 from sunpack.pipeline.postprocess.output_cleanup import DEFAULT_OUTPUT_CLEANUP_MANAGER, OutputCleanupEvent
 
 
@@ -31,7 +32,7 @@ def cleanup_failed_output_if_eligible(
     planned = os.path.abspath(str(planned_output_dir or "")) if planned_output_dir else ""
     if not failed:
         return FailedOutputCleanupResult(reason="task_not_failed", output_dir=path)
-    if not path or not planned or os.path.normcase(path) != os.path.normcase(planned):
+    if not path or not planned or case_key(path) != case_key(planned):
         return FailedOutputCleanupResult(reason="unowned_output_dir", output_dir=path)
     cleanup = DEFAULT_OUTPUT_CLEANUP_MANAGER.cleanup_canonical(
         path,

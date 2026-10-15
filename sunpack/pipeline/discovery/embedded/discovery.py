@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 import os
 from typing import Any
 
+from sunpack.core.support.path_keys import case_key
 from sunpack_native import inspect_pe_image, relations_logical_name
 
 from sunpack.core.contracts.archive_input import (
@@ -401,7 +402,7 @@ def select_single_candidate_ratio(
     ]
     if not sized or ratio <= 0.0:
         return []
-    sized.sort(key=lambda item: (-item[0], os.path.normcase(os.path.normpath(item[1]))))
+    sized.sort(key=lambda item: (-item[0], case_key(os.path.normpath(item[1]))))
     threshold = sum(size for size, _path, _candidate in sized) * min(1.0, ratio)
     return [candidate for size, _path, candidate in sized if size >= threshold]
 

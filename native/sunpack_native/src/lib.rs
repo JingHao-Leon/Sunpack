@@ -6,6 +6,7 @@ mod filesystem;
 mod formats;
 mod io;
 mod password;
+mod path_keys;
 mod postprocess;
 mod relations;
 mod scan;
@@ -39,6 +40,7 @@ fn native_available() -> bool {
 #[pymodule]
 fn sunpack_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(native_available, m)?)?;
+    m.add_function(wrap_pyfunction!(path_keys::path_key, m)?)?;
     m.add_function(wrap_pyfunction!(fast_hash::fast_hash64, m)?)?;
     m.add_function(wrap_pyfunction!(fast_hash::fast_hash128, m)?)?;
     #[cfg(windows)]

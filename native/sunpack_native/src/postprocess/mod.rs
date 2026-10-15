@@ -35,7 +35,7 @@ fn promote_input_files_with_move(
     let mut moves = Vec::new();
     for raw in paths {
         let source = PathBuf::from(raw);
-        if !sources.insert(normalize_path(&source).to_lowercase()) {
+        if !sources.insert(crate::path_keys::path_key(&normalize_path(&source))) {
             continue;
         }
         let Some(name) = source.file_name() else {
@@ -44,7 +44,7 @@ fn promote_input_files_with_move(
         let target = destination.join(name);
         if !source.is_file()
             || target.try_exists().unwrap_or(true)
-            || !destinations.insert(normalize_path(&target).to_lowercase())
+            || !destinations.insert(crate::path_keys::path_key(&normalize_path(&target)))
         {
             return (
                 mapping,

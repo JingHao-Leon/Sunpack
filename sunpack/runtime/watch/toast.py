@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+from sunpack.core.support.path_keys import case_key
 from sunpack.core.i18n import I18nContext
 
 # native 侧的空间事件名（与 sevenzip_runner / coordinator.reporting 一致），表达等待状态而非 job 生命周期状态。
@@ -540,7 +541,7 @@ def _existing_directories(paths: list[str]) -> list[str]:
     seen = set()
     for raw in paths:
         path = os.path.abspath(str(raw or ""))
-        key = os.path.normcase(path)
+        key = case_key(path)
         if raw and key not in seen and os.path.isdir(path):
             seen.add(key)
             result.append(path)

@@ -1982,7 +1982,11 @@ class WatchScheduler:
                     os.path.join(scope_dir, DIRECTORY_PASSWORD_FILE_NAME), bump_generation=False,
                 )
             self.log.write(status, path=retry_candidate.path, error=error, failures=[payload])
-            (waiting_failures if missing else recorded_password_failures).append(failure)
+            # Nuitka 4.1.3 loses list mutation tracking through a conditional receiver.
+            if missing:
+                waiting_failures.append(failure)
+            else:
+                recorded_password_failures.append(failure)
 
         terminal_failures = [
             failure

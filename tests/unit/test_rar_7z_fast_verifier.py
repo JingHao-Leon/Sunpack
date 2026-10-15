@@ -1,4 +1,7 @@
+import hashlib
+from pathlib import Path
 import subprocess
+import sys
 import zlib
 
 import pytest
@@ -59,7 +62,7 @@ def _rar5_encryption_header_fixture() -> bytes:
         bytes([15]),
         salt,
         password_check,
-        b"\0\0\0\0",
+        hashlib.sha256(password_check).digest()[:4],
     ])
     crc_payload = _vint(len(body)) + body
     crc = zlib.crc32(crc_payload) & 0xFFFFFFFF
@@ -150,6 +153,76 @@ def test_rar_fast_verifier_matches_rar5_file_password_check_without_payload(tmp_
     assert rejected.ok is False
     assert rejected.status == "no_match"
     assert rejected.attempts == 2
+
+
+def test_rar5_unusable_password_proofs_preserve_extraction_candidates(tmp_path):
+    # Existing valid-password cases cannot detect false rejection from malformed
+    # crypto fields. One bounded child covers both layouts/ranges plus actual
+    # recovery through worker fallback and carrier boundary resolution. Valid
+    # fixture tests miss these failures; reusing 318-byte data keeps cost low.
+    result = subprocess.run([
+        sys.executable, "-c",
+        "import sys; from pathlib import Path; "
+        "from tests.unit.test_rar_7z_fast_verifier import _check_unusable_rar5_password_proofs; "
+        "_check_unusable_rar5_password_proofs(Path(sys.argv[1]))",
+        str(tmp_path),
+    ], cwd=Path(__file__).resolve().parents[2], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def _check_unusable_rar5_password_proofs(tmp_path):
+    from sunpack.core.passwords.job import PasswordJob
+    from sunpack.core.passwords.scheduler import PasswordScheduler, PasswordSearchStatus
+
+    for file_encryption in (False, True):
+        original = _rar5_file_encryption_fixture() if file_encryption else _rar5_encryption_header_fixture()
+        # The file fixture has a plaintext main block before its file header.
+        block_start = 8 + len(_rar5_block(b"\x01\x00\x00")) if file_encryption else 8
+        body = original[block_start + 5:]
+        kdf_offset = len(body) - (45 if file_encryption else 29)
+        for mutation in ("check", 25, 31, 32):
+            changed = bytearray(body)
+            if mutation == "check":
+                changed[-12] ^= 1
+            else:
+                changed[kdf_offset] = mutation
+            archive = tmp_path / f"disguised-{file_encryption}-{mutation}.bin"
+            prefix = b"carrier prefix"
+            payload = original[:block_start] + _rar5_block(changed)
+            archive.write_bytes(prefix + payload + b"carrier suffix")
+            descriptor = {
+                "open_mode": "file_range", "format_hint": "rar", "entry_path": str(archive),
+                "parts": [{"path": str(archive), "start": len(prefix), "end": len(prefix) + len(payload)}],
+            }
+            scheduler = PasswordScheduler.with_fast_verifiers()
+            result = scheduler.plan_for_extraction(PasswordJob(
+                archive_path=str(archive), archive_input=descriptor,
+                candidates=["wrong", "crom" if file_encryption else "U0b7258526OROQY"],
+            ))
+            assert result.status is PasswordSearchStatus.INCONCLUSIVE
+            assert len(result.extraction_candidates) == 2
+            assert result.attempts == 0
+            assert scheduler.cache.stats()["negative"] == 0
+
+    from tests.helpers.config_factory import get_config
+    from tests.helpers.pipeline_engine import execute_pipeline
+    from tests.unit.test_rar_hp_header_decryption import SINGLE_HP_HEX
+
+    data = bytearray.fromhex(SINGLE_HP_HEX)
+    data[34] ^= 1
+    data[8:12] = (zlib.crc32(data[12:46]) & 0xFFFFFFFF).to_bytes(4, "little")
+    config = get_config("archive_scan_deep_embedded", {
+        "user_passwords": ["wrong", "secret"], "builtin_passwords": [],
+        "post_extract": {"archive_cleanup_mode": "k", "flatten_single_directory": False},
+        "recursive_extract": "1", "cli": {"language": "en", "quiet": True},
+    })
+    for carrier in (False, True):
+        directory = tmp_path / f"recovery-{carrier}"
+        directory.mkdir()
+        path = directory / "disguised.jpg"
+        path.write_bytes(b"carrier prefix" + data + b"carrier suffix" if carrier else data)
+        summary = execute_pipeline(config, str(path))
+        assert summary.success_count == 1 and not summary.failed_tasks, summary
 
 
 def test_rar_fast_verifier_extends_prefix_only_when_file_check_is_later(tmp_path):

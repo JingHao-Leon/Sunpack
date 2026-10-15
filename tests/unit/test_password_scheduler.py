@@ -222,6 +222,9 @@ def test_production_scheduler_uses_only_bounded_fast_verifiers(
 
 
 def test_extraction_plan_accepts_strong_fast_proof_and_caches_it(tmp_path):
+    # The run() lazy test cannot catch eager extraction planning. Extend the
+    # existing proof/cache case: an unconsumed failing tail adds independent
+    # coverage with four values, without another test or timing assertion.
     archive = tmp_path / "confused.extension"
     archive.write_bytes(b"archive")
     fast = StaticVerifier(PasswordBatchVerification(
@@ -231,11 +234,18 @@ def test_extraction_plan_accepts_strong_fast_proof_and_caches_it(tmp_path):
         attempts=2,
         final_confirmation_required=False,
     ))
-    scheduler = PasswordScheduler(PasswordVerifierChain([fast]))
+    scheduler = PasswordScheduler(PasswordVerifierChain([fast]), default_batch_size=2)
+
+    def candidates():
+        yield "bad"
+        yield "bad"  # Duplicates must not fill a batch or hide its proof.
+        yield "secret"
+        raise AssertionError("a proven password must leave later sources unconsumed")
+
     job = PasswordJob(
         archive_path=str(archive),
         archive_input={"format_hint": "7z"},
-        candidates=PasswordCandidatePipeline.from_values(["bad", "secret"]),
+        candidates=candidates(),
     )
 
     first = scheduler.plan_for_extraction(job)

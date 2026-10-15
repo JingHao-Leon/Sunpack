@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from enum import Enum
+from itertools import chain, islice
 from typing import Literal
 
 from sunpack.core.passwords.cache import PasswordAttemptCache
@@ -195,52 +196,47 @@ class PasswordScheduler:
             self._emit_finished(job, result, started_at, candidates_seen=0, skipped=0)
             return result
 
-        candidates: list[str] = []
         seen: set[str] = set()
         skipped = 0
-        for candidate in job.candidate_pipeline():
-            password = _candidate_value(candidate)
-            if password in seen:
-                continue
-            seen.add(password)
-            if self.cache.has_negative(fingerprint.key, password):
-                skipped += 1
-                continue
-            candidates.append(password)
+        candidates_seen = 0
 
-        if not candidates:
-            result = PasswordSearchResult(
-                password=None,
-                status=PasswordSearchStatus.EXHAUSTED,
-                attempts=0,
-                exhausted=True,
-            )
-            self._emit_finished(job, result, started_at, candidates_seen=0, skipped=skipped)
-            return result
+        def available_candidates():
+            nonlocal skipped, candidates_seen
+            for candidate in job.candidate_pipeline():
+                password = _candidate_value(candidate)
+                if password in seen:
+                    continue
+                seen.add(password)
+                if self.cache.has_negative(fingerprint.key, password):
+                    skipped += 1
+                    continue
+                candidates_seen += 1
+                yield password
+
+        candidates = iter(available_candidates())
 
         # The authoritative Rust descriptor identifies ENC independently of its
         # physical name. One remaining candidate needs only the worker's Open;
         # the ordinary extraction-confirmation path commits success/rejection.
-        if (
-            len(candidates) == 1
-            and str((job.archive_input or {}).get("format_hint") or "").strip().lower() == "enc"
-        ):
-            result = PasswordSearchResult(
-                password=None,
-                status=PasswordSearchStatus.INCONCLUSIVE,
-                attempts=0,
-                stopped_reason="extraction_confirmation_required",
-                extraction_candidates=tuple(candidates),
-            )
-            self._emit_finished(job, result, started_at, len(candidates), skipped)
-            return result
+        if str((job.archive_input or {}).get("format_hint") or "").strip().lower() == "enc":
+            first = list(islice(candidates, 2))
+            if len(first) == 1:
+                result = PasswordSearchResult(
+                    password=None,
+                    status=PasswordSearchStatus.INCONCLUSIVE,
+                    attempts=0,
+                    stopped_reason="extraction_confirmation_required",
+                    extraction_candidates=tuple(first),
+                )
+                self._emit_finished(job, result, started_at, candidates_seen, skipped)
+                return result
+            candidates = chain(first, candidates)
 
         batch_size = max(1, int(job.batch_size or self.default_batch_size))
         inconclusive: list[str] = []
         inconclusive_evidence = ""
         attempts = 0
-        for offset in range(0, len(candidates), batch_size):
-            batch = candidates[offset:offset + batch_size]
+        while batch := list(islice(candidates, batch_size)):
             verification = _call_fast_verifier(
                 self.verifier,
                 job.archive_path,
@@ -258,7 +254,7 @@ class PasswordScheduler:
                     attempts=attempts,
                     stopped_reason="fast_not_required",
                 )
-                self._emit_finished(job, result, started_at, len(candidates), skipped)
+                self._emit_finished(job, result, started_at, candidates_seen, skipped)
                 return result
             matched_indices = _valid_matched_indices(verification, len(batch))
             tested_count = max(0, min(int(verification.attempts or 0), len(batch)))
@@ -273,7 +269,7 @@ class PasswordScheduler:
                         attempts=attempts,
                         stopped_reason="fast_proof",
                     )
-                    self._emit_finished(job, result, started_at, len(candidates), skipped)
+                    self._emit_finished(job, result, started_at, candidates_seen, skipped)
                     return result
                 matched_set = set(matched_indices)
                 inconclusive.extend(batch[index] for index in matched_indices)
@@ -309,7 +305,7 @@ class PasswordScheduler:
                     attempts=attempts,
                     stopped_reason="terminal",
                 )
-                self._emit_finished(job, result, started_at, len(candidates), skipped)
+                self._emit_finished(job, result, started_at, candidates_seen, skipped)
                 return result
             if verification.status == "needs_volume_or_tail_damaged":
                 result = PasswordSearchResult(
@@ -320,7 +316,7 @@ class PasswordScheduler:
                     attempts=attempts,
                     stopped_reason="terminal",
                 )
-                self._emit_finished(job, result, started_at, len(candidates), skipped)
+                self._emit_finished(job, result, started_at, candidates_seen, skipped)
                 return result
             if verification.status == "backend_unavailable":
                 # Extraction may still have a usable worker/backend. Preserve the
@@ -335,7 +331,7 @@ class PasswordScheduler:
                 status=PasswordSearchStatus.INCONCLUSIVE,
                 attempts=attempts,
                 stopped_reason="extraction_confirmation_required",
-                extraction_candidates=tuple(dict.fromkeys(inconclusive)),
+                extraction_candidates=tuple(inconclusive),
                 extraction_candidate_evidence=inconclusive_evidence,
             )
         else:
@@ -345,7 +341,7 @@ class PasswordScheduler:
                 attempts=attempts,
                 exhausted=True,
             )
-        self._emit_finished(job, result, started_at, len(candidates), skipped)
+        self._emit_finished(job, result, started_at, candidates_seen, skipped)
         return result
 
     def remember_extraction_success(self, fingerprint_key: str, password: str) -> None:

@@ -27,31 +27,22 @@ impl SevenZipPasswordProbe {
         self.packed_data.iter().map(Vec::len).sum()
     }
 
-    pub(crate) fn from_seekable<R: Read + Seek>(reader: &mut R) -> Result<Self, String> {
+    pub(crate) fn from_header<R: Read + Seek>(
+        reader: &mut R,
+        reader_len: u64,
+        start: &[u8; SEVEN_Z_HEADER_SIZE],
+    ) -> Result<Self, String> {
         const MAX_PROBE_HEADER_BYTES: usize = 64 * 1024 * 1024;
 
-        let reader_len = reader
-            .seek(std::io::SeekFrom::End(0))
-            .map_err(|err| format!("7z password probe length read failed: {err}"))?;
-        let start = read_seven_zip_probe_range(
-            reader,
-            reader_len,
-            0,
-            SEVEN_Z_HEADER_SIZE,
-            "7z.start_header",
-            FieldLocation::Head,
-        )
-        .map_err(|err| format!("7z password probe start header read failed: {err}"))?;
-        if start.len() != SEVEN_Z_HEADER_SIZE || !start.starts_with(SEVEN_Z_MAGIC) || start[6] != 0
-        {
+        if !start.starts_with(SEVEN_Z_MAGIC) || start[6] != 0 {
             return Err("7z password probe signature or version is unsupported".to_string());
         }
-        let stored_start_crc = u32_le(&start, 8);
+        let stored_start_crc = u32_le(start, 8);
         if crc32(&start[12..32]) != stored_start_crc {
             return Err("7z password probe start header crc is invalid".to_string());
         }
-        let next_header_offset = u64_le(&start, 12);
-        let next_header_size = usize::try_from(u64_le(&start, 20))
+        let next_header_offset = u64_le(start, 12);
+        let next_header_size = usize::try_from(u64_le(start, 20))
             .map_err(|_| "7z password probe next header is too large".to_string())?;
         if next_header_size == 0 || next_header_size > MAX_PROBE_HEADER_BYTES {
             return Err("7z password probe next header size is unsupported".to_string());
@@ -74,7 +65,7 @@ impl SevenZipPasswordProbe {
             FieldLocation::Tail,
         )
         .map_err(|err| format!("7z password probe next header read failed: {err}"))?;
-        if crc32(&raw) != u32_le(&start, 28) {
+        if crc32(&raw) != u32_le(start, 28) {
             return Err("7z password probe next header crc is invalid".to_string());
         }
         let (pack, folder) = parse_seven_zip_encoded_header_descriptor(&raw)?;

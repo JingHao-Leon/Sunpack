@@ -223,10 +223,10 @@ class PasswordResolver:
         )
 
         directory_passwords = list(directory_passwords or [])
-        candidates = self.password_tester.password_store.candidates(
+        has_candidates = self.password_tester.password_store.has_candidates(
             directory_passwords=directory_passwords
         )
-        if not candidates:
+        if not has_candidates:
             if password_state == "required":
                 return PasswordResolution(
                     password=None,

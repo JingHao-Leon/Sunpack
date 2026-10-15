@@ -269,7 +269,9 @@ namespace sunpack::sevenzip
                 CMyComPtr<IArchiveOpenCallback> open_callback(raw_open_callback);
 
                 hr = archive->Open(stream.Interface(), search_limit, open_callback.Interface());
-                last_encryption_evidence = raw_open_callback->password_requested();
+                // A later handler/search attempt cannot erase an earlier
+                // encrypted-header callback from this candidate's Open.
+                last_encryption_evidence = last_encryption_evidence || raw_open_callback->password_requested();
 
                 if (raw_open_callback->missing_volume_requested())
                 {
@@ -549,7 +551,7 @@ namespace sunpack::sevenzip
             CMyComPtr<IArchiveOpenCallback> open_callback(raw_open_callback);
 
             hr = archive->Open(stream, search_limit, open_callback.Interface());
-            last_encryption_evidence = raw_open_callback->password_requested();
+            last_encryption_evidence = last_encryption_evidence || raw_open_callback->password_requested();
 
             if (raw_open_callback->missing_volume_requested())
             {

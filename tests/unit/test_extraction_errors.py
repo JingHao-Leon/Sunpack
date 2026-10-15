@@ -1,8 +1,13 @@
 import json
 import subprocess
+from types import SimpleNamespace
+
+import pytest
 
 
 from sunpack.core.contracts.failures import FailureKind
+from sunpack.core.contracts.archive_input import ArchiveInputDescriptor, ArchiveInputPart, InputExtent
+from sunpack.core.contracts.tasks import ArchiveTask
 from sunpack.core.i18n import I18nContext
 from sunpack.core.passwords.result import PasswordResolution, PasswordResolutionStatus
 from sunpack.pipeline.extraction.internal.sevenzip.worker_diagnostics import (
@@ -14,30 +19,50 @@ from sunpack.pipeline.extraction.internal.workflow.errors import (
 from sunpack.pipeline.extraction.internal.workflow.single_archive_extractor import (
     SingleArchiveExtractor,
 )
+from sunpack.pipeline.extraction.internal.workflow.retry_policy import ExtractRetryPolicy
 
 
-def test_unknown_empty_password_on_split_input_is_not_conclusive_password_evidence():
+@pytest.mark.parametrize("encrypted", [None, True])
+def test_split_empty_password_failure_preserves_classification_and_cache(tmp_path, encrypted):
+    # Only a complete extraction attempt detects a discarded downgrade or a
+    # poisoned rejection cache; the classifier tests cannot. This replaces the
+    # two helper-only checks with one cheap worker-stubbed behavior test.
+    archive = str(tmp_path / "payload.7z.001")
+    task = ArchiveTask.from_archive_input(ArchiveInputDescriptor(
+        entry_path=archive, open_mode="native_volumes", format_hint="7z",
+        volume_style="numeric_suffix",
+        parts=[ArchiveInputPart(InputExtent(archive), volume_number=1, canonical_name="payload.7z.001")],
+    ), discovery_source="test")
     resolution = PasswordResolution(
         password="",
         status=PasswordResolutionStatus.RESOLVED,
-        encrypted=None,
+        encrypted=encrypted,
         requires_extraction_confirmation=True,
+        candidate_passwords=("",),
     )
-    original = classify_extract_failure(
-        _worker_completed({"wrong_password": True, "native_status": "wrong_password"}),
-        "",
-        archive="payload.7z.001",
-        is_split_archive=True,
+    rejected = []
+    extractor = SingleArchiveExtractor(
+        password_store=None,
+        password_resolver=SimpleNamespace(reject_extraction_candidates=rejected.append),
+        metadata_scanner=SimpleNamespace(scan_for_task=lambda *a, **k: SimpleNamespace(selected_codepage=None, error="")),
+        retry_policy=ExtractRetryPolicy(1),
+        sevenzip_runner=SimpleNamespace(
+            emit_semantic_event=lambda *a, **k: None,
+            extract_attempt=lambda **k: _worker_completed({
+                "wrong_password": True, "native_status": "wrong_password",
+                "password_candidates_all_rejected": True, "password_attempts": 1,
+            }),
+        ),
+        quiet=True,
     )
+    extractor._resolve_password = lambda *args: resolution
+    result = extractor.extract(task, str(tmp_path / "out"))
 
-    failure = SingleArchiveExtractor._downgrade_ambiguous_split_empty_password(
-        resolution,
-        original,
-        is_split=True,
-    )
-
-    assert failure.kind is FailureKind.PASSWORD_INCONCLUSIVE
-    assert failure.is_password_failure is False
+    assert result.failure.kind is (FailureKind.WRONG_PASSWORD if encrypted else FailureKind.PASSWORD_INCONCLUSIVE)
+    assert result.failure.is_password_failure is bool(encrypted)
+    assert rejected == ([resolution] if encrypted else [])
+    assert result.diagnostics["password_candidates_rejected"] == int(bool(encrypted))
+    assert result.diagnostics["password_candidates_inconclusive"] == int(encrypted is None)
 
 
 def test_password_probe_tail_failure_maps_to_missing_volume_with_ambiguous_cli_message():
@@ -75,27 +100,6 @@ def test_password_probe_tail_failure_maps_to_missing_volume_with_ambiguous_cli_m
     assert failure.to_dict()["message_params"] == failure.message_params
     assert failure.details["read_error"]["field"] == "7z.next_header"
     assert failure.details["diagnostic"] == "evidence=seven_zip_start_header_length"
-
-
-def test_known_encrypted_split_input_keeps_wrong_password_failure():
-    resolution = PasswordResolution(
-        password="",
-        status=PasswordResolutionStatus.RESOLVED,
-        encrypted=True,
-        requires_extraction_confirmation=True,
-    )
-    original = classify_extract_failure(
-        _worker_completed({"wrong_password": True, "native_status": "wrong_password"}),
-        "",
-        archive="payload.7z.001",
-        is_split_archive=True,
-    )
-
-    assert SingleArchiveExtractor._downgrade_ambiguous_split_empty_password(
-        resolution,
-        original,
-        is_split=True,
-    ) is original
 
 
 def _worker_completed(payload: dict) -> subprocess.CompletedProcess:

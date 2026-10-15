@@ -313,34 +313,6 @@ class SingleArchiveExtractor:
                     )
 
                 err = f"{run_result.stdout}\n{run_result.stderr}".lower()
-            if resolution.requires_extraction_confirmation and run_result is not None:
-                worker_result = worker_result_payload(run_result)
-                selected_password = self._worker_selected_password(resolution, run_result)
-                if selected_password is not None:
-                    correct_pwd = selected_password
-                candidate_failure = classify_extract_failure(
-                    run_result,
-                    err,
-                    archive=archive,
-                    is_split_archive=is_split,
-                    password_evidence=resolution.candidate_evidence,
-                )
-                candidate_failure = self._downgrade_ambiguous_split_empty_password(
-                    resolution,
-                    candidate_failure,
-                    is_split=is_split,
-                )
-                if candidate_failure.details.get("evidence") == "zipcrypto_entry_crc_proven_before_failure":
-                    self.password_resolver.confirm_extraction(resolution, password=correct_pwd)
-                elif worker_result.get("password_candidates_all_rejected"):
-                    self.password_resolver.reject_extraction_candidates(resolution)
-
-            if self.retry_policy.can_retry(run_result, err, retry_count, archive, is_split):
-                retry_count += 1
-                self._cleanup_output(out_dir, OutputCleanupEvent.EXTRACT_RETRY)
-                self._log(self.i18n.t("extract.log.temp_retry", attempt=retry_count + 1, max_attempts=self.retry_policy.max_retries, archive=archive))
-                continue
-
             with _phase(phase_timer, f"{phase_prefix}_classify_error"):
                 failure = classify_extract_failure(
                     run_result,
@@ -349,7 +321,28 @@ class SingleArchiveExtractor:
                     is_split_archive=is_split,
                     password_evidence=resolution.candidate_evidence,
                 )
-                error_msg = self._append_retry_count(self._localized_failure(failure), retry_count)
+            if resolution.requires_extraction_confirmation and run_result is not None:
+                worker_result = worker_result_payload(run_result)
+                selected_password = self._worker_selected_password(resolution, run_result)
+                if selected_password is not None:
+                    correct_pwd = selected_password
+                failure = self._downgrade_ambiguous_split_empty_password(
+                    resolution,
+                    failure,
+                    is_split=is_split,
+                )
+                if failure.details.get("evidence") == "zipcrypto_entry_crc_proven_before_failure":
+                    self.password_resolver.confirm_extraction(resolution, password=correct_pwd)
+                elif failure.kind == FailureKind.WRONG_PASSWORD and worker_result.get("password_candidates_all_rejected"):
+                    self.password_resolver.reject_extraction_candidates(resolution)
+
+            if self.retry_policy.can_retry(run_result, err, retry_count, archive, is_split):
+                retry_count += 1
+                self._cleanup_output(out_dir, OutputCleanupEvent.EXTRACT_RETRY)
+                self._log(self.i18n.t("extract.log.temp_retry", attempt=retry_count + 1, max_attempts=self.retry_policy.max_retries, archive=archive))
+                continue
+
+            error_msg = self._append_retry_count(self._localized_failure(failure), retry_count)
             self._log(self.i18n.t("extract.log.failed", archive=archive, error=error_msg))
             with _phase(phase_timer, f"{phase_prefix}_diagnostics_failure"):
                 diagnostics = self._diagnostics_from(run_result)
@@ -360,7 +353,7 @@ class SingleArchiveExtractor:
                     )
                     diagnostics["password_candidates_rejected"] = int(
                         worker_result.get("password_attempts") or 0
-                    ) if worker_result.get("password_candidates_all_rejected") else 0
+                    ) if failure.kind == FailureKind.WRONG_PASSWORD and worker_result.get("password_candidates_all_rejected") else 0
                     diagnostics["password_candidates_inconclusive"] = (
                         len(resolution.candidate_passwords)
                         if failure.kind == FailureKind.PASSWORD_INCONCLUSIVE

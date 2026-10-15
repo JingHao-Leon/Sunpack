@@ -26,6 +26,7 @@ const MAX_RAR_PREFIX_SCAN: usize = 1024 * 1024;
 const RAR3_KDF_ITERATIONS: u32 = 0x40000;
 const RAR4_MIN_HEADER_SIZE: usize = 7;
 const PARALLEL_PASSWORD_THRESHOLD: usize = 4;
+const RAR5_MAX_KDF_LOG: u8 = 24;
 const RAR4_MAIN_HEADER_PASSWORD: u16 = 0x0080;
 const RAR4_FILE_PASSWORD: u16 = 0x0004;
 const RAR4_FILE_LARGE: u16 = 0x0100;
@@ -854,12 +855,16 @@ fn find_rar5_encryption_header(data: &[u8]) -> Option<Rar5EncryptionHeader> {
             0
         };
         if header_type == 4 {
-            return parse_rar5_encryption_body(data, cursor, crc_end);
+            return parse_rar5_encryption_body(data, cursor, crc_end, false, false);
         }
         if matches!(header_type, 2 | 3) && extra_area_size != 0 {
-            if let Some(header) =
-                parse_rar5_file_encryption_extra(data, cursor, crc_end, extra_area_size)
-            {
+            if let Some(header) = parse_rar5_file_encryption_extra(
+                data,
+                cursor,
+                crc_end,
+                extra_area_size,
+                header_type == 3,
+            ) {
                 return Some(header);
             }
         }
@@ -873,6 +878,7 @@ fn parse_rar5_file_encryption_extra(
     mut offset: usize,
     header_end: usize,
     extra_area_size: u64,
+    is_service: bool,
 ) -> Option<Rar5EncryptionHeader> {
     let (file_flags, next) = read_vint_bounded(data, offset, header_end)?;
     offset = next;
@@ -905,17 +911,19 @@ fn parse_rar5_file_encryption_extra(
         }
         let (record_type, body) = read_vint_bounded(data, record_body, record_end)?;
         if record_type == 1 {
-            return parse_rar5_file_encryption_body(data, body, record_end);
+            return parse_rar5_encryption_body(data, body, record_end, true, is_service);
         }
         offset = record_end;
     }
     None
 }
 
-fn parse_rar5_file_encryption_body(
+fn parse_rar5_encryption_body(
     data: &[u8],
     mut offset: usize,
     end: usize,
+    include_iv: bool,
+    is_service: bool,
 ) -> Option<Rar5EncryptionHeader> {
     let (version, next) = read_vint_bounded(data, offset, end)?;
     if version != 0 {
@@ -926,64 +934,32 @@ fn parse_rar5_file_encryption_body(
     offset = next;
     let lg2_count = *data.get(offset)?;
     offset += 1;
-    if offset.checked_add(32)? > end {
+    if lg2_count > RAR5_MAX_KDF_LOG || offset.checked_add(16 + usize::from(include_iv) * 16)? > end
+    {
         return None;
     }
     let mut salt = [0u8; 16];
     salt.copy_from_slice(&data[offset..offset + 16]);
-    offset += 32; // Salt followed by the file encryption IV.
-
-    let has_password_check = flags & 0x0001 != 0;
+    offset += 16 + usize::from(include_iv) * 16;
+    let mut has_password_check = flags & 0x0001 != 0;
     let mut password_check = [0u8; 8];
     if has_password_check {
         if offset.checked_add(12)? > end {
             return None;
         }
         password_check.copy_from_slice(&data[offset..offset + 8]);
+        // RAR5 specifies a four-byte SHA-256 checksum of this eight-byte
+        // proof. Invalid checks (including old zeroed service records) cannot
+        // reject passwords; let the existing extraction fallback decide.
+        has_password_check = Sha256::digest(password_check)[..4] == data[offset + 8..offset + 12]
+            && (!is_service || password_check != [0; 8]);
     }
     Some(Rar5EncryptionHeader {
         lg2_count,
         salt,
         has_password_check,
         password_check,
-        header_end: 0,
-    })
-}
-
-fn parse_rar5_encryption_body(
-    data: &[u8],
-    mut offset: usize,
-    end: usize,
-) -> Option<Rar5EncryptionHeader> {
-    let (version, next) = read_vint(data, offset)?;
-    if version != 0 {
-        return None;
-    }
-    offset = next;
-    let (flags, next) = read_vint(data, offset)?;
-    offset = next;
-    let lg2_count = *data.get(offset)?;
-    offset += 1;
-    if offset + 16 > end {
-        return None;
-    }
-    let mut salt = [0u8; 16];
-    salt.copy_from_slice(&data[offset..offset + 16]);
-    offset += 16;
-    let has_password_check = flags & 0x0001 != 0;
-    let mut password_check = [0u8; 8];
-    if has_password_check {
-        if offset + 12 > end {
-            return None;
-        }
-        password_check.copy_from_slice(&data[offset..offset + 8]);
-    }
-    Some(Rar5EncryptionHeader {
-        lg2_count,
-        salt,
-        has_password_check,
-        password_check,
-        header_end: end,
+        header_end: if include_iv { 0 } else { end },
     })
 }
 
@@ -991,6 +967,10 @@ fn rar5_checked_aes_key(password: &str, header: &Rar5EncryptionHeader) -> Option
     if !header.has_password_check {
         return None;
     }
+    rar5_aes_key(password, header)
+}
+
+fn rar5_aes_key(password: &str, header: &Rar5EncryptionHeader) -> Option<[u8; 32]> {
     let iterations = 1u32.checked_shl(header.lg2_count as u32).unwrap_or(0);
     if iterations == 0 {
         return None;
@@ -1023,6 +1003,11 @@ fn rar5_checked_aes_key(password: &str, header: &Rar5EncryptionHeader) -> Option
             // The first PBKDF2 checkpoint is the AES key. The following
             // rounds derive RAR's password check from this same chain.
             key = final_hash;
+            if !header.has_password_check {
+                // An absent/unusable quick check is not a password rejection.
+                // Main/terminal-header callers still validate the decrypted CRC.
+                return Some(key);
+            }
         }
     }
     let mut derived_check = [0u8; 8];
@@ -1045,10 +1030,10 @@ fn rar5_checked_aes_key(password: &str, header: &Rar5EncryptionHeader) -> Option
 /// the embedded password check, or the decrypted block fails CRC validation.
 pub(crate) fn rar5_decrypt_main_header(data: &[u8], password: &str) -> Option<(u64, Option<u32>)> {
     let header = find_rar5_encryption_header(data)?;
-    if !header.has_password_check || header.header_end == 0 {
+    if header.header_end == 0 {
         return None;
     }
-    let key = rar5_checked_aes_key(password, &header)?;
+    let key = rar5_aes_key(password, &header)?;
 
     let iv_offset = header.header_end;
     let iv: [u8; 16] = data
@@ -1204,10 +1189,11 @@ fn probe_rar5_encrypted_terminal(
     if header_type != 4 {
         return Ok(None);
     }
-    let Some(header) = parse_rar5_encryption_body(&full, after_flags, full.len()) else {
+    let Some(header) = parse_rar5_encryption_body(&full, after_flags, full.len(), false, false)
+    else {
         return Ok(Some(RarTerminalProof::default()));
     };
-    let Some(key) = rar5_checked_aes_key(password, &header) else {
+    let Some(key) = rar5_aes_key(password, &header) else {
         return Ok(None);
     };
     let encrypted_header_offset = block_offset
@@ -1220,6 +1206,7 @@ fn probe_rar5_encrypted_terminal(
         encrypted_header_offset,
         &cipher,
         max_blocks,
+        header.has_password_check,
     )?))
 }
 
@@ -1228,42 +1215,51 @@ fn walk_rar5_encrypted_headers(
     mut block_offset: u64,
     cipher: &Aes256,
     max_blocks: usize,
+    mut password_matched: bool,
 ) -> io::Result<RarTerminalProof> {
-    let incomplete = || RarTerminalProof {
-        password_matched: true,
+    let incomplete = |password_matched| RarTerminalProof {
+        password_matched,
         ..Default::default()
     };
     for _ in 0..max_blocks {
         let Some((full, next_header_offset)) =
             read_rar5_encrypted_header(reader, block_offset, cipher)?
         else {
-            return Ok(incomplete());
+            return Ok(incomplete(password_matched));
         };
         let stored_crc = u32::from_le_bytes([full[0], full[1], full[2], full[3]]);
         let Some((_header_size, after_size)) = read_vint(&full, 4) else {
-            return Ok(incomplete());
+            return Ok(incomplete(password_matched));
         };
         if crc32(&full[4..]) != stored_crc {
-            return Ok(incomplete());
+            return Ok(incomplete(password_matched));
         }
         let Some((header_type, after_type)) = read_vint(&full, after_size) else {
-            return Ok(incomplete());
+            return Ok(incomplete(password_matched));
         };
         let Some((header_flags, mut field_cursor)) = read_vint(&full, after_type) else {
-            return Ok(incomplete());
+            return Ok(incomplete(password_matched));
         };
         if !matches!(header_type, 1..=5) && header_flags & 0x0004 == 0 {
-            return Ok(incomplete());
+            return Ok(incomplete(password_matched));
+        }
+        if !password_matched {
+            // No trusted quick check: confirm the existing main-header CRC
+            // proof before any incomplete tail can report a password match.
+            if rar5_main_volume(&full, 0).is_none() {
+                return Ok(incomplete(false));
+            }
+            password_matched = true;
         }
         if header_flags & 0x0001 != 0 {
             let Some((_, after_extra)) = read_vint(&full, field_cursor) else {
-                return Ok(incomplete());
+                return Ok(incomplete(password_matched));
             };
             field_cursor = after_extra;
         }
         let data_size = if header_flags & 0x0002 != 0 {
             let Some((value, _)) = read_vint(&full, field_cursor) else {
-                return Ok(incomplete());
+                return Ok(incomplete(password_matched));
             };
             value
         } else {
@@ -1285,7 +1281,7 @@ fn walk_rar5_encrypted_headers(
         }
         block_offset = next;
     }
-    Ok(incomplete())
+    Ok(incomplete(password_matched))
 }
 
 fn read_rar5_encrypted_header(

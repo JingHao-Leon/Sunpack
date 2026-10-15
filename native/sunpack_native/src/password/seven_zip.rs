@@ -121,7 +121,18 @@ fn prepare_seven_zip<R: Read + Seek>(
             "7z signature not found",
         ));
     }
-    seven_zip_tail_requirement(&mut reader)?;
+    let start_header = seven_zip_tail_requirement(&mut reader)?;
+    // Reuse the start header for the existing bounded descriptor. Encrypted headers
+    // need no preliminary Archive::read (which reparses the same coder graph).
+    // Keep the original parser only for plaintext and unsupported graphs.
+    let probe_error = if std::env::var_os("SUNPACK_DISABLE_7Z_PASSWORD_PROBE").is_none() {
+        match SevenZipPasswordProbe::from_header(&mut reader, total_len, &start_header) {
+            Ok(probe) => return Ok(SevenZipPasswordContext { probe }),
+            Err(message) => message,
+        }
+    } else {
+        "7z password probe is disabled".to_string()
+    };
     reader.seek(SeekFrom::Start(0)).map_err(|error| {
         ReadFault::from_io(error, "seek", 0, 0, 0, total_len)
             .with_field("7z.start_header", FieldLocation::Head)
@@ -149,17 +160,10 @@ fn prepare_seven_zip<R: Read + Seek>(
         }
         HeaderRead::Damaged(message) => return Err(PreparedStatus::new("damaged", message)),
     }
-    if std::env::var_os("SUNPACK_DISABLE_7Z_PASSWORD_PROBE").is_some() {
-        return Err(PreparedStatus::new(
-            "unknown_needs_final_verifier",
-            "7z password probe is disabled",
-        ));
-    }
-    // An unsupported coder graph goes to the existing final verifier. Reopening
-    // and reparsing the physical archive for each candidate defeats preparation.
-    let probe = SevenZipPasswordProbe::from_seekable(&mut reader)
-        .map_err(|message| PreparedStatus::new("unknown_needs_final_verifier", message))?;
-    Ok(SevenZipPasswordContext { probe })
+    Err(PreparedStatus::new(
+        "unknown_needs_final_verifier",
+        probe_error,
+    ))
 }
 
 enum HeaderRead {
@@ -169,7 +173,7 @@ enum HeaderRead {
     Damaged(String),
 }
 
-fn seven_zip_tail_requirement<R: Read + Seek>(mut reader: R) -> Result<(), ReadFault> {
+fn seven_zip_tail_requirement<R: Read + Seek>(mut reader: R) -> Result<[u8; 32], ReadFault> {
     let length = reader.seek(SeekFrom::End(0)).map_err(|error| {
         ReadFault::from_io(error, "seek_end", 0, 0, 0, 0)
             .with_field("7z.archive_length", FieldLocation::Body)
@@ -187,7 +191,7 @@ fn seven_zip_tail_requirement<R: Read + Seek>(mut reader: R) -> Result<(), ReadF
         FieldLocation::Head,
     )?;
     if &header[..6] != SEVEN_Z_SIGNATURE {
-        return Ok(());
+        return Ok(header);
     }
     let next_offset = u64::from_le_bytes(header[12..20].try_into().unwrap());
     let next_size = u64::from_le_bytes(header[20..28].try_into().unwrap());
@@ -207,7 +211,7 @@ fn seven_zip_tail_requirement<R: Read + Seek>(mut reader: R) -> Result<(), ReadF
                 .with_field("7z.next_header", FieldLocation::Tail),
         );
     }
-    Ok(())
+    Ok(header)
 }
 
 fn find_first_conclusive_header_with_probe(

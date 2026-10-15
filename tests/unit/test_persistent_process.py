@@ -234,11 +234,16 @@ def test_streaming_request_round_trips_interactive_input(monkeypatch):
     async def scenario():
         reader = asyncio.StreamReader()
         writer = _AsyncWriter(reader, b"secret\n")
-        return await persistent_process._execute_streaming_request_async(
+        code = await persistent_process._execute_streaming_request_async(
             {"argv": ["extract"], "stdin_tty": True}, reader, writer
         )
+        return code, bytes(writer.wire)
 
-    assert asyncio.run(scenario()) == 0
+    code, wire = asyncio.run(scenario())
+    assert code == 0
+    # A client blocks on the input request, so it must receive the prompt first.
+    prompt = b"password: "
+    assert wire == struct.pack("!BI", 1, len(prompt)) + prompt + struct.pack("!BI", 3, 0)
 
 
 def test_try_send_does_not_request_replay_after_submission_disconnect(tmp_path, monkeypatch):

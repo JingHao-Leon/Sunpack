@@ -961,6 +961,7 @@ class _AsyncConnectionTextStream:
         terminal_columns: int | None = None,
     ):
         self.loop = loop
+        self._loop_thread_id = threading.get_ident()
         self.queue = queue
         self.kind = kind
         self._is_tty = is_tty
@@ -974,7 +975,10 @@ class _AsyncConnectionTextStream:
         data = value.encode("utf-8", "surrogatepass")
         if data:
             frame = struct.pack("!BI", self.kind, len(data)) + data
-            self.loop.call_soon_threadsafe(self.queue.put_nowait, frame)
+            if threading.get_ident() == self._loop_thread_id:
+                self.queue.put_nowait(frame)
+            else:
+                self.loop.call_soon_threadsafe(self.queue.put_nowait, frame)
         return len(value)
 
     def flush(self) -> None:

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from sunpack.pipeline.coordinator.async_work import AsyncWorkBroker, CURRENT_WORK, _StageWorkQueue
+from sunpack.pipeline.coordinator.async_work import AsyncWorkBroker, CancellationToken, CURRENT_WORK, _StageWorkQueue
 
 
 @pytest.mark.parametrize("seed", [0, 31, 32, 63])
@@ -63,7 +63,11 @@ def test_stage_queue_cancellation_drain_preserves_global_fifo():
     assert not queue
 
 
-def test_broker_cancelled_queued_work_releases_slots_across_stage_buckets():
+@pytest.mark.parametrize("cancel_token", [False, True])
+def test_broker_cancelled_queued_work_releases_slots_across_stage_buckets(cancel_token):
+    # Future cancellation alone misses discarded token-only jobs whose callers
+    # never finish. Both admission paths must settle without executing the job;
+    # sharing this inexpensive queue scenario avoids a second scheduling test.
     async def scenario():
         broker = AsyncWorkBroker(thread_capacity=1, max_pending_jobs=4)
         entered = threading.Event()
@@ -80,14 +84,18 @@ def test_broker_cancelled_queued_work_releases_slots_across_stage_buckets():
         try:
             active = asyncio.create_task(broker.run("scan", "active", operation, "active", request_id="r"))
             assert await asyncio.to_thread(entered.wait, 2)
-            cancelled = asyncio.create_task(broker.run("close", "cancelled", operation, "cancelled", request_id="r"))
+            token = CancellationToken()
+            cancelled = asyncio.create_task(broker.run("close", "cancelled", operation, "cancelled", request_id="r", cancellation=token))
             verify = asyncio.create_task(broker.run("verify", "verify", operation, "verify", request_id="r"))
             background = asyncio.create_task(broker.run("background", "background", operation, "background", request_id="r"))
             await asyncio.sleep(0)
-            cancelled.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await cancelled
+            if cancel_token:
+                token.cancel()
+            else:
+                cancelled.cancel()
             release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(cancelled, timeout=3)
             assert await asyncio.wait_for(asyncio.gather(active, verify, background), timeout=3) == [
                 "active", "verify", "background",
             ]

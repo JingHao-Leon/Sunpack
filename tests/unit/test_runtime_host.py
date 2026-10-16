@@ -319,6 +319,28 @@ def test_archive_registry_detects_watch_owner_by_file_identity(tmp_path):
     assert registry.reserve("cli-job", "foreground", [str(alias)]) is None
 
 
+def test_archive_registry_tracks_directory_and_missing_input_ownership(tmp_path):
+    # Hardlink tests miss lexical directory ownership and the fallback identity
+    # of outputs not created yet. This small lifecycle scenario independently
+    # detects lost ancestor conflicts, sibling false positives and stale leases.
+    root = tmp_path / "input"
+    root.mkdir()
+    nested = root / "nested" / "archive.jpg"
+    sibling = tmp_path / "input-other" / "archive.jpg"
+    registry = ActiveArchiveRegistry()
+    assert registry.reserve("watch", "watch", [str(root)]) is None
+    assert registry.reserve("cli", "foreground", [str(nested)]) is not None
+    assert registry.watch_conflict([str(nested)]) is not None
+    assert registry.reserve("sibling", "foreground", [str(sibling)]) is None
+    registry.release("watch")
+    assert registry.watch_conflict([str(nested)]) is None
+    assert registry.reserve("cli", "foreground", [str(nested)]) is None
+    assert registry.reserve("same", "watch", [str(nested).upper()]) is not None
+    registry.release("cli")
+    assert registry.reserve("parent", "watch", [str(root)]) is None
+    assert registry.reserve("parent", "watch", [str(root)]) is None
+
+
 def test_extract_reports_watch_busy_without_starting_another_task(tmp_path):
     from sunpack.runtime.cli.commands import extract
     from sunpack.runtime.cli.runtime_state import set_runtime_host

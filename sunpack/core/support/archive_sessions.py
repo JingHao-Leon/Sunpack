@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import os
 import threading
 import time
 import uuid
+import weakref
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Iterable
@@ -41,6 +43,27 @@ class _SessionEntry:
 
 
 _SESSIONS: OrderedDict[tuple[str, str], _SessionEntry] = OrderedDict()
+_CURRENT_SESSIONS: contextvars.ContextVar[weakref.WeakValueDictionary[str, _SessionEntry] | None] = (
+    contextvars.ContextVar("sunpack_archive_session_scope", default=None)
+)
+
+
+@contextlib.contextmanager
+def archive_session_scope():
+    """Reuse validated sessions within one synchronous input operation.
+
+    References are weak: each probe still owns its own short borrow, and cache
+    eviction/promotion can retire an entry between probes without being pinned.
+    A later operation validates the physical input again on its first borrow.
+    """
+    if _CURRENT_SESSIONS.get() is not None:
+        yield
+        return
+    token = _CURRENT_SESSIONS.set(weakref.WeakValueDictionary())
+    try:
+        yield
+    finally:
+        _CURRENT_SESSIONS.reset(token)
 
 
 def _native_close(owner: Any) -> None:
@@ -130,6 +153,18 @@ def _get_archive_session(
     stale_entries: list[_SessionEntry] = []
     duplicate: NativeArchiveSession | None = None
     with lifecycle_registration((normalized,)):
+        operation_sessions = _CURRENT_SESSIONS.get()
+        operation_key = absolute_path_key(normalized)
+        if operation_sessions is not None:
+            with _CHANGED:
+                entry = operation_sessions.get(operation_key)
+                if (
+                    entry is not None and not entry.retired and not entry.closed
+                    and _SESSIONS.get(entry.key) is entry
+                ):
+                    _SESSIONS.move_to_end(entry.key)
+                    _attach_borrow_locked(entry, borrow_token, leases)
+                    return entry.session
         # Rust validates the current path against an opened physical file and
         # retains the pooled reader/cache only for the same generation.
         session = NativeArchiveSession(normalized)
@@ -137,6 +172,7 @@ def _get_archive_session(
         with _CHANGED:
             existing = _SESSIONS.get(key)
             if existing is not None and not existing.retired:
+                entry = existing
                 duplicate = session
                 _SESSIONS.move_to_end(key)
                 _attach_borrow_locked(existing, borrow_token, leases)
@@ -158,6 +194,8 @@ def _get_archive_session(
                     _old_key, old_entry = _SESSIONS.popitem(last=False)
                     stale_entries.append(old_entry)
                 result = session
+            if operation_sessions is not None:
+                operation_sessions[operation_key] = entry
 
     if duplicate is not None:
         _native_close(duplicate)

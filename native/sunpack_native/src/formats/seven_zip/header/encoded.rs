@@ -302,6 +302,38 @@ fn decode_seven_zip_output(
     decode_seven_zip_encoded_coder(inputs.pop().unwrap(), coder, password, unpack_size)
 }
 
+fn seven_zip_bcj_start_pos(coder: &SevenZipEncodedHeaderCoder) -> Result<usize, String> {
+    let method = coder.method_id.as_slice();
+    let alignment = if method == EncoderMethod::ID_BCJ_ARM64 {
+        3
+    } else if method == EncoderMethod::ID_BCJ_RISCV {
+        1
+    } else if [
+        EncoderMethod::ID_BCJ_X86,
+        EncoderMethod::ID_BCJ_ARM,
+        EncoderMethod::ID_BCJ_ARM_THUMB,
+        EncoderMethod::ID_BCJ_PPC,
+        EncoderMethod::ID_BCJ_IA64,
+        EncoderMethod::ID_BCJ_SPARC,
+    ]
+    .contains(&method)
+        && coder.properties.is_empty()
+    {
+        return Ok(0);
+    } else {
+        return Err("encoded_header_decoder_unsupported_method:bcj_properties".to_string());
+    };
+    let start = match coder.properties.as_slice() {
+        [] => 0,
+        [a, b, c, d] => u32::from_le_bytes([*a, *b, *c, *d]),
+        _ => return Err("encoded_header_decoder_unsupported_method:bcj_properties".to_string()),
+    };
+    if start & alignment != 0 {
+        return Err("encoded_header_decoder_unsupported_method:bcj_alignment".to_string());
+    }
+    Ok(start as usize)
+}
+
 fn decode_seven_zip_encoded_coder(
     data: Cow<'_, [u8]>,
     coder: &SevenZipEncodedHeaderCoder,
@@ -397,8 +429,8 @@ fn decode_seven_zip_encoded_coder(
         return Ok(decoded);
     }
     macro_rules! decode_bcj {
-        ($constructor:expr) => {{
-            let mut reader = $constructor;
+        ($constructor:path) => {{
+            let mut reader = $constructor(compressed, seven_zip_bcj_start_pos(coder)?);
             reader
                 .read_to_end(&mut decoded)
                 .map_err(|err| format!("encoded_header_payload_crc_bad:{err}"))?;
@@ -406,36 +438,34 @@ fn decode_seven_zip_encoded_coder(
         }};
     }
     if coder.method_id.as_slice() == EncoderMethod::ID_BCJ_X86 {
-        decode_bcj!(BcjReader::new_x86(compressed, 0));
+        decode_bcj!(BcjReader::new_x86);
     }
     if coder.method_id.as_slice() == EncoderMethod::ID_BCJ_ARM {
-        decode_bcj!(BcjReader::new_arm(compressed, 0));
+        decode_bcj!(BcjReader::new_arm);
     }
     if coder.method_id.as_slice() == EncoderMethod::ID_BCJ_ARM64 {
-        decode_bcj!(BcjReader::new_arm64(compressed, 0));
+        decode_bcj!(BcjReader::new_arm64);
     }
     if coder.method_id.as_slice() == EncoderMethod::ID_BCJ_ARM_THUMB {
-        decode_bcj!(BcjReader::new_arm_thumb(compressed, 0));
+        decode_bcj!(BcjReader::new_arm_thumb);
     }
     if coder.method_id.as_slice() == EncoderMethod::ID_BCJ_PPC {
-        decode_bcj!(BcjReader::new_ppc(compressed, 0));
+        decode_bcj!(BcjReader::new_ppc);
     }
     if coder.method_id.as_slice() == EncoderMethod::ID_BCJ_IA64 {
-        decode_bcj!(BcjReader::new_ia64(compressed, 0));
+        decode_bcj!(BcjReader::new_ia64);
     }
     if coder.method_id.as_slice() == EncoderMethod::ID_BCJ_SPARC {
-        decode_bcj!(BcjReader::new_sparc(compressed, 0));
+        decode_bcj!(BcjReader::new_sparc);
     }
     if coder.method_id.as_slice() == EncoderMethod::ID_BCJ_RISCV {
-        decode_bcj!(BcjReader::new_riscv(compressed, 0));
+        decode_bcj!(BcjReader::new_riscv);
     }
     if coder.method_id.as_slice() == EncoderMethod::ID_DELTA {
-        let distance = coder
-            .properties
-            .first()
-            .copied()
-            .unwrap_or(0)
-            .wrapping_add(1) as usize;
+        let [distance] = coder.properties.as_slice() else {
+            return Err("encoded_header_decoder_unsupported_method:delta_properties".to_string());
+        };
+        let distance = usize::from(*distance) + 1;
         let mut reader = DeltaReader::new(compressed, distance);
         reader
             .read_to_end(&mut decoded)
@@ -656,12 +686,23 @@ fn seven_zip_probe_folder_supported(folder: &SevenZipEncodedHeaderFolder) -> boo
     let mut aes_count = 0usize;
     for coder in &folder.coders {
         let method = coder.method_id.as_slice();
+        let inputs = if method == EncoderMethod::ID_BCJ2 {
+            4
+        } else {
+            1
+        };
+        if coder.num_in_streams != inputs || coder.num_out_streams != 1 {
+            return false;
+        }
         if method == EncoderMethod::ID_AES256_SHA256 {
             aes_count += 1;
             if coder.properties.is_empty() || (coder.properties[0] & 63) > 24 {
                 return false;
             }
         } else if method == EncoderMethod::ID_COPY {
+            if !coder.properties.is_empty() {
+                return false;
+            }
         } else if method == [0x04, 0xf7, 0x11, 0x04] {
             if coder.properties.len() != 5 {
                 return false;
@@ -688,17 +729,15 @@ fn seven_zip_probe_folder_supported(folder: &SevenZipEncodedHeaderFolder) -> boo
             {
                 return false;
             }
-        } else if method != EncoderMethod::ID_BCJ_X86
-            && method != EncoderMethod::ID_BCJ_ARM
-            && method != EncoderMethod::ID_BCJ_ARM64
-            && method != EncoderMethod::ID_BCJ_ARM_THUMB
-            && method != EncoderMethod::ID_BCJ_PPC
-            && method != EncoderMethod::ID_BCJ_IA64
-            && method != EncoderMethod::ID_BCJ_SPARC
-            && method != EncoderMethod::ID_BCJ_RISCV
-            && method != EncoderMethod::ID_DELTA
-            && method != EncoderMethod::ID_BCJ2
-        {
+        } else if method == EncoderMethod::ID_DELTA {
+            if coder.properties.len() != 1 {
+                return false;
+            }
+        } else if method == EncoderMethod::ID_BCJ2 {
+            if !coder.properties.is_empty() {
+                return false;
+            }
+        } else if seven_zip_bcj_start_pos(coder).is_err() {
             return false;
         }
     }

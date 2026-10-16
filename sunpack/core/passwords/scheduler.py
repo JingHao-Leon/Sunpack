@@ -15,6 +15,7 @@ from sunpack.core.passwords.verifier.rar_fast import RarFastVerifier
 from sunpack.core.passwords.verifier.seven_zip_fast import SevenZipFastVerifier
 from sunpack.core.passwords.verifier.zip_fast import ZipFastVerifier
 from sunpack.core.passwords.verifier.enc_fast import EncFastVerifier
+from sunpack.core.support.archive_sessions import archive_session_scope
 
 
 class PasswordSearchStatus(str, Enum):
@@ -83,6 +84,7 @@ class PasswordScheduler:
         )
         return cls(registry.build())
 
+    @archive_session_scope()
     def run(self, job: PasswordJob) -> PasswordSearchResult:
         started_at = time.monotonic()
         self._emit_progress(job, PasswordProgressEvent(stage="started"))
@@ -166,6 +168,7 @@ class PasswordScheduler:
         self._emit_finished(job, result, started_at, candidates_seen, skipped)
         return result
 
+    @archive_session_scope()
     def plan_for_extraction(self, job: PasswordJob) -> PasswordSearchResult:
         """Resolve cheap proofs and return inconclusive candidates for real extraction.
 

@@ -332,6 +332,7 @@ class AsyncWorkBroker:
             else:
                 self._queues.pop(request_id, None)
             if item.future.cancelled() or item.token.cancelled:
+                item.future.cancel()
                 self._pending_slots.release()
                 continue
             self._active += 1

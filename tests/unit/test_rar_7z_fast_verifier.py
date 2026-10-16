@@ -1,4 +1,5 @@
 import hashlib
+import struct
 from pathlib import Path
 import subprocess
 import sys
@@ -382,6 +383,56 @@ def _create_encrypted_header_7z(tmp_path, password: str, compression: str = "0")
     if result.returncode != 0:
         raise RuntimeError(f"7z failed:\n{result.stdout}\n{result.stderr}")
     return archive_path
+
+
+def test_seven_zip_filter_properties_preserve_password_search_and_fallback(tmp_path):
+    # Ordinary LZMA/AES fixtures never exercise branch-filter properties. This
+    # 103-byte, 7-Zip-validated AES+ARM64 header uses start position 4096 and
+    # password "p". One cheap search scenario covers direct, carrier and split
+    # inputs plus rejection of unsafe filter parameters before caching negatives.
+    from sunpack.core.passwords.job import PasswordJob
+    from sunpack.core.passwords.scheduler import PasswordScheduler, PasswordSearchStatus
+
+    payload = bytes.fromhex(
+        "377abcaf271c0004302ee889200000000000000027000000000000003ab1f801"
+        "ca515724eb640d9be51c6273a19d2a24dde7e89e0a250f1fd06f2752986d9bf9"
+        "17060001092000070b0100022406f107010100210a040010000001000c1c1c0a015b9af6010000"
+    )
+    archive = tmp_path / "disguised.jpg"
+    archive.write_bytes(payload)
+    split = _raw_split_input(tmp_path, archive, format_hint="7z")
+    carrier = tmp_path / "carrier.bin"
+    prefix = b"carrier-prefix"
+    carrier.write_bytes(prefix + payload + b"carrier-suffix")
+    descriptors = [
+        {"entry_path": str(archive), "format_hint": "7z"},
+        {"entry_path": str(carrier), "format_hint": "7z", "open_mode": "file_range",
+         "parts": [{"path": str(carrier), "start": len(prefix), "end": len(prefix) + len(payload)}]},
+        split,
+    ]
+    for descriptor in descriptors:
+        result = PasswordScheduler.with_fast_verifiers().plan_for_extraction(PasswordJob(
+            archive_path=descriptor["entry_path"], archive_input=descriptor,
+            candidates=["wrong", "p"], batch_size=1,
+        ))
+        assert result.status is PasswordSearchStatus.FOUND
+        assert result.password == "p"
+
+    # Preserve all candidates for unsupported property lengths/alignment.
+    for properties in (b"\x01", struct.pack("<I", 4097)):
+        next_header = payload[64:].replace(b"\x21\x0a\x04\x00\x10\x00\x00",
+                                          b"\x21\x0a" + bytes([len(properties)]) + properties)
+        start = struct.pack("<QQI", 32, len(next_header), zlib.crc32(next_header))
+        path = tmp_path / f"unsupported-{len(properties)}.jpg"
+        path.write_bytes(payload[:8] + struct.pack("<I", zlib.crc32(start)) + start
+                         + payload[32:64] + next_header)
+        scheduler = PasswordScheduler.with_fast_verifiers()
+        result = scheduler.plan_for_extraction(PasswordJob(
+            archive_path=str(path), archive_input={"format_hint": "7z"}, candidates=["wrong", "p"],
+        ))
+        assert result.status is PasswordSearchStatus.INCONCLUSIVE
+        assert result.extraction_candidates == ("wrong", "p")
+        assert scheduler.cache.stats()["negative"] == 0
 
 
 def test_seven_zip_fast_verifier_reads_complete_raw_split_stream(tmp_path):

@@ -123,7 +123,7 @@ def test_overlapping_probes_in_one_task_remain_protected(tmp_path):
     path.write_text('fixture', encoding='utf-8')
     scope = TaskResourceScope('overlapping-probes', files=(path,))
     try:
-        with scope.activate():
+        with sessions.archive_session_scope(), scope.activate():
             with sessions.borrow_archive_sessions((path,)) as first:
                 with sessions.borrow_archive_sessions((path, str(path).upper())) as second:
                     assert first[0] is second[0]
@@ -136,6 +136,15 @@ def test_overlapping_probes_in_one_task_remain_protected(tmp_path):
                         pytest.fail('promotion admitted an active probe')
             assert not borrows((path,))
             assert not scope._resource_ids
+            # Reuse must not pin cache entries after a short probe. Remaining
+            # tests do not retire/reopen an entry within one search scope.
+            with promotion_barrier((path,), timeout=0,
+                                   cache_releasers=(sessions.release_archive_sessions_under_roots,)):
+                pass
+            assert first[0].closed
+            with sessions.borrow_archive_sessions((path,)) as reopened:
+                assert reopened[0] is not first[0]
+                assert not reopened[0].closed
     finally:
         scope.close()
 

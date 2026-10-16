@@ -5,6 +5,7 @@ import os
 import threading
 import time
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -87,10 +88,22 @@ class _RequestProgress:
     source_path: str
     tasks: dict[int, _TaskProgress] = field(default_factory=dict)
     visible: bool = False
-    outcome: str = ""
-    output_dirs: list[str] = field(default_factory=list)
-    errors: list[str] = field(default_factory=list)
-    failure_payloads: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class _BatchProgress:
+    source_path: str = ""
+    succeeded: int = 0
+    failed: int = 0
+    total_bytes: int = 0
+    output_target: str = ""
+    warnings: str = ""
+    failure_details: list[str] = field(default_factory=list)
+    failure_chars: int = 0
+
+    @property
+    def completed(self) -> int:
+        return self.succeeded + self.failed
 
 
 class WatchFailureReportStore:
@@ -109,7 +122,20 @@ class WatchFailureReportStore:
         self.max_files = max(1, int(max_files))
         self.max_bytes = max(1024, int(max_bytes))
 
-    def write(self, failures: list[_RequestProgress]) -> str:
+    def format_failure(
+        self, index: int, source_path: str, errors: list[str], payloads: list[dict[str, Any]], limit: int,
+    ) -> str:
+        def parts():
+            yield self.i18n.t("toast.report.failure", index=index, path=source_path) + "\n"
+            error = _bounded_text((str(value) + "; " for value in errors if value), limit)
+            yield self.i18n.t("toast.report.error", error=error or self.i18n.t("toast.report.unknown_error")) + "\n"
+            if payloads:
+                yield self.i18n.t("toast.report.details", details="")
+                yield from json.JSONEncoder(ensure_ascii=False, indent=2, sort_keys=True, default=str).iterencode(payloads)
+            yield "\n"
+        return _bounded_text(parts(), limit)
+
+    def write(self, details: list[str], failed: int) -> str:
         self.directory.mkdir(parents=True, exist_ok=True)
         now = datetime.now().astimezone()
         filename = f"failed-{now:%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:8]}.txt"
@@ -118,23 +144,12 @@ class WatchFailureReportStore:
         lines = [
             self.i18n.t("toast.report.title"),
             self.i18n.t("toast.report.generated", timestamp=now.isoformat(timespec="seconds")),
-            self.i18n.t("toast.report.summary", failed=len(failures)),
+            self.i18n.t("toast.report.summary", failed=failed),
             "",
         ]
-        for index, request in enumerate(failures, 1):
-            lines.append(self.i18n.t("toast.report.failure", index=index, path=request.source_path))
-            error = "; ".join(value for value in request.errors if value) or self.i18n.t("toast.report.unknown_error")
-            lines.append(self.i18n.t("toast.report.error", error=error))
-            if request.failure_payloads:
-                details = json.dumps(
-                    request.failure_payloads,
-                    ensure_ascii=False,
-                    indent=2,
-                    sort_keys=True,
-                    default=str,
-                )
-                lines.append(self.i18n.t("toast.report.details", details=details))
-            lines.append("")
+        lines.extend(details)
+        if failed > len(details):
+            lines.append(self.i18n.t("toast.report.omitted", count=failed - len(details)))
         write_task_text(temporary, "\n".join(lines), encoding="utf-8")
         os.replace(temporary, path)
         self._trim()
@@ -177,6 +192,7 @@ class WatchToastCoordinator:
         self._debounce_seconds = max(0.0, int(watch.get("toast_completion_debounce_ms", 800)) / 1000.0)
         self._lock = threading.RLock()
         self._requests: dict[str, _RequestProgress] = {}
+        self._batch = _BatchProgress()
         self._batch_id = ""
         self._batch_started_at = 0.0
         self._finalize_generation = 0
@@ -195,13 +211,16 @@ class WatchToastCoordinator:
     def submitted(self, request_id: str, source_path: str) -> None:
         with self._lock:
             if not self._closed:
+                previous = self._requests.get(str(request_id))
+                if previous is not None:
+                    self._release_space_jobs_for_request_locked(previous)
                 self._requests[str(request_id)] = _RequestProgress(source_path=os.path.abspath(source_path))
 
     def progress(self, request_id: str, task: Any, event: dict[str, Any]) -> None:
         space_event = str(event.get("event") or "")
         with self._lock:
             request = self._requests.get(str(request_id))
-            if self._closed or request is None or request.outcome:
+            if self._closed or request is None:
                 return
             if space_event in _SPACE_EVENTS:
                 self._space_progress_locked(request, task, space_event, event)
@@ -211,7 +230,7 @@ class WatchToastCoordinator:
             if extract_started:
                 request.visible = True
                 request.tasks.setdefault(task_id, _TaskProgress(name=_task_name(task, request.source_path)))
-                self._ensure_batch_locked()
+                self._ensure_batch_locked(request.source_path)
                 self._cancel_finalize_locked()
             task_progress = request.tasks.get(task_id)
             if task_progress is None:
@@ -281,8 +300,6 @@ class WatchToastCoordinator:
     def _release_space_jobs_for_request_locked(self, request: _RequestProgress) -> None:
         """job 终态时把它的 job_id 从所有 episode 集合里移除，集合空则提示消失。"""
 
-        if not self._space_blocked_jobs:
-            return
         for task_progress in request.tasks.values():
             task_progress.disk_blocked = False
             task_progress.space_detail = ""
@@ -306,8 +323,8 @@ class WatchToastCoordinator:
         self._terminal(
             request_id,
             "failure",
-            errors=[str(item) for item in errors],
-            failure_payloads=[dict(item) for item in failure_payloads if isinstance(item, dict)],
+            errors=errors,
+            failure_payloads=failure_payloads,
         )
 
     def suppressed(self, request_id: str) -> None:
@@ -315,8 +332,9 @@ class WatchToastCoordinator:
             request = self._requests.pop(str(request_id), None)
             if request is None or self._closed:
                 return
+            self._release_space_jobs_for_request_locked(request)
             if request.visible:
-                if self._visible_requests_locked():
+                if self._batch.completed or self._visible_requests_locked():
                     self._publish_progress_locked()
                     self._schedule_finalize_if_drained_locked()
                 else:
@@ -331,6 +349,7 @@ class WatchToastCoordinator:
             self._closed = True
             self._cancel_finalize_locked()
             self._requests.clear()
+            self._space_blocked_jobs.clear()
             self._reset_batch_locked(clear=True)
 
     def _terminal(
@@ -343,49 +362,65 @@ class WatchToastCoordinator:
         failure_payloads: list[dict[str, Any]] | None = None,
     ) -> None:
         with self._lock:
-            request = self._requests.get(str(request_id))
+            request = self._requests.pop(str(request_id), None)
             if request is None or self._closed:
                 return
-            if not request.visible:
-                self._requests.pop(str(request_id), None)
-                return
-            request.outcome = outcome
-            request.output_dirs = _existing_directories(output_dirs or [])
-            request.errors = list(errors or [])
-            request.failure_payloads = list(failure_payloads or [])
-            for task in request.tasks.values():
-                if task.total_bytes > 0:
-                    task.completed_bytes = task.total_bytes
             self._release_space_jobs_for_request_locked(request)
+            if not request.visible:
+                return
+            batch = self._batch
+            if not batch.completed:
+                batch.source_path = request.source_path
+            batch.total_bytes += sum(max(0, task.total_bytes) for task in request.tasks.values())
+            if outcome == "success":
+                batch.succeeded += 1
+                batch.output_target = _common_output_target([batch.output_target, *(output_dirs or [])])
+                batch.warnings = _bounded_text(
+                    (value + "\n" for value in (batch.warnings, *(errors or [])) if value), 2048,
+                ).rstrip()
+            else:
+                batch.failed += 1
+                # A Unicode character occupies at most four UTF-8 bytes. Retain
+                # bounded report text, never completed tasks or payload graphs.
+                remaining = self.report_store.max_bytes // 4 - batch.failure_chars
+                if remaining > 0:
+                    detail = self.report_store.format_failure(
+                        batch.failed, request.source_path, errors or [], failure_payloads or [], remaining,
+                    )
+                    batch.failure_details.append(detail)
+                    batch.failure_chars += len(detail)
             self._publish_progress_locked()
             self._schedule_finalize_if_drained_locked()
 
-    def _ensure_batch_locked(self) -> None:
+    def _ensure_batch_locked(self, source_path: str) -> None:
         if not self._batch_id:
             self._batch_id = uuid.uuid4().hex
             self._batch_started_at = time.monotonic()
+            self._batch.source_path = source_path
 
     def _visible_requests_locked(self) -> list[_RequestProgress]:
         return [request for request in self._requests.values() if request.visible]
 
     def _publish_progress_locked(self) -> None:
         requests = self._visible_requests_locked()
-        if not requests or not self._batch_id:
+        batch = self._batch
+        if not self._batch_id:
             return
-        completed_requests = sum(bool(request.outcome) for request in requests)
+        completed_requests = batch.completed
         tasks = [task for request in requests for task in request.tasks.values()]
-        known_total = sum(task.total_bytes for task in tasks if task.total_bytes > 0)
-        completed_bytes = sum(
+        known_total = batch.total_bytes + sum(task.total_bytes for task in tasks if task.total_bytes > 0)
+        completed_bytes = batch.total_bytes + sum(
             min(task.completed_bytes, task.total_bytes)
             for task in tasks
             if task.total_bytes > 0
         )
         has_unknown_active = any(
-            not request.outcome and task.total_bytes <= 0
+            task.total_bytes <= 0
             for request in requests
             for task in request.tasks.values()
         )
-        if completed_requests == len(requests) and known_total <= 0:
+        count = completed_requests + len(requests)
+        if completed_requests == count and known_total <= 0:
             mode = ToastProgressMode.DETERMINATE
             value = 1.0
         elif has_unknown_active or known_total <= 0:
@@ -394,9 +429,10 @@ class WatchToastCoordinator:
         else:
             mode = ToastProgressMode.DETERMINATE
             value = min(1.0, completed_bytes / known_total)
-        count = len(requests)
         progress_title = (
-            self.i18n.t("toast.progress.single", name=os.path.basename(requests[0].source_path))
+            self.i18n.t("toast.progress.single", name=os.path.basename(
+                requests[0].source_path if requests else batch.source_path,
+            ))
             if count == 1
             else self.i18n.t("toast.progress.multiple", count=count)
         )
@@ -434,8 +470,7 @@ class WatchToastCoordinator:
         ))
 
     def _schedule_finalize_if_drained_locked(self) -> None:
-        visible = self._visible_requests_locked()
-        if not visible or any(not request.outcome for request in visible):
+        if not self._batch.completed or self._visible_requests_locked():
             return
         self._cancel_finalize_locked()
         self._finalize_generation += 1
@@ -455,14 +490,13 @@ class WatchToastCoordinator:
         with self._lock:
             if self._closed or generation != self._finalize_generation:
                 return
-            requests = self._visible_requests_locked()
-            if not requests or any(not request.outcome for request in requests):
+            if not self._batch.completed or self._visible_requests_locked():
                 return
-            succeeded = [request for request in requests if request.outcome == "success"]
-            failed = [request for request in requests if request.outcome == "failure"]
+            batch = self._batch
+            succeeded, failed = batch.succeeded, batch.failed
             duration = self.i18n.format_duration(time.monotonic() - self._batch_started_at)
             actions: list[ToastAction] = []
-            output_target = _common_output_target([path for request in succeeded for path in request.output_dirs])
+            output_target = batch.output_target
             if output_target:
                 actions.append(ToastAction(
                     ToastActionKind.OPEN_DIRECTORY,
@@ -471,7 +505,7 @@ class WatchToastCoordinator:
                 ))
             if failed:
                 try:
-                    report_path = self.report_store.write(failed)
+                    report_path = self.report_store.write(batch.failure_details, failed)
                 except OSError:
                     report_path = ""
                 if report_path:
@@ -485,21 +519,20 @@ class WatchToastCoordinator:
                 title = self.i18n.t("toast.final.mixed.title")
                 body = self.i18n.t(
                     "toast.final.mixed.body",
-                    succeeded=len(succeeded),
-                    failed=len(failed),
+                    succeeded=succeeded,
+                    failed=failed,
                     duration=duration,
                 )
             elif failed:
                 kind = ToastSnapshotKind.FAILURE
                 title = self.i18n.t("toast.final.failure.title")
-                body = self.i18n.t("toast.final.failure.body", failed=len(failed), duration=duration)
+                body = self.i18n.t("toast.final.failure.body", failed=failed, duration=duration)
             else:
                 kind = ToastSnapshotKind.SUCCESS
                 title = self.i18n.t("toast.final.success.title")
-                body = self.i18n.t("toast.final.success.body", succeeded=len(succeeded), duration=duration)
-            warnings = [error for request in succeeded for error in request.errors]
-            if warnings:
-                body += "\n" + "\n".join(warnings)
+                body = self.i18n.t("toast.final.success.body", succeeded=succeeded, duration=duration)
+            if batch.warnings:
+                body += "\n" + batch.warnings
             self.host.publish(ToastSnapshot(
                 kind=kind,
                 batch_id=self._batch_id,
@@ -507,18 +540,30 @@ class WatchToastCoordinator:
                 body=body,
                 actions=tuple(actions[:2]),
             ))
-            self._requests = {
-                request_id: request
-                for request_id, request in self._requests.items()
-                if not request.visible
-            }
             self._reset_batch_locked(clear=False)
 
     def _reset_batch_locked(self, *, clear: bool) -> None:
         self._batch_id = ""
         self._batch_started_at = 0.0
+        self._batch = _BatchProgress()
         if clear:
             self.host.clear()
+
+
+def _bounded_text(parts: Iterable[str], limit: int) -> str:
+    if limit <= 0:
+        return ""
+    chunks = []
+    remaining = limit
+    for part in parts:
+        if len(part) > remaining:
+            chunks.append(part[:max(0, remaining - 1)] + "…")
+            break
+        chunks.append(part)
+        remaining -= len(part)
+        if not remaining:
+            break
+    return "".join(chunks)
 
 
 def _task_name(task: Any, fallback: str) -> str:

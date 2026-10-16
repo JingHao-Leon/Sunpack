@@ -1,6 +1,7 @@
 use crate::analysis_native::volume_anchor::{
     probe_volume_anchor_at_offset, probe_volume_anchor_paths_cheap, VolumeAnchor,
 };
+use crate::path_keys::{case_key, path_key};
 use crate::scan::directory::NativeDirectorySnapshot;
 use crate::scan::executable_carrier::executable_sfx_stub_profile;
 use crate::scan::pe_overlay::{
@@ -174,7 +175,7 @@ impl<'a> RelationCandidateData<'a> {
             NativeRelationGroup::Ordinary(row, _) => row.size,
             NativeRelationGroup::Proposal(validation, _) => validation
                 .anchors
-                .get(&self.entry_path.to_ascii_lowercase())
+                .get(&path_key(self.entry_path))
                 .map(|anchor| anchor.size),
         }
     }
@@ -195,7 +196,7 @@ impl NativeRelationGroup {
             Self::Ordinary(row, _) => row.anchor.as_ref(),
             Self::Proposal(validation, _) => validation
                 .anchors
-                .get(&self.candidate_data().entry_path.to_ascii_lowercase()),
+                .get(&path_key(self.candidate_data().entry_path)),
         }
     }
 
@@ -365,7 +366,7 @@ pub(crate) fn build_native_candidate_groups_from_snapshot_cached(
         .rows
         .iter()
         .filter(|&&row| !filtered_snapshot.table.is_dirs[row])
-        .map(|&row| filtered_snapshot.table.paths[row].to_ascii_lowercase())
+        .map(|&row| path_key(&filtered_snapshot.table.paths[row]))
         .collect();
     if filtered_keys.is_empty() {
         return Ok(Vec::new());
@@ -435,16 +436,16 @@ fn build_candidate_groups_from_source(
                     .proposal
                     .volumes
                     .iter()
-                    .any(|part| filtered_keys.contains(&part.0.to_ascii_lowercase()))
+                    .any(|part| filtered_keys.contains(&path_key(&part.0)))
                     || validation
                         .unresolved
                         .iter()
-                        .any(|path| filtered_keys.contains(&path.to_ascii_lowercase()))
+                        .any(|path| filtered_keys.contains(&path_key(path)))
                     || validation
                         .proposal
                         .companions
                         .iter()
-                        .any(|path| filtered_keys.contains(&path.to_ascii_lowercase()))
+                        .any(|path| filtered_keys.contains(&path_key(path)))
             })
             .collect();
 
@@ -666,7 +667,7 @@ fn promote_sfx_archive_anchor(
     let password = path_passwords.and_then(|items| {
         items
             .iter()
-            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(&path))
+            .find(|(candidate, _)| path_key(candidate) == path_key(&path))
             .map(|(_, password)| password.clone())
     });
     let format_for_probe = format;
@@ -692,19 +693,14 @@ fn proposal_owned_paths(proposal: &RelationProposal) -> HashSet<String> {
     proposal
         .volumes
         .iter()
-        .map(|(path, _, _, _, _)| path.to_ascii_lowercase())
-        .chain(
-            proposal
-                .companions
-                .iter()
-                .map(|path| path.to_ascii_lowercase()),
-        )
+        .map(|(path, _, _, _, _)| path_key(path))
+        .chain(proposal.companions.iter().map(|path| path_key(path)))
         .collect()
 }
 
 fn validation_owned_paths(validation: &ProposalValidation) -> HashSet<String> {
     let mut paths = proposal_owned_paths(&validation.proposal);
-    paths.extend(validation.unresolved.iter().map(|p| p.to_ascii_lowercase()));
+    paths.extend(validation.unresolved.iter().map(|p| path_key(p)));
     paths
 }
 
@@ -871,7 +867,7 @@ fn validated_proposal_to_dict(
         .find(|(_, number, _, _, _)| *number == 1)
         .unwrap_or(&proposal.volumes[0]);
     let head_path = &head.0;
-    let head_anchor = validation.anchors.get(&head_path.to_ascii_lowercase());
+    let head_anchor = validation.anchors.get(&path_key(&head_path));
     let split_family = proposal_split_family(proposal, &validation.anchors);
     let relation = FileRelationNative {
         filename: basename(head_path).to_string(),
@@ -902,7 +898,7 @@ fn validated_proposal_to_dict(
         .then(|| {
             validation
                 .anchors
-                .get(&carrier.to_ascii_lowercase())
+                .get(&path_key(&carrier))
                 .map(|anchor| anchor.size)
         })
         .flatten();
@@ -931,7 +927,7 @@ fn validated_proposal_to_dict(
     if proposal.format == "zip" {
         let mut logical_start = 0u64;
         for (path, _, _, _, _) in &proposal.volumes {
-            let Some(anchor) = validation.anchors.get(&path.to_ascii_lowercase()) else {
+            let Some(anchor) = validation.anchors.get(&path_key(path)) else {
                 break;
             };
             let start = anchor.structure_offset.unwrap_or(0);
@@ -1013,7 +1009,7 @@ fn proposal_logical_size(
         .iter()
         .try_fold(0u64, |total, (path, _, _, _, _)| {
             anchors
-                .get(&path.to_ascii_lowercase())
+                .get(&path_key(path))
                 .map(|anchor| total.saturating_add(anchor.size))
         })
 }
@@ -1032,7 +1028,7 @@ fn proposal_volume_dicts(
             let dict = PyDict::new(py);
             let role = if proposal.style == "zip_spanned"
                 && anchors
-                    .get(&path.to_ascii_lowercase())
+                    .get(&path_key(path))
                     .is_some_and(|anchor| anchor.anchor_roles.contains(&"terminal"))
             {
                 "terminal"
@@ -1053,7 +1049,7 @@ fn proposal_volume_dicts(
             dict.set_item("prefix", &proposal.logical_name)?;
             dict.set_item("width", *width)?;
             if let Some(start) = anchors
-                .get(&path.to_ascii_lowercase())
+                .get(&path_key(path))
                 .and_then(|anchor| anchor.structure_offset)
                 .filter(|offset| *offset > 0)
             {
@@ -1079,7 +1075,7 @@ fn proposal_split_family(
             .volumes
             .iter()
             .find(|(_, number, _, _, _)| *number == 1)
-            .and_then(|(path, _, _, _, _)| anchors.get(&path.to_ascii_lowercase()))
+            .and_then(|(path, _, _, _, _)| anchors.get(&path_key(path)))
             .map(|anchor| anchor.evidence.as_slice())
             .unwrap_or(&[]);
         let old_naming = head_evidence.contains(&"rar4:old_volume_naming");
@@ -1155,25 +1151,25 @@ pub(crate) fn relations_resolve_volume_once(
     let anchors = py.detach(|| probe_volume_anchor_paths_cheap(&visible_paths, None));
     let anchor_by_path: HashMap<String, VolumeAnchor> = anchors
         .into_iter()
-        .map(|anchor| (anchor.path.to_ascii_lowercase(), anchor))
+        .map(|anchor| (path_key(&anchor.path), anchor))
         .collect();
     let rows: Vec<_> = visible_paths
         .iter()
         .map(|path| RelationInput {
             path: path.clone(),
-            path_key: path.to_ascii_lowercase(),
+            path_key: path_key(path),
             name: basename(path).to_string(),
             size: anchor_by_path
-                .get(&path.to_ascii_lowercase())
+                .get(&path_key(path))
                 .map(|anchor| anchor.size),
             relation_member_eligible: true,
-            anchor: anchor_by_path.get(&path.to_ascii_lowercase()).cloned(),
+            anchor: anchor_by_path.get(&path_key(path)).cloned(),
         })
         .collect();
     let filtered_keys: HashSet<String> = current_paths
         .iter()
         .filter(|path| parent_directory_key(path) == directory)
-        .map(|path| path.to_ascii_lowercase())
+        .map(|path| path_key(path))
         .collect();
     let groups = build_candidate_groups_from_source(
         py,
@@ -1194,7 +1190,7 @@ pub(crate) fn relations_resolve_volume_once(
         if current_paths.iter().all(|current| {
             data.parts()
                 .chain(data.companions.iter().map(String::as_str))
-                .any(|part| part.eq_ignore_ascii_case(current))
+                .any(|part| path_key(part) == path_key(current))
         }) {
             return group.to_dict(py).map(Some);
         }
@@ -1203,17 +1199,18 @@ pub(crate) fn relations_resolve_volume_once(
 }
 
 fn sorted_unique_paths(mut paths: Vec<String>) -> Vec<String> {
-    paths.sort_by_key(|path| path.to_ascii_lowercase());
-    paths.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    paths.sort_by_cached_key(|path| path_key(path));
+    paths.dedup_by(|left, right| path_key(left) == path_key(right));
     paths
 }
 
 fn parent_directory_key(path: &str) -> String {
-    Path::new(path)
-        .parent()
-        .map(|value| value.to_string_lossy().to_string())
-        .unwrap_or_default()
-        .to_ascii_lowercase()
+    path_key(
+        &Path::new(path)
+            .parent()
+            .map(|value| value.to_string_lossy().to_string())
+            .unwrap_or_default(),
+    )
 }
 
 fn single_directory_scope(paths: &[String]) -> Option<String> {
@@ -1498,11 +1495,7 @@ fn may_have_size_deferred_split_identity(path: &str) -> bool {
 }
 
 fn split_size_family_key(scheme: &str, prefix: &str) -> String {
-    format!(
-        "{}\u{001f}{}",
-        scheme,
-        prefix.replace('\\', "/").to_ascii_lowercase()
-    )
+    format!("{}\u{001f}{}", scheme, case_key(&prefix.replace('\\', "/")))
 }
 
 #[cfg(test)]
@@ -1666,7 +1659,7 @@ fn parse_zip_split_volume(filename: &str) -> Option<ParsedVolume> {
 
 fn push_unique_volume_candidate(candidates: &mut Vec<ParsedVolume>, candidate: ParsedVolume) {
     if candidates.iter().any(|existing| {
-        existing.prefix.eq_ignore_ascii_case(&candidate.prefix)
+        case_key(&existing.prefix) == case_key(&candidate.prefix)
             && existing.number == candidate.number
             && existing.style == candidate.style
             && existing.family == candidate.family

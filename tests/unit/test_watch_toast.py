@@ -106,6 +106,69 @@ def test_aggregate_progress_regresses_when_a_new_archive_joins(tmp_path):
     coordinator.stop()
 
 
+def test_busy_batch_releases_completed_requests_and_bounds_failure_details(tmp_path):
+    # A continuously active request prevents finalization. Normal drained-batch
+    # tests miss retention and repeated progress scans of completed payloads.
+    host = _Host()
+    config = _config(debounce_ms=60_000)
+    config["watch"]["toast_report_max_bytes"] = 1024
+    coordinator = WatchToastCoordinator(host, config, str(tmp_path / "state"))
+    active = _task(tmp_path / "active.zip")
+    coordinator.submitted("active", active.main_path)
+    _ready(coordinator, "active", active)
+    output = tmp_path / "output"
+    output.mkdir()
+    for index in range(40):
+        key = str(index)
+        task = _task(tmp_path / f"{key}.zip")
+        coordinator.submitted(key, task.main_path)
+        _ready(coordinator, key, task)
+        if index % 2:
+            coordinator.failed(key, ["failed"], [{"message": "x" * 4096}])
+        else:
+            coordinator.succeeded(key, [str(output)])
+    assert set(coordinator._requests) == {"active"}
+    assert coordinator._batch.succeeded == coordinator._batch.failed == 20
+    assert coordinator._batch.failure_chars <= coordinator.report_store.max_bytes // 4
+    assert len(coordinator._batch.failure_details) < coordinator._batch.failed
+    assert host.snapshots[-1].progress_value == pytest.approx(4001 / 4100)
+    coordinator.succeeded("active", [])
+    coordinator._finalize(coordinator._finalize_generation)
+    terminal = _terminal_snapshots(host)[-1]
+    assert terminal.kind == ToastSnapshotKind.MIXED
+    assert terminal.actions[0].target == str(output)
+    report = Path(terminal.actions[-1].target).read_text(encoding="utf-8")
+    assert "20" in report and "omitted" in report
+    assert coordinator._batch.completed == 0
+    coordinator.stop()
+
+
+def test_space_waits_are_released_for_every_request_exit(tmp_path):
+    # Suppression/abort and invisible failures bypass normal completion; two
+    # concurrent jobs in one episode must retain only the surviving owner's job.
+    for finish in ("suppressed", "aborted", "failed", "succeeded", "stop"):
+        coordinator = WatchToastCoordinator(_Host(), _config(), str(tmp_path / "state"))
+        for key in ("first", "second"):
+            task = _task(tmp_path / f"{key}.zip")
+            coordinator.submitted(key, task.main_path)
+            coordinator.progress(key, task, {
+                "event": "space_blocked", "volume_key": "C:", "episode_id": 1, "job_id": key,
+            })
+        if finish == "stop":
+            coordinator.stop()
+        elif finish == "failed":
+            coordinator.failed("first", ["failed"], [])
+        elif finish == "succeeded":
+            coordinator.succeeded("first", [])
+        else:
+            getattr(coordinator, finish)("first")
+        if finish != "stop":
+            assert coordinator._space_blocked_jobs == {("C:", 1): {"second"}}
+            coordinator.aborted("second")
+        assert coordinator._space_blocked_jobs_empty()
+        coordinator.stop()
+
+
 def test_concurrent_requests_emit_one_unified_success_after_debounce(tmp_path):
     host = _Host()
     coordinator = WatchToastCoordinator(host, _config(debounce_ms=30), str(tmp_path / "state"))
@@ -224,6 +287,17 @@ def test_password_or_missing_volume_suppression_never_creates_a_final_toast(tmp_
     time.sleep(0.04)
     assert _terminal_snapshots(host) == []
     assert host.clear_count == 1
+
+    # Suppressing one member must also update the remaining single-archive name.
+    remaining = _task(tmp_path / "remaining.zip")
+    coordinator.submitted("missing", task.main_path)
+    coordinator.submitted("remaining", remaining.main_path)
+    _ready(coordinator, "missing", task)
+    _ready(coordinator, "remaining", remaining)
+    coordinator.suppressed("missing")
+    assert "remaining.zip" in host.snapshots[-1].progress_title
+    coordinator.succeeded("remaining", [])
+    assert "remaining.zip" in host.snapshots[-1].progress_title
     coordinator.stop()
 
 

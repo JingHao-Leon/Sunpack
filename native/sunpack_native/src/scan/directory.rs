@@ -396,18 +396,29 @@ pub(crate) fn merge_output_inventories(
         let root_path = lexical_normalize_path(Path::new(&root));
         let root_depth = root_path.components().count();
         let mut child_roots: Vec<PathBuf> = Vec::with_capacity(inventories.len());
+        let root_key = inventory_path_key(&path_to_string(&root_path));
+        let mut child_keys = Vec::with_capacity(inventories.len());
         for inventory in &inventories {
             let child = lexical_normalize_path(Path::new(&inventory.root));
-            if !path_is_within_root(&child, &root_path)
-                || child_roots.iter().any(|previous| {
-                    path_is_within_root(previous, &child) || path_is_within_root(&child, previous)
-                })
-            {
+            let key = inventory_path_key(&path_to_string(&child));
+            if !Path::new(&key).starts_with(Path::new(&root_key)) {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "output inventory roots must be disjoint and within the merged root",
                 ));
             }
+            // Component ordering keeps a directory adjacent to its descendants,
+            // even when a sibling contains punctuation before the separator.
+            child_keys.push(key);
             child_roots.push(child);
+        }
+        child_keys.sort_unstable_by(|left, right| Path::new(left).cmp(Path::new(right)));
+        if child_keys
+            .windows(2)
+            .any(|pair| Path::new(&pair[1]).starts_with(Path::new(&pair[0])))
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "output inventory roots must be disjoint and within the merged root",
+            ));
         }
         let mut files = Vec::with_capacity(
             inventories

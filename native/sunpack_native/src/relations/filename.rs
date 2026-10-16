@@ -1,4 +1,5 @@
 use super::{first_dot_stem, logical_name_from_parsed, parse_volume_candidates, ParsedVolume};
+use crate::path_keys::case_key;
 
 #[derive(Debug, Clone)]
 pub(super) struct NumberOccurrence {
@@ -77,7 +78,7 @@ impl NameFeatures {
             .iter()
             .find(|p| p.family == format)
             .map(logical_name_from_parsed)
-            .map(|s| s.to_ascii_lowercase())
+            .map(|s| case_key(&s))
     }
 }
 
@@ -120,7 +121,7 @@ impl NumberChannel {
                                 && p.style == "rar_sfx_part"))
                         && family
                             .as_ref()
-                            .is_none_or(|f| logical_name_from_parsed(p).eq_ignore_ascii_case(f))
+                            .is_none_or(|f| case_key(&logical_name_from_parsed(p)) == *f)
                 });
                 let value = found.next()?.number;
                 found.all(|p| p.number == value).then_some(value)
@@ -160,5 +161,5 @@ impl NumberChannel {
 pub(super) fn logical_name(name: &str, features: &NameFeatures, format: &str) -> String {
     features
         .family(format)
-        .unwrap_or_else(|| first_dot_stem(name).to_ascii_lowercase())
+        .unwrap_or_else(|| case_key(first_dot_stem(name)))
 }

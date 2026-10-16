@@ -551,7 +551,7 @@ pub(super) fn resolve_buckets(
                 };
                 if profile_matches {
                     launchers
-                        .entry(get_logical_name(&rows[i].name, false).to_ascii_lowercase())
+                        .entry(case_key(&get_logical_name(&rows[i].name, false)))
                         .or_default()
                         .push(i);
                 }
@@ -604,9 +604,8 @@ pub(super) fn resolve_buckets(
                     family.clone()
                 };
                 if reason.is_none() {
-                    if let Some(matching) = launchers
-                        .get(&logical.to_ascii_lowercase())
-                        .filter(|m| m.len() == 1)
+                    if let Some(matching) =
+                        launchers.get(&case_key(&logical)).filter(|m| m.len() == 1)
                     {
                         assignment.companions = matching.clone();
                     }

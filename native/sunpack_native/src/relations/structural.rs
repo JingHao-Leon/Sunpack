@@ -134,7 +134,7 @@ pub(super) fn collect(
     let password_map: HashMap<_, _> = passwords
         .into_iter()
         .flatten()
-        .map(|(p, password)| (p.to_ascii_lowercase(), password.as_str()))
+        .map(|(p, password)| (path_key(p), password.as_str()))
         .collect();
     let encrypted: Vec<_> = index
         .entries_by_path
@@ -151,7 +151,7 @@ pub(super) fn collect(
     if !encrypted.is_empty() {
         let upgraded = py.detach(|| probe_volume_anchor_paths_cheap(&encrypted, passwords));
         for anchor in upgraded {
-            if let Some(i) = index.entries_by_path.get(&anchor.path.to_ascii_lowercase()) {
+            if let Some(i) = index.entries_by_path.get(&path_key(&anchor.path)) {
                 // Embedded SFX headers need their known archive offset.
                 if rows[*i]
                     .anchor

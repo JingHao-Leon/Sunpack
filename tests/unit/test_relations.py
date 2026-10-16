@@ -24,6 +24,33 @@ def _groups(tmp_path: Path):
     return RelationsScheduler().build_candidate_groups(DirectoryScanner(str(tmp_path), config=make_config()).scan())
 
 
+def test_windows_case_mapping_groups_split_families_without_unicode_expansion(tmp_path):
+    from sunpack_native import windows_path_key
+
+    # ASCII-only tests miss NT case equivalents; casefold would also merge the
+    # two distinct Straße/STRASSE archives. Exercise scan and missing-volume retry.
+    payload = make_minimal_7z()
+    families = [("Ä", "ä"), ("Ö", "ö"), ("Straße", "straße"), ("STRASSE", "strasse")]
+    expected = []
+    for head, tail in families:
+        paths = [tmp_path / f"{head}.7z.001.fake", tmp_path / f"{tail}.7z.002.photo"]
+        paths[0].write_bytes(payload[:32])
+        paths[1].write_bytes(payload[32:])
+        expected.append({windows_path_key(str(path)) for path in paths})
+    groups = _groups(tmp_path)
+    assert len(groups) == len(families)
+    assert all(group.kind == "split_archive" for group in groups)
+    assert {frozenset(windows_path_key(path) for path in group.input_paths) for group in groups} == {
+        frozenset(paths) for paths in expected
+    }
+    candidates = [str(path) for path in tmp_path.iterdir()]
+    for paths in expected:
+        current = min(paths).replace("\\", "/")
+        group = RelationsScheduler().resolve_volume_once([current], candidates, format_hint="7z")
+        assert group is not None
+        assert {windows_path_key(path) for path in group.input_paths} == paths
+
+
 def test_deleted_lz4_wrapped_head_cannot_join_readable_split_family(tmp_path):
     from tests.helpers.native_fixture import create_lz4_frames
 

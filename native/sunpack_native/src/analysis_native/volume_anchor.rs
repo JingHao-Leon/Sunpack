@@ -180,7 +180,7 @@ fn probe_volume_anchor_paths_with_depth(
         .map(|items| {
             items
                 .iter()
-                .map(|(path, password)| (path.to_ascii_lowercase(), password.as_str()))
+                .map(|(path, password)| (crate::path_keys::path_key(path), password.as_str()))
                 .collect()
         })
         .unwrap_or_default();
@@ -192,7 +192,7 @@ fn probe_volume_anchor_paths_with_depth(
                     path,
                     prefix_limit,
                     tail_limit,
-                    password_map.get(&path.to_ascii_lowercase()).copied(),
+                    password_map.get(&crate::path_keys::path_key(path)).copied(),
                     depth,
                 )
             })

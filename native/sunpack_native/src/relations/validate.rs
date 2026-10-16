@@ -19,7 +19,7 @@ pub(super) fn validate(validation: &mut ProposalValidation) {
     }
     let proposal = &validation.proposal;
     let anchors = &validation.anchors;
-    let get = |path: &str| anchors.get(&path.to_ascii_lowercase());
+    let get = |path: &str| anchors.get(&path_key(path));
     if proposal
         .volumes
         .iter()

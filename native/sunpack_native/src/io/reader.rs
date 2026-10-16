@@ -2,7 +2,7 @@ use crate::io::read_fault::{FieldLocation, ReadFault};
 use crate::io::resource_lifecycle::TrackedFile;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyList};
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{self, Read, Seek, SeekFrom};
@@ -1282,6 +1282,17 @@ struct MultiVolumeSource {
 }
 
 impl MultiVolumeSource {
+    /// Ordered physical extents share this lookup across every read mode.
+    fn overlapping(&self, offset: u64, end: u64) -> std::ops::Range<usize> {
+        if offset >= end {
+            return 0..0;
+        }
+        let first = self.volumes.partition_point(|volume| volume.end <= offset);
+        let tail = &self.volumes[first..];
+        let count = tail.partition_point(|volume| volume.start < end);
+        first..first + count
+    }
+
     fn open(paths: &[String]) -> io::Result<Self> {
         if paths.is_empty() {
             return Err(io::Error::new(
@@ -1322,10 +1333,7 @@ impl ByteSource for MultiVolumeSource {
         let len = len.min((self.len - offset) as usize);
         let end = offset + len as u64;
         let mut output = Vec::with_capacity(len);
-        for volume in &self.volumes {
-            if offset >= volume.end || end <= volume.start {
-                continue;
-            }
+        for volume in &self.volumes[self.overlapping(offset, end)] {
             let logical_start = offset.max(volume.start);
             let logical_end = end.min(volume.end);
             let chunk_len = (logical_end - logical_start) as usize;
@@ -1349,10 +1357,7 @@ impl ByteSource for MultiVolumeSource {
         let len = buffer.len().min((self.len - offset) as usize);
         let end = offset + len as u64;
         let mut written = 0usize;
-        for volume in &self.volumes {
-            if offset >= volume.end || end <= volume.start {
-                continue;
-            }
+        for volume in &self.volumes[self.overlapping(offset, end)] {
             let logical_start = offset.max(volume.start);
             let logical_end = end.min(volume.end);
             let chunk_len = (logical_end - logical_start) as usize;
@@ -1375,10 +1380,7 @@ impl ByteSource for MultiVolumeSource {
         let len = len.min((self.len - offset) as usize);
         let end = offset + len as u64;
         let mut slices = Vec::new();
-        for volume in &self.volumes {
-            if offset >= volume.end || end <= volume.start {
-                continue;
-            }
+        for volume in &self.volumes[self.overlapping(offset, end)] {
             let logical_start = offset.max(volume.start);
             let logical_end = end.min(volume.end);
             let chunk_len = (logical_end - logical_start) as usize;
@@ -1395,20 +1397,25 @@ impl ByteSource for MultiVolumeSource {
     }
 
     fn prefetch(&self, ranges: &[(u64, usize)]) -> io::Result<()> {
-        for volume in &self.volumes {
-            let mapped = ranges
-                .iter()
-                .filter_map(|&(offset, len)| {
-                    let end = offset.saturating_add(len as u64).min(self.len);
-                    if offset >= volume.end || end <= volume.start {
-                        return None;
-                    }
-                    let start = offset.max(volume.start);
-                    let end = end.min(volume.end);
-                    Some((start - volume.start, (end - start) as usize))
-                })
-                .collect::<Vec<_>>();
-            volume.source.prefetch(&mapped)?;
+        let mut mapped: BTreeMap<usize, Vec<(u64, usize)>> = BTreeMap::new();
+        for &(offset, len) in ranges {
+            let end = offset.saturating_add(len as u64).min(self.len);
+            for index in self.overlapping(offset, end) {
+                let volume = &self.volumes[index];
+                let start = offset.max(volume.start);
+                let end = end.min(volume.end);
+                if start < end {
+                    // Keep per-volume batching and physical order without scanning
+                    // unrelated volumes or issuing empty prefetch calls.
+                    mapped
+                        .entry(index)
+                        .or_default()
+                        .push((start - volume.start, (end - start) as usize));
+                }
+            }
+        }
+        for (index, ranges) in mapped {
+            self.volumes[index].source.prefetch(&ranges)?;
         }
         Ok(())
     }
@@ -1420,10 +1427,7 @@ impl ByteSource for MultiVolumeSource {
         let len = len.min((self.len - offset) as usize);
         let end = offset + len as u64;
         let mut output = Vec::with_capacity(len);
-        for volume in &self.volumes {
-            if offset >= volume.end || end <= volume.start {
-                continue;
-            }
+        for volume in &self.volumes[self.overlapping(offset, end)] {
             let logical_start = offset.max(volume.start);
             let logical_end = end.min(volume.end);
             let chunk_len = (logical_end - logical_start) as usize;
@@ -2846,10 +2850,40 @@ mod tests {
     fn multi_volume_reads_across_boundary() {
         let first = temp_file("managed_reader_part1", b"abc");
         let second = temp_file("managed_reader_part2", b"def");
+        let empty = temp_file("managed_reader_empty_part", b"");
         let paths = vec![
+            empty.to_string_lossy().into_owned(),
             first.to_string_lossy().into_owned(),
+            empty.to_string_lossy().into_owned(),
             second.to_string_lossy().into_owned(),
+            empty.to_string_lossy().into_owned(),
         ];
+        // One coarse matrix covers all read modes, zero-length volumes, clipped
+        // EOF and out-of-order prefetch. Two nonempty volumes alone miss these.
+        let source = MultiVolumeSource::open(&paths).unwrap();
+        source
+            .prefetch(&[(2, 5), (0, 0), (4, 100), (1, 2), (u64::MAX, 10)])
+            .unwrap();
+        for offset in 0..=7u64 {
+            for length in 0..=8usize {
+                let start = (offset as usize).min(6);
+                let end = start.saturating_add(length).min(6);
+                let expected = &b"abcdef"[start..end];
+                assert_eq!(source.read_at(offset, length).unwrap(), expected);
+                assert_eq!(source.read_direct_at(offset, length).unwrap(), expected);
+                let mut buffer = vec![0; length];
+                let written = source.read_into_at(offset, &mut buffer).unwrap();
+                assert_eq!(&buffer[..written], expected);
+                let slices = source.read_slices_at(offset, length).unwrap();
+                assert_eq!(
+                    slices
+                        .iter()
+                        .flat_map(|slice| slice.iter().copied())
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+            }
+        }
         let reader = ManagedReader::open_volumes(&paths, ReaderConfig::default()).unwrap();
         assert_eq!(reader.read_at(2, 3).unwrap(), b"cde");
         let mut cursor = reader.cursor();
@@ -2859,6 +2893,7 @@ mod tests {
         assert_eq!(&data, b"cde");
         let _ = std::fs::remove_file(first);
         let _ = std::fs::remove_file(second);
+        let _ = std::fs::remove_file(empty);
     }
 
     #[test]

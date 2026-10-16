@@ -43,7 +43,7 @@ impl<'a> RelationSource<'a> {
     fn anchor(&self, row: usize) -> Option<&'a VolumeAnchor> {
         match self {
             Self::Snapshot(snapshot, cached) => cached
-                .and_then(|cache| cache.anchors.get(&self.path(row).to_ascii_lowercase()))
+                .and_then(|cache| cache.anchors.get(&path_key(self.path(row))))
                 .or(snapshot.table.relation_anchors[row].as_ref()),
             Self::Physical(rows) => rows[row].anchor.as_ref(),
         }
@@ -59,7 +59,7 @@ impl<'a> RelationSource<'a> {
         };
         RelationInput {
             path: self.path(row).to_owned(),
-            path_key: self.path(row).to_ascii_lowercase(),
+            path_key: path_key(self.path(row)),
             name: self.name(row).to_owned(),
             size,
             relation_member_eligible,
@@ -68,17 +68,29 @@ impl<'a> RelationSource<'a> {
     }
 }
 
-/// Same equality as to_ascii_lowercase(), with no owned path/stem copy.
-#[derive(Clone, Copy, Debug)]
-struct AsciiKey<'a>(&'a str);
+/// Keep ASCII scans allocation-free; non-ASCII names use the shared Windows map.
+#[derive(Clone, Debug)]
+struct CaseKey<'a>(Cow<'a, str>);
 
-impl PartialEq for AsciiKey<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.eq_ignore_ascii_case(other.0)
+impl<'a> CaseKey<'a> {
+    fn new(value: &'a str) -> Self {
+        Self(if value.contains('/') {
+            Cow::Owned(path_key(value))
+        } else if value.is_ascii() {
+            Cow::Borrowed(value)
+        } else {
+            Cow::Owned(case_key(value))
+        })
     }
 }
-impl Eq for AsciiKey<'_> {}
-impl Hash for AsciiKey<'_> {
+
+impl PartialEq for CaseKey<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.eq_ignore_ascii_case(&other.0)
+    }
+}
+impl Eq for CaseKey<'_> {}
+impl Hash for CaseKey<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.0.len().hash(state);
         // Feed folded bytes in blocks rather than making one hash call per byte.
@@ -92,8 +104,8 @@ impl Hash for AsciiKey<'_> {
     }
 }
 
-fn directory_key(path: &str) -> AsciiKey<'_> {
-    AsciiKey(
+fn directory_key(path: &str) -> CaseKey<'_> {
+    CaseKey::new(
         Path::new(path)
             .parent()
             .and_then(|parent| parent.to_str())
@@ -103,8 +115,8 @@ fn directory_key(path: &str) -> AsciiKey<'_> {
 
 #[derive(Default)]
 struct DirectoryRows<'a> {
-    selected_stems: HashSet<AsciiKey<'a>>,
-    active_stems: HashSet<AsciiKey<'a>>,
+    selected_stems: HashSet<CaseKey<'a>>,
+    active_stems: HashSet<CaseKey<'a>>,
     rows: Vec<usize>,
 }
 
@@ -114,18 +126,18 @@ pub(super) struct RelationScopeIndex {
 
 impl RelationScopeIndex {
     pub fn build(source: &RelationSource<'_>, filtered_keys: &HashSet<String>) -> Self {
-        let selected: HashSet<_> = filtered_keys.iter().map(|key| AsciiKey(key)).collect();
+        let selected: HashSet<_> = filtered_keys.iter().map(|key| CaseKey::new(key)).collect();
         let mut selected_rows = HashSet::new();
-        let mut directories: HashMap<AsciiKey<'_>, DirectoryRows<'_>> = HashMap::new();
+        let mut directories: HashMap<CaseKey<'_>, DirectoryRows<'_>> = HashMap::new();
         for row in source.indices() {
             let path = source.path(row);
-            if selected.contains(&AsciiKey(path)) {
+            if selected.contains(&CaseKey::new(path)) {
                 selected_rows.insert(row);
                 directories
                     .entry(directory_key(path))
                     .or_default()
                     .selected_stems
-                    .insert(AsciiKey(first_dot_stem(source.name(row))));
+                    .insert(CaseKey::new(first_dot_stem(source.name(row))));
             }
         }
 
@@ -138,10 +150,10 @@ impl RelationScopeIndex {
             // Preserve first physical appearance, even if that first row was
             // not selected. Filtering before recording order would reorder roots.
             if directory.rows.is_empty() {
-                order.push(key);
+                order.push(key.clone());
             }
             directory.rows.push(row);
-            let stem = AsciiKey(first_dot_stem(source.name(row)));
+            let stem = CaseKey::new(first_dot_stem(source.name(row)));
             if directory.selected_stems.contains(&stem)
                 && source.anchor(row).is_some_and(BucketIndex::has_seed)
             {
@@ -161,7 +173,7 @@ impl RelationScopeIndex {
                             selected_rows.contains(row)
                                 || directory
                                     .active_stems
-                                    .contains(&AsciiKey(first_dot_stem(source.name(*row))))
+                                    .contains(&CaseKey::new(first_dot_stem(source.name(*row))))
                         })
                         .collect()
                 })
@@ -177,7 +189,7 @@ mod tests {
     fn row(path: &str, seed: bool, eligible: bool) -> RelationInput {
         RelationInput {
             path: path.into(),
-            path_key: path.to_ascii_lowercase(),
+            path_key: path_key(path),
             name: basename(path).into(),
             size: Some(17),
             relation_member_eligible: eligible,
@@ -244,12 +256,12 @@ mod tests {
     }
 
     #[test]
-    fn borrowed_keys_keep_ascii_only_case_equality_across_hash_blocks() {
+    fn borrowed_keys_follow_windows_case_equality_across_hash_blocks() {
         let upper = format!("{}Ä", "A".repeat(130));
         let lower = format!("{}Ä", "a".repeat(130));
         let unicode_lower = format!("{}ä", "a".repeat(130));
-        let keys = HashSet::from([AsciiKey(&upper)]);
-        assert!(keys.contains(&AsciiKey(&lower)));
-        assert!(!keys.contains(&AsciiKey(&unicode_lower)));
+        let keys = HashSet::from([CaseKey::new(&upper)]);
+        assert!(keys.contains(&CaseKey::new(&lower)));
+        assert_eq!(keys.contains(&CaseKey::new(&unicode_lower)), cfg!(windows));
     }
 }

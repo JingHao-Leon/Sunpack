@@ -1,6 +1,6 @@
 //! One structural LZ4 parser shared by routing, reports and embedded scanning.
 //! Walk block lengths; do not decode or hash payload during archive analysis.
-use crate::io::reader::ManagedReader;
+use crate::io::reader::{CachedBytes, ManagedReader};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::ffi::c_void;
@@ -37,20 +37,20 @@ pub(crate) fn leading(bytes: &[u8]) -> bool {
 
 pub(crate) fn identity(reader: &ManagedReader, offset: u64) -> Result<bool, &'static str> {
     let limit = reader.len();
+    let mut input = StructureReader::new(reader, limit, 32);
     let mut cursor = offset;
     for _ in 0..MAX_FRAMES {
-        let magic = word(reader, cursor, limit)?;
+        let magic = input.word(cursor)?;
         if skippable(magic) {
-            let size = word(reader, cursor + 4, limit)?;
+            let size = input.word(cursor + 4)?;
             advance(&mut cursor, 8 + u64::from(size), limit)?;
             continue;
         }
         if magic != 0x184d2204 {
             return Ok(false);
         }
-        let bytes = field(reader, cursor, ((limit - cursor).min(19)) as usize, limit)?;
-        let header = parse_header(&bytes)?;
-        let block = word(reader, cursor + header.len as u64, limit)?;
+        let header = parse_header(input.field(cursor, ((limit - cursor).min(19)) as usize)?)?;
+        let block = input.word(cursor + header.len as u64)?;
         return Ok(block & 0x7fffffff <= header.block_max);
     }
     Err("lz4_walk_budget_exhausted")
@@ -116,31 +116,53 @@ pub(crate) struct Index {
     pub(crate) complete: bool,
     pub(crate) error: &'static str,
 }
-fn field(
-    reader: &ManagedReader,
-    cursor: u64,
-    n: usize,
+// One bounded window per parse, never a process-wide cache. Length jumps still
+// skip payload, including large skippable frames and virtual multi-volume input.
+struct StructureReader<'a> {
+    reader: &'a ManagedReader,
     limit: u64,
-) -> Result<Vec<u8>, &'static str> {
-    if cursor.checked_add(n as u64).is_none_or(|end| end > limit) {
-        return Err("lz4_stream_truncated");
-    }
-    let data = reader.read_cached_at(cursor, n).map_err(|_| "os_error")?;
-    if data.len() != n {
-        return Err("lz4_stream_truncated");
-    }
-    Ok(data.as_slice().to_vec())
+    window_bytes: usize,
+    start: u64,
+    window: CachedBytes,
 }
-fn word(reader: &ManagedReader, cursor: u64, limit: u64) -> Result<u32, &'static str> {
-    if cursor.checked_add(4).is_none_or(|end| end > limit) {
-        return Err("lz4_stream_truncated");
+
+impl<'a> StructureReader<'a> {
+    fn new(reader: &'a ManagedReader, limit: u64, window_bytes: usize) -> Self {
+        Self {
+            reader,
+            limit,
+            window_bytes,
+            start: 0,
+            window: CachedBytes::default(),
+        }
     }
-    let data = reader.read_cached_at(cursor, 4).map_err(|_| "os_error")?;
-    let bytes: [u8; 4] = data
-        .as_slice()
-        .try_into()
-        .map_err(|_| "lz4_stream_truncated")?;
-    Ok(u32::from_le_bytes(bytes))
+
+    fn field(&mut self, cursor: u64, n: usize) -> Result<&[u8], &'static str> {
+        let end = cursor.checked_add(n as u64).ok_or("lz4_size_overflow")?;
+        if end > self.limit {
+            return Err("lz4_stream_truncated");
+        }
+        if cursor < self.start || end > self.start + self.window.len() as u64 {
+            self.start = cursor;
+            self.window = self
+                .reader
+                .read_cached_at(
+                    cursor,
+                    (self.limit - cursor).min(self.window_bytes as u64) as usize,
+                )
+                .map_err(|_| "os_error")?;
+        }
+        let from = (cursor - self.start) as usize;
+        self.window
+            .get(from..from + n)
+            .ok_or("lz4_stream_truncated")
+    }
+
+    fn word(&mut self, cursor: u64) -> Result<u32, &'static str> {
+        Ok(u32::from_le_bytes(
+            self.field(cursor, 4)?.try_into().unwrap(),
+        ))
+    }
 }
 fn advance(cursor: &mut u64, n: u64, limit: u64) -> Result<(), &'static str> {
     *cursor = cursor.checked_add(n).ok_or("lz4_size_overflow")?;
@@ -150,18 +172,33 @@ fn advance(cursor: &mut u64, n: u64, limit: u64) -> Result<(), &'static str> {
     Ok(())
 }
 pub(crate) fn walk(reader: &ManagedReader, offset: u64, limit: u64) -> Index {
+    walk_observed(reader, offset, limit, &mut |_| Ok(()))
+}
+
+pub(crate) fn walk_observed(
+    reader: &ManagedReader,
+    offset: u64,
+    limit: u64,
+    visit: &mut dyn FnMut(u64) -> Result<(), &'static str>,
+) -> Index {
     let mut index = Index {
         start: offset,
         end: offset,
         decoded_size: Some(0),
         ..Index::default()
     };
-    let result = walk_inner(reader, limit.min(reader.len()), &mut index);
+    let mut input = StructureReader::new(reader, limit.min(reader.len()), 16 * 1024);
+    let result = walk_inner(&mut input, &mut index, visit);
     index.error = result.err().unwrap_or("");
     index.complete = index.error.is_empty() && index.frames > 0;
     index
 }
-fn walk_inner(reader: &ManagedReader, limit: u64, index: &mut Index) -> Result<(), &'static str> {
+fn walk_inner(
+    input: &mut StructureReader<'_>,
+    index: &mut Index,
+    visit: &mut dyn FnMut(u64) -> Result<(), &'static str>,
+) -> Result<(), &'static str> {
+    let limit = input.limit;
     let mut cursor = index.start;
     loop {
         if cursor == limit {
@@ -171,10 +208,13 @@ fn walk_inner(reader: &ManagedReader, limit: u64, index: &mut Index) -> Result<(
         if index.frames + index.skips >= MAX_FRAMES {
             return Err("lz4_walk_budget_exhausted");
         }
+        // Share only actual frame nodes. Bytes skipped as payload can contain
+        // independent archives and must never inherit this suffix's failure.
+        visit(cursor)?;
         if limit - cursor < 4 {
             // A partial known magic is a truncated next frame, not carrier junk.
-            let tail = field(reader, cursor, (limit - cursor) as usize, limit)?;
-            if MAGIC.starts_with(&tail)
+            let tail = input.field(cursor, (limit - cursor) as usize)?;
+            if MAGIC.starts_with(tail)
                 || tail.first().is_some_and(|b| (0x50..=0x5f).contains(b))
                     && b"\x2a\x4d\x18".starts_with(&tail[1..])
             {
@@ -185,23 +225,22 @@ fn walk_inner(reader: &ManagedReader, limit: u64, index: &mut Index) -> Result<(
             }
             return Err("lz4_magic_not_found");
         }
-        let magic = word(reader, cursor, limit)?;
+        let magic = input.word(cursor)?;
         if skippable(magic) {
-            let size = word(reader, cursor + 4, limit)?;
+            let size = input.word(cursor + 4)?;
             advance(&mut cursor, 8 + u64::from(size), limit)?;
             index.skips += 1;
             index.end = cursor;
             continue;
         }
         if magic == 0x184d2204 {
-            let header = field(reader, cursor, ((limit - cursor).min(19)) as usize, limit)?;
-            let header = parse_header(&header)?;
+            let header = parse_header(input.field(cursor, ((limit - cursor).min(19)) as usize)?)?;
             advance(&mut cursor, header.len as u64, limit)?;
             loop {
                 if index.blocks >= MAX_RECORDS {
                     return Err("lz4_walk_budget_exhausted");
                 }
-                let value = word(reader, cursor, limit)?;
+                let value = input.word(cursor)?;
                 advance(&mut cursor, 4, limit)?;
                 if value == 0 {
                     break;

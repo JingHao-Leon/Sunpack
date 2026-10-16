@@ -964,7 +964,23 @@ fn validate_candidate(
                     return Ok(None);
                 }
             }
-            let index = crate::formats::lz4::walk(file, offset, file_size);
+            let mut incomplete = None;
+            let resolved = suffixes.validate(offset, true, |visit| {
+                let index =
+                    crate::formats::lz4::walk_observed(file, offset, file_size, &mut |node| {
+                        visit(node).map_err(|_| "known_failed_suffix")
+                    });
+                if index.complete {
+                    Ok(index)
+                } else {
+                    let error = index.error;
+                    incomplete = Some(index);
+                    Err(ValidationError::Invalid(error))
+                }
+            })?;
+            let Some(index) = resolved.or(incomplete) else {
+                return Ok(None);
+            };
             if index.frames == 0 {
                 return Ok(None);
             }
@@ -1686,6 +1702,9 @@ impl FailedSuffixEvidence {
                         | "zstd_block_count_exceeded"
                         | "decoded_size_overflow"
                         | "deflate_block_count_overflow"
+                        | "lz4_walk_budget_exhausted"
+                        | "lz4_size_overflow"
+                        | "os_error"
                 ) {
                     self.failed.extend(visited);
                 }
@@ -2196,6 +2215,47 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(matched.end_offset, Some(stream.len() as u64));
+    }
+
+    // Ordinary LZ4 fixtures cannot catch failed-suffix ownership hiding a real
+    // archive in skipped payload, or a root's frame budget poisoning its peers.
+    #[test]
+    fn lz4_failed_suffixes_keep_payload_roots_and_independent_budgets() {
+        use crate::io::reader::ReaderConfig;
+        let empty = b"\x04\x22\x4d\x18\x60\x40\x82\0\0\0\0";
+        let mut data = b"carrier".to_vec();
+        let root = data.len() as u64;
+        data.extend_from_slice(&empty.repeat(1024));
+        data.extend_from_slice(&empty[..7]);
+        data.extend_from_slice(&(0x80000000 | empty.len() as u32).to_le_bytes());
+        let inner = data.len() as u64;
+        data.extend_from_slice(empty);
+        data.extend_from_slice(&[0; 4]);
+        data.extend_from_slice(b"\x04\x22");
+
+        let budget_data = empty.repeat(65_537);
+        let budget_end = budget_data.len() as u64;
+        for (data, root, inner, inner_end) in [
+            (data, root, inner, inner + empty.len() as u64),
+            (budget_data, 0, empty.len() as u64, budget_end),
+        ] {
+            let mut hits = scan_sample(&data, 0, 0);
+            hits.sort_unstable_by_key(|hit| hit.offset);
+            let source = ManagedReader::from_bytes(
+                data.clone(),
+                ReaderConfig {
+                    max_read_bytes: Some(data.len() as u64 * 3),
+                    ..Default::default()
+                },
+            );
+            let candidates = validate_raw_hits(&source, source.len(), &hits, &[]).unwrap();
+            assert_eq!(candidates.len(), 2);
+            assert_eq!(candidates[0].offset, root);
+            assert_eq!(candidates[0].end_offset, None);
+            assert_eq!(candidates[1].offset, inner);
+            assert_eq!(candidates[1].end_offset, Some(inner_end));
+            assert!(source.stats().unwrap().read_bytes <= data.len() as u64 * 3);
+        }
     }
 
     // Ordinary peers do not exercise future roots discovered by an earlier

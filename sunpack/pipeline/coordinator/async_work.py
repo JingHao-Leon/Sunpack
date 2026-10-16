@@ -7,7 +7,7 @@ import threading
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Callable, Generic, TypeVar
+from typing import Any, Callable, Generic, TypeVar
 
 from sunpack.core.support.work_context import CURRENT_ORIGIN, CURRENT_WORK, WorkContext
 
@@ -246,59 +246,6 @@ class AsyncWorkBroker:
             if not future.done():
                 future.cancel()
             raise
-
-    async def stream(
-        self,
-        stage: str,
-        file_id: str,
-        producer: Callable[[Callable[[T], None]], Any],
-        *,
-        request_id: str = "",
-        cancellation: CancellationToken | None = None,
-        max_buffer: int = 64,
-    ) -> AsyncIterator[T]:
-        """Bridge a blocking callback producer into a bounded async stream."""
-
-        self.bind()
-        loop = asyncio.get_running_loop()
-        queue: asyncio.Queue[tuple[bool, Any]] = asyncio.Queue(maxsize=max(1, max_buffer))
-        token = cancellation or CancellationToken()
-
-        def emit(value: T) -> None:
-            token.raise_if_cancelled()
-            submitted = asyncio.run_coroutine_threadsafe(queue.put((True, value)), loop)
-            submitted.result()
-
-        async def drive() -> None:
-            try:
-                await self.run(
-                    stage,
-                    file_id,
-                    producer,
-                    emit,
-                    request_id=request_id,
-                    cancellation=token,
-                )
-            except BaseException as exc:
-                await queue.put((False, exc))
-            else:
-                await queue.put((False, None))
-
-        driver = asyncio.create_task(drive())
-        try:
-            while True:
-                has_value, payload = await queue.get()
-                if has_value:
-                    yield payload
-                    continue
-                if payload is not None:
-                    raise payload
-                break
-        finally:
-            if not driver.done():
-                token.cancel()
-                driver.cancel()
-            await asyncio.gather(driver, return_exceptions=True)
 
     async def close(self, *, graceful: bool = True) -> None:
         self.bind()

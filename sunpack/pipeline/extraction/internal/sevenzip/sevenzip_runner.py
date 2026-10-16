@@ -7,7 +7,7 @@ import subprocess
 import threading
 import time
 import uuid
-from collections import deque
+from collections import OrderedDict
 from concurrent.futures import Future
 from contextlib import nullcontext
 from typing import Any, Callable
@@ -48,14 +48,19 @@ class _NativeQueueCapacity:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._waiters: deque[Callable[[], None]] = deque()
+        self._waiters: OrderedDict[str, Callable[[], None]] = OrderedDict()
         self._rejected: set[str] = set()
 
-    def park(self, job_id: str, resubmit: Callable[[], None], *, other_jobs_active: bool) -> None:
+    def park(
+        self, job_id: str, resubmit: Callable[[], None], *,
+        completion: Future | asyncio.Future, other_jobs_active: bool,
+    ) -> None:
         with self._lock:
             self._rejected.add(job_id)
+            if completion.done():
+                return
             if other_jobs_active:
-                self._waiters.append(resubmit)
+                self._waiters[job_id] = resubmit
                 return
         # Nothing admitted is left to finish, so no event could wake this job.
         resubmit()
@@ -65,14 +70,18 @@ class _NativeQueueCapacity:
             if job_id in self._rejected:
                 self._rejected.discard(job_id)
                 return
-            waiter = self._waiters.popleft() if self._waiters else None
+            waiter = self._waiters.popitem(last=False)[1] if self._waiters else None
         if waiter is not None:
             waiter()
+
+    def discard(self, job_id: str) -> None:
+        with self._lock:
+            self._waiters.pop(job_id, None)
 
     def flush(self) -> None:
         """Run every parked resubmission; each observes the dead worker and fails."""
         with self._lock:
-            waiters = list(self._waiters)
+            waiters = list(self._waiters.values())
             self._waiters.clear()
             self._rejected.clear()
         for waiter in waiters:
@@ -1152,6 +1161,7 @@ class SevenZipRunner:
         worker: _AsyncNativeWorkerProcess | None = None
         try:
             worker = await self._async_worker_holder_or_create().get_or_start(startupinfo)
+            result_future.add_done_callback(lambda _: worker.queue_capacity.discard(job_id))
             prepared_job["worker_epoch"] = worker.worker_epoch
             stdout_lines: list[str] = []
             stderr_lines: list[str] = []
@@ -1169,6 +1179,9 @@ class SevenZipRunner:
 
             async def resubmit_after_backpressure() -> None:
                 if cancelled or result_future.done():
+                    # The wakeup was already removed from the queue. Transfer
+                    # its unused slot even if cancellation won after dispatch.
+                    worker.queue_capacity.release(job_id)
                     return
                 if not worker.is_alive():
                     on_timeout("sevenzip_worker exited before job completion")
@@ -1212,6 +1225,7 @@ class SevenZipRunner:
                         worker.queue_capacity.park(
                             job_id,
                             lambda: worker.spawn_resubmission(resubmit_after_backpressure()),
+                            completion=result_future,
                             other_jobs_active=worker.has_other_jobs(job_id),
                         )
                         return True
@@ -1271,6 +1285,7 @@ class SevenZipRunner:
                 return await asyncio.shield(result_future)
             except asyncio.CancelledError:
                 cancelled = True
+                worker.queue_capacity.discard(job_id)
 
                 async def finish_cancel() -> None:
                     try:
@@ -1342,6 +1357,7 @@ class SevenZipRunner:
         worker = None
         try:
             worker = self._worker_holder_or_create().get_or_start(startupinfo)
+            future.add_done_callback(lambda _: worker.queue_capacity.discard(job_id))
             prepared_job["worker_epoch"] = worker.worker_epoch
             stdout_lines: list[str] = []
             stderr_lines: list[str] = []
@@ -1381,6 +1397,7 @@ class SevenZipRunner:
 
                             def retry_submission() -> None:
                                 if future.done():
+                                    worker.queue_capacity.release(job_id)
                                     return
                                 if not worker.is_alive():
                                     on_timeout("sevenzip_worker exited before job completion")
@@ -1405,6 +1422,7 @@ class SevenZipRunner:
                             worker.queue_capacity.park(
                                 job_id,
                                 lambda: event_loop.call_soon_threadsafe(retry_submission),
+                                completion=future,
                                 other_jobs_active=worker.has_other_jobs(job_id),
                             )
                             return True

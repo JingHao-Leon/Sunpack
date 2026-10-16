@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import uuid
 
+from sunpack.core.contracts.failures import FailureKind
+from tests.helpers.failure_assertions import assert_failure_kind
 from tests.helpers.marker_utils import marker_was_extracted
 from tests.real.diagnostics import (
     case_snapshot,
@@ -111,8 +113,7 @@ def assert_password_error(
                 roots=(case.archive_dir,),
             )
     assert summary.success_count == 0, f"expected 0 success, got {summary.success_count}"
+    assert summary.partial_success_count == 0
     assert summary.failed_tasks, "expected failed tasks for all-wrong passwords"
-    assert any(failure.is_password_failure for failure in summary.failures), (
-        f"no password failure reported; kinds={[str(f.kind) for f in summary.failures]}"
-    )
+    assert_failure_kind(summary.failures, FailureKind.WRONG_PASSWORD)
     assert not extracted, "marker must not be extracted with all-wrong passwords"

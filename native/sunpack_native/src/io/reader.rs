@@ -621,6 +621,11 @@ pub(crate) struct NativeArchiveSession {
 }
 
 impl NativeArchiveSession {
+    pub(crate) fn borrowed_reader(&self) -> PyResult<(&str, ManagedReader)> {
+        self.ensure_open()?;
+        Ok((&self.path, self.reader.clone()))
+    }
+
     fn ensure_open(&self) -> PyResult<()> {
         if self.closed {
             Err(pyo3::exceptions::PyRuntimeError::new_err(
@@ -765,9 +770,9 @@ impl NativeArchiveSession {
         passwords: &Bound<'_, PyList>,
     ) -> PyResult<Py<PyAny>> {
         self.ensure_open()?;
-        crate::password::seven_zip::seven_zip_fast_verify_passwords(
+        crate::password::seven_zip::seven_zip_fast_verify_passwords_with_reader(
             py,
-            self.path.clone(),
+            &self.reader,
             passwords,
         )
     }
@@ -778,7 +783,7 @@ impl NativeArchiveSession {
         passwords: &Bound<'_, PyList>,
     ) -> PyResult<Py<PyAny>> {
         self.ensure_open()?;
-        crate::password::rar::rar_fast_verify_passwords(py, self.path.clone(), passwords)
+        crate::password::rar::rar_fast_verify_passwords_with_reader(py, &self.reader, passwords)
     }
 
     #[pyo3(signature = (iocp_chunk_bytes=2097152, iocp_buffers=2, iocp_workers=4))]

@@ -38,7 +38,7 @@ class SevenZipFastVerifier:
             [item.get("path") for item in ranges] if ranges else [verifier_path]
         ) as sessions:
             outcome = (
-                seven_zip_fast_verify_passwords_from_ranges(ranges, normalized_passwords)
+                seven_zip_fast_verify_passwords_from_ranges(ranges, normalized_passwords, sessions=sessions)
                 if ranges
                 else sessions[0].seven_zip_fast_verify_passwords(normalized_passwords)
             )

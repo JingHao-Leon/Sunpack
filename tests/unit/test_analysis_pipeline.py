@@ -370,7 +370,7 @@ def test_7z_start_header_damage_leaves_only_start_trusted(tmp_path):
 
 
 
-def test_7z_next_header_damage_does_not_trigger_embedded_revalidation(tmp_path):
+def test_damaged_7z_next_header_never_becomes_exact_embedded_evidence(tmp_path):
     seven_data = bytearray(_seven_zip_bytes())
     next_offset = int.from_bytes(seven_data[12:20], "little")
     seven_data[32 + next_offset] ^= 0xFF
@@ -385,10 +385,8 @@ def test_7z_next_header_damage_does_not_trigger_embedded_revalidation(tmp_path):
         ).evidences
     }["7z"]
 
-    assert seven.status == "extractable"
-    assert seven.segments[0].end_offset == len(seven_data)
-    assert "directory_integrity_bad_or_unknown" not in seven.segments[0].damage_flags
-    assert seven.details["integrity_confidence"] == "deferred"
+    assert scan.candidates == ()
+    assert seven.status != "extractable"
 
 @pytest.mark.parametrize(
     ("extension", "build_data", "split_at", "expected_format", "confidence"),

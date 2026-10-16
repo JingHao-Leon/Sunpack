@@ -20,6 +20,29 @@ _HIT_FORMATS = {
 }
 
 
+def embedded_scan_prepass(scan: dict[str, Any]) -> dict[str, Any]:
+    """Project canonical scan rows without rebuilding candidate dictionaries."""
+    formats = {item["format"] for item in scan["candidates"]}
+    return {
+        "hits": [item for item in scan["hits"] if _HIT_FORMATS.get(item["name"]) in formats],
+        "formats": sorted(formats),
+        "full_scan_bytes": scan["read_bytes"],
+        "full_scan_complete": scan["complete"],
+        "logical_resolution_complete": scan["logical_resolution_complete"],
+        "raw_hit_count": scan["raw_hit_count"],
+        "embedded_scan_budget_exhausted": scan["budget_exhausted"],
+        "source": "embedded_scan",
+        "embedded_candidates": scan["candidates"],
+    }
+
+
+def embedded_candidate_requires_password(format_hint: str, validation: str) -> bool:
+    return format_hint == "rar" and validation.startswith((
+        "rar4_header_encrypted_main_header_crc",
+        "rar5_encryption_header_crc",
+    ))
+
+
 @dataclass(frozen=True, slots=True)
 class EmbeddedCandidate:
     format: str
@@ -34,12 +57,7 @@ class EmbeddedCandidate:
 
     @property
     def password_required(self) -> bool:
-        if self.format != "rar":
-            return False
-        return self.validation.startswith((
-            "rar4_header_encrypted_main_header_crc",
-            "rar5_encryption_header_crc",
-        ))
+        return embedded_candidate_requires_password(self.format, self.validation)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -107,20 +125,4 @@ class EmbeddedScanResult:
         }
 
     def to_prepass(self) -> dict[str, Any]:
-        validated_formats = {item.format for item in self.candidates}
-        hits = [
-            item.to_dict()
-            for item in self.hits
-            if _HIT_FORMATS.get(item.name) in validated_formats
-        ]
-        return {
-            "hits": hits,
-            "formats": sorted(validated_formats),
-            "full_scan_bytes": self.read_bytes,
-            "full_scan_complete": self.complete,
-            "logical_resolution_complete": self.logical_resolution_complete,
-            "raw_hit_count": self.raw_hit_count,
-            "embedded_scan_budget_exhausted": self.budget_exhausted,
-            "source": "embedded_scan",
-            "embedded_candidates": [item.to_dict() for item in self.candidates],
-        }
+        return embedded_scan_prepass(self.to_dict())

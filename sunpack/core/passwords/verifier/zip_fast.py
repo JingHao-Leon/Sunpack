@@ -30,8 +30,8 @@ class ZipFastVerifier:
             archive_input=archive_input,
         )
         if volume_input is not None and volume_input[0] == "zip_spanned":
-            with borrow_archive_sessions(item.get("path") for item in volume_input[1]):
-                outcome = zip_fast_verify_passwords_from_volumes(volume_input[1], normalized_passwords, eocd_offset)
+            with borrow_archive_sessions(item.get("path") for item in volume_input[1]) as sessions:
+                outcome = zip_fast_verify_passwords_from_volumes(volume_input[1], normalized_passwords, eocd_offset, sessions=sessions)
             return self._from_outcome(outcome)
         if requires_volume_aware_verifier(
             archive_path,
@@ -53,7 +53,7 @@ class ZipFastVerifier:
             [item.get("path") for item in ranges] if ranges else [verifier_path]
         ) as sessions:
             outcome = (
-                zip_fast_verify_passwords_from_ranges(ranges, normalized_passwords, eocd_offset)
+                zip_fast_verify_passwords_from_ranges(ranges, normalized_passwords, eocd_offset, sessions=sessions)
                 if ranges
                 else sessions[0].zip_fast_verify_passwords(normalized_passwords, eocd_offset)
             )

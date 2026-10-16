@@ -6,7 +6,7 @@ use crate::password::input::{
 };
 use hmac::{Hmac, Mac};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyDict, PyList, PyTuple};
 use rayon::prelude::*;
 use sha1::Sha1;
 use std::borrow::Cow;
@@ -29,7 +29,7 @@ pub(crate) fn zip_fast_verify_passwords(
     passwords: &Bound<'_, PyList>,
     eocd_offset: Option<u64>,
 ) -> PyResult<Py<PyAny>> {
-    let reader = ManagedReader::open(&archive_path)?;
+    let reader = py.detach(|| ManagedReader::open(&archive_path))?;
     zip_fast_verify_passwords_with_reader(py, &reader, passwords, eocd_offset)
 }
 
@@ -52,18 +52,19 @@ pub(crate) fn zip_fast_verify_passwords_with_reader(
 }
 
 #[pyfunction]
-#[pyo3(signature = (ranges, passwords, eocd_offset=None))]
+#[pyo3(signature = (ranges, passwords, eocd_offset=None, *, sessions=None))]
 pub(crate) fn zip_fast_verify_passwords_from_ranges(
     py: Python<'_>,
     ranges: &Bound<'_, PyList>,
     passwords: &Bound<'_, PyList>,
     eocd_offset: Option<u64>,
+    sessions: Option<&Bound<'_, PyTuple>>,
 ) -> PyResult<Py<PyAny>> {
     let candidates = passwords
         .iter()
         .map(|item| item.extract::<String>())
         .collect::<PyResult<Vec<_>>>()?;
-    let parsed = parse_ranges(ranges)?;
+    let parsed = parse_ranges(ranges, sessions)?;
     let total_len = ranges_total_len(&parsed);
     let key = ranges_key("zip", &parsed)?;
     verify_prepared(py, key, &candidates, || {
@@ -77,18 +78,19 @@ pub(crate) fn zip_fast_verify_passwords_from_ranges(
 }
 
 #[pyfunction]
-#[pyo3(signature = (parts, passwords, eocd_offset=None))]
+#[pyo3(signature = (parts, passwords, eocd_offset=None, *, sessions=None))]
 pub(crate) fn zip_fast_verify_passwords_from_volumes(
     py: Python<'_>,
     parts: &Bound<'_, PyList>,
     passwords: &Bound<'_, PyList>,
     eocd_offset: Option<u64>,
+    sessions: Option<&Bound<'_, PyTuple>>,
 ) -> PyResult<Py<PyAny>> {
     let candidates = passwords
         .iter()
         .map(|item| item.extract::<String>())
         .collect::<PyResult<Vec<_>>>()?;
-    let volumes = VolumeSet::new(parse_volumes(parts)?);
+    let volumes = VolumeSet::new(parse_volumes(parts, sessions)?);
     verify_prepared(py, volumes.key("zip")?, &candidates, || {
         prepare_zip_volumes(&volumes, eocd_offset).map(PasswordContext::Zip)
     })
@@ -98,6 +100,7 @@ fn prepare_zip_volumes(
     volumes: &VolumeSet,
     eocd_offset: Option<u64>,
 ) -> Result<ZipPasswordContext, PreparedStatus> {
+    volumes.require_contiguous()?;
     let (tail, eocd_offset) = if let Some(offset) = eocd_offset {
         let (disk, local) = volumes.advance_disk_offset(0, 0, offset).ok_or_else(|| {
             PreparedStatus::new(

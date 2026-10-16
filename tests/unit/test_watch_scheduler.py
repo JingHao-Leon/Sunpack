@@ -893,6 +893,9 @@ class _DeferredPipelineEngine:
     def recent_passwords(self):
         return []
 
+    async def clear_runtime_caches(self):
+        return {"fake": True}
+
     async def run(
         self,
         targets,
@@ -916,6 +919,7 @@ def test_watch_run_once_harvests_futures_without_waiting_for_slow_batch(tmp_path
     engine = _DeferredPipelineEngine()
     watcher = _watcher(
         tmp_path,
+        config=make_config({"watch": {"runtime_cache_cleanup_idle_seconds": 0}}),
         cold_start_seconds=0,
         pipeline_engine=engine,
     )
@@ -931,6 +935,10 @@ def test_watch_run_once_harvests_futures_without_waiting_for_slow_batch(tmp_path
     harvested = _await(watcher.run_once())
     assert harvested.processed == 1
     assert engine.handles[0].done() is False
+    # The normal enqueue/completion path creates an expired maintenance
+    # deadline while another request still runs. Only its completion should
+    # wake maintenance; the service must not spin on a zero timeout.
+    assert watcher.next_delay_seconds() != 0
 
     watcher.enqueue(str(archives[2]))
     still_scheduling = _await(watcher.run_once())

@@ -361,11 +361,7 @@ impl NativeCandidateTable {
                         };
                         path_key(
                             &parent
-                                .join(format!(
-                                    "{}\x1f{}",
-                                    case_key(&data.logical_name()),
-                                    family
-                                ))
+                                .join(format!("{}\x1f{}", case_key(&data.logical_name()), family))
                                 .to_string_lossy(),
                         )
                     } else {

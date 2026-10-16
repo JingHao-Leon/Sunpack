@@ -2,6 +2,7 @@ import struct
 from binascii import crc32
 
 from sunpack.core.analysis import AnalysisRequest, ArchiveAnalyzer
+from sunpack.core.analysis.embedded import scan_embedded_archives
 
 
 def _seven_zip_bytes(*, version_major=0, next_header=b"\x01", declared_size=None):
@@ -73,27 +74,15 @@ def test_damaged_seven_zip_never_reuses_guessed_embedded_end(tmp_path):
 
 def test_exact_embedded_seven_zip_boundary_skips_next_header_revalidation(tmp_path):
     path = tmp_path / "carrier.bin"
-    path.write_bytes(b"\x00" * 4096)
-    prepass = {
-        "source": "embedded_scan",
-        "full_scan_complete": True,
-        "hits": [],
-        "embedded_candidates": [{
-            "format": "7z",
-            "offset": 128,
-            "end_offset": 4096,
-            "confidence": 1.0,
-            "validation": "start_header_crc_and_declared_end",
-            "candidate_kind": "logical_archive",
-            "boundary_kind": "exact",
-            "extractable": True,
-        }],
-    }
+    payload = _seven_zip_bytes()
+    end = 128 + len(payload)
+    path.write_bytes(b"\x00" * 128 + payload + b"carrier tail")
+    prepass = scan_embedded_archives(str(path)).to_prepass()
 
     report, evidence = _seven_zip_evidence(path, AnalysisRequest(initial_prepass=prepass))
 
     assert evidence.status == "extractable"
-    assert [(item.start_offset, item.end_offset) for item in evidence.segments] == [(128, 4096)]
+    assert [(item.start_offset, item.end_offset) for item in evidence.segments] == [(128, end)]
     assert evidence.details["source"] == "embedded_scan"
     assert evidence.details["boundary_kind"] == "exact"
     assert evidence.details["integrity_confidence"] == "deferred"

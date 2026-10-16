@@ -1,8 +1,9 @@
-use super::context::{InputKey, InputMember};
+use super::context::{InputKey, InputMember, PreparedStatus};
 use crate::io::read_fault::{FieldLocation, ReadFault};
-use crate::io::reader::ManagedReader;
+use crate::io::reader::{ManagedReader, NativeArchiveSession};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyDict, PyList, PyTuple};
+use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
 
@@ -15,7 +16,42 @@ pub(crate) struct RangeSpec {
     virtual_start: u64,
 }
 
-pub(crate) fn parse_ranges(ranges: &Bound<'_, PyList>) -> PyResult<Vec<RangeSpec>> {
+// The caller already holds lifecycle borrows. Reuse their validated readers
+// instead of reopening every physical member for every password batch.
+struct InputReaders(HashMap<String, ManagedReader>);
+
+impl InputReaders {
+    fn new(sessions: Option<&Bound<'_, PyTuple>>) -> PyResult<Self> {
+        let mut readers = HashMap::new();
+        if let Some(sessions) = sessions {
+            for session in sessions.iter() {
+                let session = session.extract::<PyRef<'_, NativeArchiveSession>>()?;
+                let (path, reader) = session.borrowed_reader()?;
+                readers.insert(Self::key(path)?, reader);
+            }
+        }
+        Ok(Self(readers))
+    }
+
+    fn key(path: &str) -> std::io::Result<String> {
+        Ok(crate::path_keys::path_key(
+            &std::path::absolute(path)?.to_string_lossy(),
+        ))
+    }
+
+    fn open(&self, py: Python<'_>, path: &str) -> PyResult<ManagedReader> {
+        if let Some(reader) = self.0.get(&Self::key(path)?) {
+            return Ok(reader.clone());
+        }
+        Ok(py.detach(|| ManagedReader::open(path))?)
+    }
+}
+
+pub(crate) fn parse_ranges(
+    ranges: &Bound<'_, PyList>,
+    sessions: Option<&Bound<'_, PyTuple>>,
+) -> PyResult<Vec<RangeSpec>> {
+    let readers = InputReaders::new(sessions)?;
     let mut parsed = Vec::new();
     let mut cursor = 0u64;
     for item in ranges.iter() {
@@ -35,7 +71,7 @@ pub(crate) fn parse_ranges(ranges: &Bound<'_, PyList>) -> PyResult<Vec<RangeSpec
             .get_item("end")?
             .map(|value| value.extract::<u64>())
             .transpose()?;
-        let reader = ManagedReader::open(&path)?;
+        let reader = readers.open(ranges.py(), &path)?;
         let file_len = reader.len();
         if start > file_len {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -185,7 +221,11 @@ pub(crate) struct VolumeSpec {
     pub(crate) end: Option<u64>,
 }
 
-pub(crate) fn parse_volumes(parts: &Bound<'_, PyList>) -> PyResult<Vec<VolumeSpec>> {
+pub(crate) fn parse_volumes(
+    parts: &Bound<'_, PyList>,
+    sessions: Option<&Bound<'_, PyTuple>>,
+) -> PyResult<Vec<VolumeSpec>> {
+    let readers = InputReaders::new(sessions)?;
     let mut parsed = Vec::new();
     for item in parts.iter() {
         let dict = item.cast::<PyDict>()?;
@@ -206,7 +246,7 @@ pub(crate) fn parse_volumes(parts: &Bound<'_, PyList>) -> PyResult<Vec<VolumeSpe
             .map(|value| value.extract::<u64>())
             .transpose()?
             .unwrap_or(0);
-        let reader = ManagedReader::open(&path)?;
+        let reader = readers.open(parts.py(), &path)?;
         let end = dict
             .get_item("end")?
             .map(|value| value.extract::<u64>())
@@ -235,14 +275,12 @@ pub(crate) fn parse_volumes(parts: &Bound<'_, PyList>) -> PyResult<Vec<VolumeSpe
         });
     }
     parsed.sort_by_key(|volume| volume.number);
-    if parsed.is_empty()
-        || parsed
-            .iter()
-            .enumerate()
-            .any(|(index, volume)| volume.number != index as u32 + 1)
+    if parsed
+        .windows(2)
+        .any(|pair| pair[0].number == pair[1].number)
     {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "structured volume numbers must be contiguous from one",
+            "structured volume numbers must be unique",
         ));
     }
     Ok(parsed)
@@ -253,6 +291,22 @@ pub(crate) struct VolumeSet {
 }
 
 impl VolumeSet {
+    pub(crate) fn require_contiguous(&self) -> Result<(), PreparedStatus> {
+        if self.volumes.is_empty()
+            || self
+                .volumes
+                .iter()
+                .enumerate()
+                .any(|(index, volume)| volume.number != index as u32 + 1)
+        {
+            return Err(PreparedStatus::new(
+                "needs_volume_or_tail_damaged",
+                "structured volume numbers are not contiguous from one; missing volume",
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn new(volumes: Vec<VolumeSpec>) -> Self {
         Self {
             volumes: volumes.into(),

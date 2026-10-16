@@ -7,6 +7,7 @@ from pathlib import Path
 from sunpack.core.contracts.failures import FailureKind
 from sunpack.runtime.watch.toast import WatchToastCoordinator
 from sunpack.core.platform.windows.toast_protocol import ToastSnapshotKind
+from tests.helpers.failure_assertions import assert_failure_kind
 from tests.helpers.real_archives import (
     ArchiveFixtureFactory,
     create_encrypted_zip_archive,
@@ -123,32 +124,29 @@ def test_plan7_nested_inner_unknown_password_normal_mode(tmp_path, plan7_error):
     })
     assert summary.success_count == 1
     assert summary.partial_success_count == 0
-    assert any(kind == FailureKind.WRONG_PASSWORD for kind in _failure_kinds(summary))
+    assert_failure_kind(summary.failures, FailureKind.WRONG_PASSWORD)
     assert any("nested-inner-encrypted.zip" in str(item) for item in summary.failed_tasks)
 
 
 def test_plan7_nested_inner_missing_volume_normal_mode(tmp_path, plan7_error):
-    """外层无密码、内层缺分卷时，内层可报缺卷或在扫描阶段忽略。"""
+    """外层无密码且内层头卷存在时，内层必须报缺卷。"""
     outer = _nested_missing_volume_outer(tmp_path)
     summary = run_plan1_pipeline(outer, passwords=[])
 
     missing_volume_reported = any(
         kind == FailureKind.MISSING_VOLUME for kind in _failure_kinds(summary)
     )
-    ignored_at_scan = not summary.failures and not summary.failed_tasks
     plan7_error.update({
         "case": "nested_outer_plain_inner_missing_volume_normal",
         "outer": str(outer),
         "failure_kinds": [kind.value for kind in _failure_kinds(summary)],
         "failed_tasks": [str(item) for item in summary.failed_tasks],
         "missing_volume_reported": missing_volume_reported,
-        "ignored_at_scan": ignored_at_scan,
     })
     assert summary.success_count == 1
     assert summary.partial_success_count == 0
-    assert missing_volume_reported or ignored_at_scan
-    if missing_volume_reported:
-        assert any("nested-inner-split.7z.001" in str(item) for item in summary.failed_tasks)
+    assert_failure_kind(summary.failures, FailureKind.MISSING_VOLUME)
+    assert any("nested-inner-split.7z.001" in str(item) for item in summary.failed_tasks)
 
 
 def test_plan7_nested_inner_unknown_password_watch_is_password_blocked(
@@ -221,11 +219,6 @@ def test_plan7_nested_inner_missing_volume_watch_suspends_promoted_input(
             and Path(entry.path).name == "nested-inner-split.7z.001"
             for entry in harness.watcher.state.entries.values()
         )
-        ignored_at_scan = (
-            result.failed == 0
-            and result.succeeded == 1
-            and not result.errors
-        )
         plan7_error.update({
             "case": "nested_outer_plain_inner_missing_volume_watch",
             "result": result.__dict__,
@@ -233,21 +226,18 @@ def test_plan7_nested_inner_missing_volume_watch_suspends_promoted_input(
             "failed_terminal_logged": '"event":"failed_terminal"' in events,
             "suspended_missing_volume_logged": '"event":"suspended_missing_volume"' in events,
             "missing_volume_reported": missing_volume_reported,
-            "ignored_at_scan": ignored_at_scan,
             "toast_kind": terminal.kind.value if terminal is not None else "",
         })
-        assert missing_volume_reported or ignored_at_scan
-        if missing_volume_reported:
-            entries = list(harness.watcher.state.entries.values())
-            assert len(entries) == 1
-            assert entries[0].status == "suspended_missing_volume"
-            assert Path(entries[0].path).parent == harness.watch_root
-            assert '"event":"suspended_missing_volume"' in events
-            assert '"event":"failed_terminal"' not in events
-            assert terminal is None
-        else:
-            assert not harness.watcher.state.entries
-            assert terminal is not None and terminal.kind == ToastSnapshotKind.SUCCESS
+        assert missing_volume_reported
+        entries = list(harness.watcher.state.entries.values())
+        assert len(entries) == 1
+        assert entries[0].status == "suspended_missing_volume"
+        assert entries[0].failure_kind == FailureKind.MISSING_VOLUME.value
+        assert (entries[0].failure_payload or {}).get("blockers") == ["missing_volume"]
+        assert Path(entries[0].path).parent == harness.watch_root
+        assert '"event":"suspended_missing_volume"' in events
+        assert '"event":"failed_terminal"' not in events
+        assert terminal is None
     finally:
         toast.stop()
         harness.close()

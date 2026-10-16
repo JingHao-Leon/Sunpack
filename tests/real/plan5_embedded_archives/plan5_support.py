@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from sunpack.core.analysis.embedded import scan_embedded_archives
+from sunpack.core.contracts.failures import FailureKind
+from tests.helpers.failure_assertions import assert_failure_kind
 from tests.real.diagnostics import (
     case_snapshot,
     environment_snapshot,
@@ -616,9 +618,8 @@ def assert_plan5_wrong_password_blocks_carrier(
             "marker_status": marker_status,
         })
     assert summary.failed_tasks, "all-wrong passwords must leave failed tasks"
-    assert any(failure.is_password_failure for failure in summary.failures), (
-        f"no password failure reported; kinds={[str(f.kind) for f in summary.failures]}"
-    )
+    assert summary.success_count == summary.partial_success_count == 0
+    assert_failure_kind(summary.failures, FailureKind.WRONG_PASSWORD)
     assert not extracted, (
         "a carrier with an unresolved encrypted segment must not be partially processed; "
         f"extracted={[item['variant'] for item in extracted]}"

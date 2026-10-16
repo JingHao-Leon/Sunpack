@@ -1401,6 +1401,10 @@ fn validate_seven_zip(
     }
     let next_offset = u64::from_le_bytes(header[12..20].try_into().unwrap());
     let next_size = u64::from_le_bytes(header[20..28].try_into().unwrap());
+    // An absent next header cannot authorize an intervening payload range.
+    if next_size == 0 && next_offset != 0 {
+        return Ok(None);
+    }
     let Some(next_start) = offset
         .checked_add(32)
         .and_then(|value| value.checked_add(next_offset))
@@ -1419,12 +1423,35 @@ fn validate_seven_zip(
             "start_header_crc_truncated_declared_range",
         )));
     }
+    // A CRC-valid start header proves only a proposed range. Never let an
+    // unverified proposal hide independent archives in a carrier. Stream the
+    // next header so a large metadata tree does not require a large allocation.
+    let mut checksum = crc32fast::Hasher::new();
+    let mut cursor = next_start;
+    let mut first = None;
+    while cursor < end {
+        let bytes = read_at(file, cursor, (end - cursor).min(64 * 1024) as usize)?;
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        if first.is_none() {
+            first = bytes.first().copied();
+            if !matches!(first, Some(0x01 | 0x17)) {
+                return Ok(None);
+            }
+        }
+        checksum.update(&bytes);
+        cursor += bytes.len() as u64;
+    }
+    if checksum.finalize() != u32::from_le_bytes(header[28..32].try_into().unwrap()) {
+        return Ok(None);
+    }
     Ok(Some(candidate(
         "7z",
         offset,
         Some(end),
         1.0,
-        "start_header_crc_and_declared_end",
+        "start_and_next_header_crc_and_declared_end",
     )))
 }
 
@@ -2634,7 +2661,7 @@ mod tests {
         let mut start_header = Vec::new();
         start_header.extend_from_slice(&(inner.len() as u64).to_le_bytes());
         start_header.extend_from_slice(&(next_header.len() as u64).to_le_bytes());
-        start_header.extend_from_slice(&0u32.to_le_bytes());
+        start_header.extend_from_slice(&crc32(next_header).to_le_bytes());
 
         let mut data = b"carrier-prefix".to_vec();
         let start = data.len() as u64;

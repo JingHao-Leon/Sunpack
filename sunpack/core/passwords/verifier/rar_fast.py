@@ -33,22 +33,8 @@ class RarFastVerifier:
             "rar_sfx_part",
             "sfx_numeric_suffix",
         }:
-            volume_numbers = sorted(
-                int(item.get("volume_number") or 0) for item in volume_input[1]
-            )
-            if volume_numbers != list(range(1, len(volume_numbers) + 1)):
-                return self._from_outcome(
-                    {
-                        "status": "needs_volume_or_tail_damaged",
-                        "matched_index": -1,
-                        "attempts": 0,
-                        "message": (
-                            "structured RAR volume numbers are not contiguous from one"
-                        ),
-                    }
-                )
-            with borrow_archive_sessions(item.get("path") for item in volume_input[1]):
-                outcome = rar_fast_verify_passwords_from_volumes(volume_input[1], normalized_passwords)
+            with borrow_archive_sessions(item.get("path") for item in volume_input[1]) as sessions:
+                outcome = rar_fast_verify_passwords_from_volumes(volume_input[1], normalized_passwords, sessions=sessions)
             return self._from_outcome(outcome)
         if requires_volume_aware_verifier(
             archive_path,
@@ -70,7 +56,7 @@ class RarFastVerifier:
             [item.get("path") for item in ranges] if ranges else [verifier_path]
         ) as sessions:
             outcome = (
-                rar_fast_verify_passwords_from_ranges(ranges, normalized_passwords)
+                rar_fast_verify_passwords_from_ranges(ranges, normalized_passwords, sessions=sessions)
                 if ranges
                 else sessions[0].rar_fast_verify_passwords(normalized_passwords)
             )

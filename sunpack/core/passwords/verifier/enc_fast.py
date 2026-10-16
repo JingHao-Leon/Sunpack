@@ -18,7 +18,7 @@ class EncFastVerifier:
             )
         path, ranges = verifier_input(archive_path, part_paths=part_paths, archive_input=archive_input)
         with borrow_archive_sessions([item.get("path") for item in ranges] if ranges else [path]) as sessions:
-            outcome = (enc_fast_verify_passwords_from_ranges(ranges, passwords) if ranges
+            outcome = (enc_fast_verify_passwords_from_ranges(ranges, passwords, sessions=sessions) if ranges
                        else sessions[0].enc_fast_verify_passwords(passwords))
         status = normalize_verifier_status(outcome.get("status"))
         index = int(outcome.get("matched_index", -1))

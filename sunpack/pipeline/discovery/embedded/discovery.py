@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 import os
 from typing import Any
 
@@ -25,7 +25,10 @@ from sunpack.core.analysis.embedded import (
     resolve_encrypted_rar_boundaries,
     scan_embedded_archives,
 )
-from sunpack.core.analysis.embedded.scanner import _normalize_native_result
+from sunpack.core.analysis.embedded.result import (
+    embedded_candidate_requires_password,
+    embedded_scan_prepass,
+)
 from sunpack.core.passwords.internal.lists import dedupe_passwords
 from sunpack.core.passwords.internal.local_files import discover_directory_passwords_for_archive
 from sunpack.core.support.global_cache_manager import file_identity
@@ -153,10 +156,9 @@ class EmbeddedDiscovery:
                     continue
 
                 candidate = session.project_native_candidate(table, index)
-                scan = _normalize_native_result(raw_scan, 0)
                 resolved, reason, findings = self._discover_candidate(
                     candidate,
-                    precomputed_scan=scan,
+                    precomputed_scan=raw_scan,
                 )
                 if resolved is None:
                     if reason in {
@@ -194,20 +196,20 @@ class EmbeddedDiscovery:
                     path,
                     expected_size=size,
                     identity=identity,
-                )
+                ).to_dict()
             except OSError:
                 return None, "embedded_scan_io_error", ()
         else:
             scan = precomputed_scan
-            size = int(scan.file_size)
+            size = int(scan["file_size"])
 
         password_by_offset: dict[int, str] = {}
         encrypted_offsets = [
-            item.offset
-            for item in scan.candidates
-            if item.candidate_kind == "logical_archive"
-            and item.password_required
-            and item.end_offset is None
+            item["offset"]
+            for item in scan["candidates"]
+            if item["candidate_kind"] == "logical_archive"
+            and embedded_candidate_requires_password(item["format"], item["validation"])
+            and item["end_offset"] is None
         ]
         if encrypted_offsets:
             passwords = self._password_candidates(path)
@@ -247,36 +249,36 @@ class EmbeddedDiscovery:
             if status != "ok":
                 return None, "embedded_scan_io_error", ()
             rewritten = []
-            for item in scan.candidates:
-                resolved = resolved_rows.get(item.offset)
+            for item in scan["candidates"]:
+                resolved = resolved_rows.get(item["offset"])
                 if resolved is None:
                     rewritten.append(item)
                     continue
                 end_offset, password = resolved
-                password_by_offset[item.offset] = password
-                rewritten.append(replace(
-                    item,
-                    end_offset=end_offset,
-                    validation=f"{item.validation}_decrypted_end",
-                    boundary_kind="exact",
-                    extractable=True,
-                ))
-            scan = replace(
-                scan,
-                candidates=tuple(rewritten),
-                logical_resolution_complete=all(
-                    item.candidate_kind != "logical_archive"
-                    or item.boundary_kind == "exact"
+                password_by_offset[item["offset"]] = password
+                rewritten.append({
+                    **item,
+                    "end_offset": end_offset,
+                    "validation": f"{item['validation']}_decrypted_end",
+                    "boundary_kind": "exact",
+                    "extractable": True,
+                })
+            scan = {
+                **scan,
+                "candidates": rewritten,
+                "logical_resolution_complete": all(
+                    item["candidate_kind"] != "logical_archive"
+                    or item["boundary_kind"] == "exact"
                     for item in rewritten
                 ),
-            )
+            }
 
         truncated = next((
             item
-            for item in scan.candidates
-            if item.candidate_kind == "logical_archive"
-            and item.boundary_kind != "exact"
-            and item.validation == "start_header_crc_truncated_declared_range"
+            for item in scan["candidates"]
+            if item["candidate_kind"] == "logical_archive"
+            and item["boundary_kind"] != "exact"
+            and item["validation"] == "start_header_crc_truncated_declared_range"
         ), None)
         if not candidate.is_split and truncated is not None:
             return (
@@ -286,37 +288,37 @@ class EmbeddedDiscovery:
                     path,
                     scan,
                     "embedded_truncated",
-                    failed_offset=truncated.offset,
+                    failed_offset=truncated["offset"],
                 ),
             )
 
         physical = [
             item
-            for item in scan.candidates
-            if item.candidate_kind == "logical_archive"
-            and item.boundary_kind == "exact"
-            and item.extractable
-            and item.end_offset is not None
+            for item in scan["candidates"]
+            if item["candidate_kind"] == "logical_archive"
+            and item["boundary_kind"] == "exact"
+            and item["extractable"]
+            and item["end_offset"] is not None
         ]
-        if not scan.complete or not physical:
+        if not scan["complete"] or not physical:
             return None, "no_complete_embedded_archive", ()
 
-        physical.sort(key=lambda item: (item.offset, -item.confidence, item.format))
+        physical.sort(key=lambda item: (item["offset"], -item["confidence"], item["format"]))
         segments: list[tuple[ArchiveInputDescriptor, dict[str, Any]]] = []
         base_name = candidate.logical_name or relations_logical_name(os.path.basename(path), True)
         for item in physical:
             descriptor = _descriptor_for_candidate(
                 path,
                 size,
-                item.format,
-                item.offset,
-                item.end_offset,
+                item["format"],
+                item["offset"],
+                item["end_offset"],
                 base_name,
-                confidence=float(item.confidence),
-                password_required=item.password_required,
-                execution_analysis={"stream_plan": item.stream_plan} if item.stream_plan else None,
+                confidence=float(item["confidence"]),
+                password_required=embedded_candidate_requires_password(item["format"], item["validation"]),
+                execution_analysis={"stream_plan": item["stream_plan"]} if item.get("stream_plan") else None,
             )
-            segments.append((descriptor, item.to_dict()))
+            segments.append((descriptor, item))
 
         primary = segments[0][0]
         task = ArchiveTask.from_archive_input(
@@ -325,7 +327,7 @@ class EmbeddedDiscovery:
             carrier_path=candidate.carrier_path,
             cleanup_paths=candidate.cleanup_paths,
             discovery_evidence={
-                "scan": scan.to_prepass(),
+                "scan": embedded_scan_prepass(scan),
             },
             discovery_segments=tuple(segments),
         )
@@ -363,27 +365,27 @@ def _blocked_findings(
     findings: list[DiscoveryFinding] = []
     logical = [
         item
-        for item in scan.candidates
-        if item.candidate_kind == "logical_archive"
+        for item in scan["candidates"]
+        if item["candidate_kind"] == "logical_archive"
     ]
     for item in logical:
-        resolved = resolved_rows.get(item.offset)
-        end_offset = resolved[0] if resolved is not None else item.end_offset
-        boundary_kind = "exact" if resolved is not None else item.boundary_kind
+        resolved = resolved_rows.get(item["offset"])
+        end_offset = resolved[0] if resolved is not None else item["end_offset"]
+        boundary_kind = "exact" if resolved is not None else item["boundary_kind"]
         finding_reason = (
             reason
-            if failed_offset is None or int(item.offset) == int(failed_offset)
+            if failed_offset is None or int(item["offset"]) == int(failed_offset)
             else "embedded_carrier_blocked"
         )
         findings.append(DiscoveryFinding(
             entry_path=path,
             source="embedded",
-            format=item.format,
+            format=item["format"],
             status="blocked",
             reason=finding_reason,
             logical_name=base_name,
             part_paths=(path,),
-            offset=int(item.offset),
+            offset=int(item["offset"]),
             end_offset=int(end_offset) if end_offset is not None else None,
             boundary_kind=boundary_kind,
             extractable=False,

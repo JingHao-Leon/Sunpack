@@ -4,7 +4,7 @@ use crate::io::reader::ManagedReader;
 use crate::password::context::{verify_prepared, InputKey, PasswordContext, PreparedStatus};
 use crate::password::input::{parse_ranges, ranges_key, ranges_total_len, VirtualRangeReader};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyDict, PyList, PyTuple};
 use rayon::prelude::*;
 use sevenz_rust2::{Archive, Error as SevenZipError, Password};
 use std::io::{Read, Seek, SeekFrom};
@@ -61,16 +61,18 @@ pub(crate) fn seven_zip_fast_verify_passwords_with_reader(
 }
 
 #[pyfunction]
+#[pyo3(signature = (ranges, passwords, *, sessions=None))]
 pub(crate) fn seven_zip_fast_verify_passwords_from_ranges(
     py: Python<'_>,
     ranges: &Bound<'_, PyList>,
     passwords: &Bound<'_, PyList>,
+    sessions: Option<&Bound<'_, PyTuple>>,
 ) -> PyResult<Py<PyAny>> {
     let candidates = passwords
         .iter()
         .map(|item| item.extract::<String>())
         .collect::<PyResult<Vec<_>>>()?;
-    let parsed = parse_ranges(ranges)?;
+    let parsed = parse_ranges(ranges, sessions)?;
     let total_len = ranges_total_len(&parsed);
     verify_prepared(py, ranges_key("7z", &parsed)?, &candidates, || {
         prepare_seven_zip(VirtualRangeReader::new(parsed.into()), total_len)

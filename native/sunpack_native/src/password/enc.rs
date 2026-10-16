@@ -5,7 +5,7 @@ use super::input::{parse_ranges, ranges_key, ranges_total_len, VirtualRangeReade
 use crate::io::read_fault::{read_exact_field, FieldLocation};
 use crate::io::reader::ManagedReader;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyDict, PyList, PyTuple};
 use rayon::prelude::*;
 use std::io::{Read, Seek};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -53,16 +53,18 @@ pub(crate) fn enc_fast_verify_passwords_with_reader(
 }
 
 #[pyfunction]
+#[pyo3(signature = (ranges, passwords, *, sessions=None))]
 pub(crate) fn enc_fast_verify_passwords_from_ranges(
     py: Python<'_>,
     ranges: &Bound<'_, PyList>,
     passwords: &Bound<'_, PyList>,
+    sessions: Option<&Bound<'_, PyTuple>>,
 ) -> PyResult<Py<PyAny>> {
     let candidates = passwords
         .iter()
         .map(|p| p.extract::<String>())
         .collect::<PyResult<Vec<_>>>()?;
-    let parsed = parse_ranges(ranges)?;
+    let parsed = parse_ranges(ranges, sessions)?;
     let length = ranges_total_len(&parsed);
     verify_prepared(py, ranges_key("enc", &parsed)?, &candidates, || {
         prepare(VirtualRangeReader::new(parsed.into()), length).map(PasswordContext::Enc)

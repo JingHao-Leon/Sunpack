@@ -13,7 +13,7 @@ use cbc::Decryptor;
 use crc32fast::hash as crc32_hash;
 use hmac::{Hmac, Mac};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyDict, PyList, PyTuple};
 use rayon::prelude::*;
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
@@ -87,7 +87,7 @@ pub(crate) fn rar_fast_verify_passwords(
     archive_path: String,
     passwords: &Bound<'_, PyList>,
 ) -> PyResult<Py<PyAny>> {
-    let reader = ManagedReader::open(&archive_path)?;
+    let reader = py.detach(|| ManagedReader::open(&archive_path))?;
     rar_fast_verify_passwords_with_reader(py, &reader, passwords)
 }
 
@@ -112,16 +112,18 @@ pub(crate) fn rar_fast_verify_passwords_with_reader(
 }
 
 #[pyfunction]
+#[pyo3(signature = (ranges, passwords, *, sessions=None))]
 pub(crate) fn rar_fast_verify_passwords_from_ranges(
     py: Python<'_>,
     ranges: &Bound<'_, PyList>,
     passwords: &Bound<'_, PyList>,
+    sessions: Option<&Bound<'_, PyTuple>>,
 ) -> PyResult<Py<PyAny>> {
     let candidates = passwords
         .iter()
         .map(|item| item.extract::<String>())
         .collect::<PyResult<Vec<_>>>()?;
-    let parsed: std::sync::Arc<[_]> = parse_ranges(ranges)?.into();
+    let parsed: std::sync::Arc<[_]> = parse_ranges(ranges, sessions)?.into();
     verify_prepared(py, ranges_key("rar", &parsed)?, &candidates, || {
         prepare_rar(|offset, len, field| read_ranges_at_field(&parsed, offset, len, field))
             .map(PasswordContext::Rar)
@@ -129,17 +131,20 @@ pub(crate) fn rar_fast_verify_passwords_from_ranges(
 }
 
 #[pyfunction]
+#[pyo3(signature = (parts, passwords, *, sessions=None))]
 pub(crate) fn rar_fast_verify_passwords_from_volumes(
     py: Python<'_>,
     parts: &Bound<'_, PyList>,
     passwords: &Bound<'_, PyList>,
+    sessions: Option<&Bound<'_, PyTuple>>,
 ) -> PyResult<Py<PyAny>> {
     let candidates = passwords
         .iter()
         .map(|item| item.extract::<String>())
         .collect::<PyResult<Vec<_>>>()?;
-    let volumes = VolumeSet::new(parse_volumes(parts)?);
+    let volumes = VolumeSet::new(parse_volumes(parts, sessions)?);
     verify_prepared(py, volumes.key("rar")?, &candidates, || {
+        volumes.require_contiguous()?;
         prepare_rar(|offset, len, field| volumes.first_volume_read_at_field(offset, len, field))
             .map(PasswordContext::Rar)
     })

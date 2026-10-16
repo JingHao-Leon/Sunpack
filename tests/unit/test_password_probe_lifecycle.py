@@ -44,8 +44,10 @@ def test_password_probe_releases_only_its_own_borrows(tmp_path, monkeypatch, mod
     physical = [str(path) for path in paths]
     outcome = {'status': 'no_match', 'matched_index': -1, 'attempts': 1}
 
-    def probe(*args):
+    def probe(*args, **kwargs):
         assert len(borrows(physical)) == 1 + (1 if mode == 'file' else 2)
+        if mode != 'file':
+            assert len(kwargs['sessions']) == 2
         if raise_error:
             raise RuntimeError('probe failed')
         return outcome

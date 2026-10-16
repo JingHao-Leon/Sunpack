@@ -45,4 +45,7 @@ def test_plan4_encrypted_sfx_split_missing_volumes(
         [path for path in case.archive_dir.iterdir() if path.is_file()]
     )
 
-    assert_missing_volume_or_ignored(case, [password], error_info=plan4_error)
+    assert_missing_volume_or_ignored(
+        case, [password], error_info=plan4_error,
+        allow_scan_ignore=scenario in {"missing_head", "only_middle", "only_tail"},
+    )

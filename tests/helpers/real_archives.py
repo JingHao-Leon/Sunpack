@@ -615,95 +615,69 @@ def create_zip_multidisk_archive(
     case_id: str,
     *,
     payload_size: int = 512,
+    password: str | None = None,
+    encryption: str = "ZipCrypto",
+    split_volume_size: int | None = None,
 ) -> ArchiveCase:
-    """Create a tiny real PKZIP multi-disk archive (.z01 + .zip).
+    """Convert a tool-created ZIP to PKZIP disks with disk-relative offsets.
 
-    The central directory is on the last disk and local entries are on disk 0;
-    this is intentionally different from 7-Zip's generic ``-v`` split format.
+    Default: local entries on .z01 and the directory on .zip. Fixed-size
+    disks also split encrypted member data, unlike the generic ``7z -v``
+    stream. 7-Zip independently verifies every complete set before use.
     """
-    source_dir = root / f"{case_id}_src"
-    payload = write_payload(source_dir, case_id, size_bytes=payload_size, profile="structured")
-    archive_dir = root / case_id
-    archive_dir.mkdir(parents=True, exist_ok=True)
-    entries = []
-    local_body = bytearray()
-    local_offsets: dict[str, int] = {}
-    for path in sorted(path for path in source_dir.rglob("*") if path.is_file()):
-        name = path.relative_to(source_dir).as_posix().encode("utf-8")
-        data = path.read_bytes()
-        offset = len(local_body)
-        local_offsets[path.relative_to(source_dir).as_posix()] = offset
-        local_body.extend(
-            struct.pack(
-                "<4s5H3I2H",
-                b"PK\x03\x04",
-                20,
-                0,
-                0,
-                0,
-                0,
-                zlib.crc32(data) & 0xFFFFFFFF,
-                len(data),
-                len(data),
-                len(name),
-                0,
-            )
+    if password is not None:
+        case = create_encrypted_zip_archive(
+            root, case_id, password=password, encryption=encryption,
+            method="Copy", payload_size=payload_size,
         )
-        local_body.extend(name)
-        local_body.extend(data)
-        entries.append((path.relative_to(source_dir).as_posix(), name, data))
-
-    central_directory = bytearray()
-    for entry_name, name, data in entries:
-        central_directory.extend(
-            struct.pack(
-                "<4s6H3I5H2HI",
-                b"PK\x01\x02",
-                20,
-                20,
-                0,
-                0,
-                0,
-                0,
-                zlib.crc32(data) & 0xFFFFFFFF,
-                len(data),
-                len(data),
-                len(name),
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                local_offsets[entry_name],
-            )
+        case.password = password
+    else:
+        source_dir = root / f"{case_id}_src"
+        payload = write_payload(source_dir, case_id, size_bytes=payload_size, profile="structured")
+        archive_dir = root / case_id
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        archive_path = archive_dir / f"{case_id}.zip"
+        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_STORED) as archive:
+            for path in sorted(source_dir.rglob("*")):
+                if path.is_file():
+                    archive.write(path, arcname=path.relative_to(source_dir).as_posix())
+        shutil.rmtree(source_dir, ignore_errors=True)
+        case = _case_from_payload(
+            root, case_id, "zip", archive_dir, archive_path, payload,
         )
-        central_directory.extend(name)
-    eocd = struct.pack(
-        "<4sHHHHIIH",
-        b"PK\x05\x06",
-        1,
-        1,
-        len(entries),
-        len(entries),
-        len(central_directory),
-        0,
-        0,
-    )
-    (archive_dir / f"{case_id}.z01").write_bytes(bytes(local_body))
-    archive_path = archive_dir / f"{case_id}.zip"
-    archive_path.write_bytes(bytes(central_directory) + eocd)
-    shutil.rmtree(source_dir, ignore_errors=True)
-    return _case_from_payload(
-        root,
-        case_id,
-        "zip",
-        archive_dir,
-        archive_dir / f"{case_id}.z01",
-        payload,
-        multidisk=True,
-        disk_count=2,
-    )
+    data = bytearray(case.entry_path.read_bytes())
+    eocd = data.rfind(b"PK\x05\x06")
+    assert eocd >= 0
+    count = struct.unpack_from("<H", data, eocd + 10)[0]
+    central = struct.unpack_from("<I", data, eocd + 16)[0]
+    chunk = central if split_volume_size is None else split_volume_size
+    assert chunk > 0
+    last = (len(data) - 1) // chunk
+    assert last >= 1 and central // chunk == eocd // chunk == last
+    cursor = central
+    for _ in range(count):
+        assert data[cursor:cursor + 4] == b"PK\x01\x02"
+        local = struct.unpack_from("<I", data, cursor + 42)[0]
+        struct.pack_into("<H", data, cursor + 34, local // chunk)
+        struct.pack_into("<I", data, cursor + 42, local % chunk)
+        name, extra, comment = struct.unpack_from("<HHH", data, cursor + 28)
+        cursor += 46 + name + extra + comment
+    struct.pack_into("<HH", data, eocd + 4, last, central // chunk)
+    struct.pack_into("<I", data, eocd + 16, central % chunk)
+    paths = []
+    for index, start in enumerate(range(0, len(data), chunk)):
+        suffix = ".zip" if index == last else f".z{index + 1:02}"
+        path = case.archive_dir / f"{case_id}{suffix}"
+        path.write_bytes(data[start:start + chunk])
+        paths.append(path)
+    command = [str(require_7z()), "t", str(paths[-1]), "-y"]
+    if password is not None:
+        command.append(f"-p{password}")
+    run_cmd(command, case.archive_dir)
+    case.entry_path = paths[0]
+    case.split = True
+    case.metadata.update(multidisk=True, disk_count=len(paths), volume_paths=paths)
+    return case
 
 
 def _craft_small_zip64(entries: dict[str, bytes]) -> bytes:

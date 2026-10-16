@@ -951,7 +951,7 @@ class WatchScheduler:
                     ),
                 )
                 delay = password_delay if delay is None else min(delay, password_delay)
-            if self._cache_cleanup_deadline is not None:
+            if self._cache_cleanup_deadline is not None and not self._cache_cleanup_blocked_locked():
                 cleanup_delay = max(0.0, self._cache_cleanup_deadline - monotonic_now)
                 delay = cleanup_delay if delay is None else min(delay, cleanup_delay)
         history_expiry = self.log.next_history_expiry
@@ -964,10 +964,15 @@ class WatchScheduler:
         with self._lock:
             self._cache_cleanup_deadline = None
 
+    def _cache_cleanup_blocked_locked(self) -> bool:
+        return bool(
+            self._closed or self._pending or self._inflight_requests
+            or self._inflight_path_counts or self._external_activity_requested
+        )
+
     def _schedule_journal_retirement(self) -> None:
         with self._lock:
-            if (self._closed or self._pending or self._inflight_requests
-                    or self._inflight_path_counts or self._external_activity_requested):
+            if self._cache_cleanup_blocked_locked():
                 return  # Completion will arm maintenance after existing work.
             if self._cache_cleanup_deadline is None:
                 self._cache_cleanup_deadline = time.monotonic() + self.runtime_cache_cleanup_idle_seconds
@@ -1020,7 +1025,7 @@ class WatchScheduler:
         with self._lock:
             if self._cache_cleanup_deadline is None or now < self._cache_cleanup_deadline:
                 return
-            if self._pending or self._inflight_requests or self._inflight_path_counts:
+            if self._cache_cleanup_blocked_locked():
                 return
         if self._external_activity_requested:
             return
@@ -1031,7 +1036,7 @@ class WatchScheduler:
             with self._lock:
                 if self._cache_cleanup_deadline is None or now < self._cache_cleanup_deadline:
                     return
-                if self._pending or self._inflight_requests or self._inflight_path_counts:
+                if self._cache_cleanup_blocked_locked():
                     return
                 self._cache_cleanup_deadline = None
                 self._pending.clear()

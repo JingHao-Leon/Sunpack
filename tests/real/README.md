@@ -5,6 +5,25 @@ require the isolated Broker environment established by `run_acceptance_tests.ps1
 
 The new regression cases cover:
 
+* `test_split_zip_failure_classification.py` covers actual PKZIP `.z01/.zip`
+  disks (ZipCrypto and AES256), in addition to Plan 4's generic `.zip.001`
+  streams. Complete sets pass an independent `7z t` and a successful SunPack
+  extraction before testing all-wrong passwords and six missing-disk layouts.
+  Missing sets with a correct password must report only `MISSING_VOLUME`;
+  complete sets with all-wrong passwords must report only `WRONG_PASSWORD`.
+  When both faults exist, either can surface first. A real watch lifecycle
+  for PKZIP (both ciphers), generic ZIP, 7z and RAR resolves the reported
+  blocker, checks suspension on the other, then resolves it and verifies a
+  successful extraction. RAR covers both middle and tail loss. No error
+  priority is required.
+  Headless fragments which the scanner does not recognize are asserted
+  separately. The real CLI and watch scheduler also process a junk-wrapped
+  outer ZIP containing concurrent healthy, wrong-password and missing-volume
+  disguised split groups. The scheduler test uses real files, engine, worker
+  and persistent blockers; only the installed Broker admission preflight is
+  bypassed, so this regression runs without a test service.
+  Plan 3/4/5 share strict recursive failure assertions, and recognized
+  incomplete inputs may no longer pass by disappearing during scanning.
 * LZ4 and TAR/LZ4 participate in Plan 1's ordinary/disguised/mixed directory
   matrices and concatenated streams. The nested CLI and Plan 7 restart/password
   fixtures contain a valid TAR/LZ4 carrier segment alongside encrypted 7z;

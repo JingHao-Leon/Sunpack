@@ -151,6 +151,8 @@ struct MatchResult {
     status: &'static str,
     coverage: Coverage,
     mismatch_count: usize,
+    size_mismatch_count: usize,
+    size_mismatches: Vec<(String, u64, u64)>,
     missing_count: usize,
     mismatches: Vec<Mismatch>,
     missing: Vec<String>,
@@ -311,6 +313,8 @@ fn match_inventory(
     let mut observations = Vec::with_capacity(detail_limit.min(expected.len()));
     let mut errors = Vec::new();
     let mut mismatch_count = 0usize;
+    let mut size_mismatch_count = 0usize;
+    let mut size_mismatches = Vec::new();
     let mut missing_count = 0usize;
     // Allocate once, only after a matched file actually needs a disk CRC read.
     // Worker CRC, disabled CRC, missing/failed/unwritten outputs need no buffer.
@@ -380,6 +384,9 @@ fn match_inventory(
         let size_incomplete = item
             .size
             .is_some_and(|expected_size| actual_size < expected_size);
+        let size_excess = item
+            .size
+            .is_some_and(|expected_size| actual_size > expected_size);
 
         let mut actual_crc = output.output_crc32;
         if verify_crc
@@ -464,6 +471,17 @@ fn match_inventory(
                 });
             }
             ("failed", Some(0.0))
+        } else if size_excess {
+            coverage.failed_files += 1;
+            size_mismatch_count += 1;
+            if size_mismatches.len() < max_issue_items {
+                size_mismatches.push((
+                    item.path.clone().into_owned(),
+                    item.size.unwrap_or(0),
+                    actual_size,
+                ));
+            }
+            ("failed", Some(0.0))
         } else if size_incomplete {
             coverage.partial_files += 1;
             ("partial", size_progress)
@@ -509,6 +527,8 @@ fn match_inventory(
         status: "ok",
         coverage,
         mismatch_count,
+        size_mismatch_count,
+        size_mismatches,
         missing_count,
         mismatches,
         missing,
@@ -536,6 +556,8 @@ fn empty_status_result(
             ..Coverage::default()
         },
         mismatch_count: 0,
+        size_mismatch_count: 0,
+        size_mismatches: Vec::new(),
         missing_count: 0,
         mismatches: Vec::new(),
         missing: Vec::new(),
@@ -555,6 +577,16 @@ fn match_result_to_py(py: Python<'_>, matched: MatchResult) -> PyResult<Py<PyDic
     result.set_item("status", matched.status)?;
     result.set_item("coverage", coverage_to_py(py, &matched.coverage)?)?;
     result.set_item("mismatch_count", matched.mismatch_count)?;
+    result.set_item("size_mismatch_count", matched.size_mismatch_count)?;
+    let size_mismatches = PyList::empty(py);
+    for (path, expected, actual) in matched.size_mismatches {
+        let row = PyDict::new(py);
+        row.set_item("path", path)?;
+        row.set_item("expected_size", expected)?;
+        row.set_item("actual_size", actual)?;
+        size_mismatches.append(row)?;
+    }
+    result.set_item("size_mismatches", size_mismatches)?;
     result.set_item("missing_count", matched.missing_count)?;
     result.set_item("used_worker_crc", matched.used_worker_crc)?;
     result.set_item("crc_files_read", matched.crc_files_read)?;

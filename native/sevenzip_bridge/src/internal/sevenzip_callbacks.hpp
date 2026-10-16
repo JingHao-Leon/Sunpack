@@ -26,6 +26,7 @@
 #include <mutex>
 
 #include <string>
+#include <stdexcept>
 
 #include <unordered_set>
 #include <unordered_map>
@@ -437,15 +438,50 @@ namespace sunpack::sevenzip
     class OutputPathAllocator
     {
     public:
+        explicit OutputPathAllocator(const std::filesystem::path &root) : root_(root) {}
         void reserve(std::size_t count) { used_.reserve(count); }
 
         void clear() noexcept
         {
             std::unordered_set<std::wstring>{}.swap(used_);
             std::unordered_map<std::wstring, std::size_t>{}.swap(next_numbers_);
+            std::unordered_map<std::wstring, std::filesystem::path>{}.swap(directories_);
         }
 
-        std::filesystem::path allocate(const std::filesystem::path &requested, bool initially_empty)
+        std::filesystem::path allocate(const std::filesystem::path &requested, bool initially_empty, bool is_directory = false)
+        {
+            if (is_directory) { return directory(requested, initially_empty); }
+            const auto parent = directory(requested.parent_path(), initially_empty);
+            return allocate_name(parent / requested.filename(), initially_empty, false);
+        }
+
+    private:
+        std::filesystem::path directory(const std::filesystem::path &requested, bool initially_empty)
+        {
+            std::vector<std::filesystem::path> missing;
+            auto cursor = requested;
+            std::filesystem::path parent;
+            for (;;)
+            {
+                if (cursor == root_) { parent = root_; break; }
+                const auto found = directories_.find(normalized_output_path_key(cursor));
+                if (found != directories_.end()) { parent = found->second; break; }
+                if (cursor.empty() || cursor == cursor.parent_path())
+                {
+                    throw std::invalid_argument("output path is outside its allocation root");
+                }
+                missing.push_back(cursor);
+                cursor = cursor.parent_path();
+            }
+            for (auto item = missing.rbegin(); item != missing.rend(); ++item)
+            {
+                parent = allocate_name(parent / item->filename(), initially_empty, true);
+                directories_.emplace(normalized_output_path_key(*item), parent);
+            }
+            return parent;
+        }
+
+        std::filesystem::path allocate_name(const std::filesystem::path &requested, bool initially_empty, bool is_directory)
         {
             auto key = normalized_output_path_key(requested);
             // Keep the common empty-output case to one hash-set insertion.
@@ -455,7 +491,9 @@ namespace sunpack::sevenzip
                 if (reservation.second) { return requested; }
                 key = *reservation.first;
             }
-            if (!initially_empty && available(requested, key))
+            std::error_code directory_error;
+            if (!initially_empty && used_.find(key) == used_.end()
+                && (available(requested, key) || (is_directory && std::filesystem::is_directory(requested, directory_error))))
             {
                 used_.insert(std::move(key));
                 return requested;
@@ -463,8 +501,8 @@ namespace sunpack::sevenzip
             auto &next = next_numbers_[key];
             if (next == 0) { next = 1; }
             const auto parent = requested.parent_path();
-            const auto stem = requested.stem().wstring();
-            const auto extension = requested.extension().wstring();
+            const auto stem = (is_directory ? requested.filename() : requested.stem()).wstring();
+            const auto extension = is_directory ? std::wstring{} : requested.extension().wstring();
             for (;;)
             {
                 const auto candidate = parent / (stem + L"(" + std::to_wstring(next++) + L")" + extension);
@@ -489,6 +527,8 @@ namespace sunpack::sevenzip
 
         std::unordered_set<std::wstring> used_;
         std::unordered_map<std::wstring, std::size_t> next_numbers_;
+        std::unordered_map<std::wstring, std::filesystem::path> directories_;
+        std::filesystem::path root_;
     };
 
     inline bool is_windows_invalid_name_char(wchar_t value)
@@ -664,7 +704,8 @@ namespace sunpack::sevenzip
 
                 output_root_(win32_extended_path(output_dir_)),
 
-                output_root_initially_empty_(directory_is_empty_or_missing(output_root_))
+                output_root_initially_empty_(directory_is_empty_or_missing(output_root_)),
+                output_paths_(output_root_)
         {
             output_paths_.reserve(static_cast<std::size_t>(estimated_items) * 2U + 1U);
             created_directories_.reserve(static_cast<std::size_t>(estimated_items) + 1U);
@@ -1022,7 +1063,7 @@ namespace sunpack::sevenzip
                     if (!dry_run_)
                     {
 
-                        target = output_root_ / safe_path.value();
+                        target = output_paths_.allocate(output_root_ / safe_path.value(), output_root_initially_empty_, true);
 
                         directory_ready = ensure_directory(target, &directory_error);
 

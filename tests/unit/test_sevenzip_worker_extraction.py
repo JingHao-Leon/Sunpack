@@ -576,10 +576,13 @@ def test_complete_worker_inventory_drops_transient_native_rows_and_output_trace(
 
 def test_worker_output_trace_includes_per_item_failure(tmp_path):
     worker = _require_worker_or_skip()
-    archive = _create_7z_with_nested_file(tmp_path)
+    archive = tmp_path / "directory-failure.zip"
+    # File/directory collisions are now renamed. An overlong parent still
+    # exercises directory creation failure, separately from async file-open errors.
+    with zipfile.ZipFile(archive, "w") as stream:
+        stream.writestr("conflict" + "x" * 260 + "/child.txt", "payload")
     out_dir = tmp_path / "out"
     out_dir.mkdir()
-    (out_dir / "conflict").write_text("blocks directory creation", encoding="utf-8")
     payload = {
         "job_id": "output-trace",
         "archive_path": str(archive),

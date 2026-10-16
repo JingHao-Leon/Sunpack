@@ -15,10 +15,61 @@ pub(crate) fn unsafe_archive_path(raw: &str) -> bool {
 pub(crate) struct OutputPathAllocator {
     used: HashSet<String>,
     next_numbers: HashMap<String, usize>,
+    directories: HashMap<String, String>,
 }
 
 impl OutputPathAllocator {
+    pub(crate) fn project(&mut self, raw: &str, is_directory: bool) -> String {
+        if unsafe_archive_path(raw) {
+            return raw.to_string();
+        }
+        let clean = windows_output_relative_path(clean_relative_archive_path(raw));
+        if is_directory {
+            self.allocate_directory(&clean)
+        } else {
+            self.allocate(clean.into_owned())
+        }
+    }
+
     pub(crate) fn allocate(&mut self, requested: String) -> String {
+        let (parent, name) = requested.rsplit_once('/').unwrap_or(("", &requested));
+        let parent = self.allocate_directory(parent);
+        let requested = if parent.is_empty() {
+            name.to_string()
+        } else {
+            format!("{parent}/{name}")
+        };
+        self.allocate_name(requested, false)
+    }
+
+    pub(crate) fn allocate_directory(&mut self, requested: &str) -> String {
+        let mut missing = Vec::new();
+        let mut cursor = requested.trim_end_matches('/');
+        let mut parent = loop {
+            if cursor.is_empty() {
+                break String::new();
+            }
+            if let Some(mapped) = self.directories.get(&crate::path_keys::case_key(cursor)) {
+                break mapped.clone();
+            }
+            let (above, name) = cursor.rsplit_once('/').unwrap_or(("", cursor));
+            missing.push((cursor, name));
+            cursor = above;
+        };
+        for (original, name) in missing.into_iter().rev() {
+            let path = if parent.is_empty() {
+                name.to_string()
+            } else {
+                format!("{parent}/{name}")
+            };
+            parent = self.allocate_name(path, true);
+            self.directories
+                .insert(crate::path_keys::case_key(original), parent.clone());
+        }
+        parent
+    }
+
+    fn allocate_name(&mut self, requested: String, is_directory: bool) -> String {
         let key = crate::path_keys::case_key(&requested);
         if self.used.insert(key.clone()) {
             return requested;
@@ -27,7 +78,7 @@ impl OutputPathAllocator {
         let slash = requested.rfind('/').map_or(0, |position| position + 1);
         let dot = requested[slash..]
             .rfind('.')
-            .filter(|&position| position > 0);
+            .filter(|&position| position > 0 && !is_directory);
         let split = dot.map_or(requested.len(), |position| slash + position);
         loop {
             let candidate = format!("{}({}){}", &requested[..split], *next, &requested[split..]);

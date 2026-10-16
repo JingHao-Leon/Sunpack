@@ -529,6 +529,7 @@ HRESULT CArchive::ReadDataToBuffer(const CItemEx &item,
 
 struct CPaxInfo: public CPaxTimes
 {
+  bool Method_Error;
   bool DoubleTagError;
   bool TagParsingError;
   bool UnknownLines_Overflow;
@@ -638,6 +639,7 @@ static bool ParsePaxTime(const AString &src, CPaxTime &pt, bool &doubleTagError)
 
 bool CPaxInfo::ParsePax(const CTempBuffer &tb, bool isFile)
 {
+  Method_Error = false;
   DoubleTagError = false;
   TagParsingError = false;
   UnknownLines_Overflow = false;
@@ -692,6 +694,12 @@ bool CPaxInfo::ParsePax(const CTempBuffer &tb, bool isFile)
 
     name.SetFrom(s + offset, i - offset);
     val.SetFrom(s + i + 1, (unsigned)(size - 1 - (i + 1)));
+
+    // SunPack fallback: unknown sparse encodings change payload semantics.
+    // Preserve the existing unsupported-method signal instead of copying an
+    // in-band sparse map as apparently successful regular-file contents.
+    if (name.IsPrefixedBy("GNU.sparse."))
+      Method_Error = true;
     
     bool parsed = false;
     if (isFile)
@@ -956,6 +964,7 @@ HRESULT CArchive::ReadItem2(CItemEx &item)
         CPaxInfo paxInfo;
         if (paxInfo.ParsePax(PaxBuf_global, false))
         {
+          _pax_unsupported_method |= paxInfo.Method_Error;
           PaxGlobal.RawLines = paxInfo.UnknownLines;
           PaxGlobal.RecordPath = item.Name;
           PaxGlobal_Defined = true;
@@ -1018,6 +1027,7 @@ HRESULT CArchive::ReadItem2(CItemEx &item)
       item.Pax_Error = true;
     else
     {
+      item.Method_Error |= paxInfo.Method_Error;
       if (paxInfo.Path_Defined) //  if (!paxInfo.Path.IsEmpty())
       {
         item.Name = paxInfo.Path;
@@ -1079,6 +1089,7 @@ HRESULT CArchive::ReadItem2(CItemEx &item)
     }
   }
 
+  item.Method_Error |= _pax_unsupported_method;
   return S_OK;
 }
 

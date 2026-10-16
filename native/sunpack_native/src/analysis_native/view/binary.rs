@@ -52,7 +52,7 @@ impl AnalysisBinaryView {
         offset: u64,
         size: usize,
     ) -> PyResult<Bound<'py, PyBytes>> {
-        let data = self.read_at_bytes(offset, size)?;
+        let data = self.read_at_bytes_detached(py, offset, size)?;
         Ok(PyBytes::new(py, &data))
     }
 
@@ -60,7 +60,7 @@ impl AnalysisBinaryView {
         let view_size = self.reader.len();
         let read_size = size.min(view_size as usize);
         let offset = view_size.saturating_sub(read_size as u64);
-        let data = self.read_at_bytes(offset, read_size)?;
+        let data = self.read_at_bytes_detached(py, offset, read_size)?;
         Ok(PyBytes::new(py, &data))
     }
 
@@ -99,57 +99,8 @@ impl AnalysisBinaryView {
         start_offset: u64,
         max_blocks_to_walk: usize,
     ) -> PyResult<Py<PyDict>> {
-        let result = PyDict::new(py);
-        result.set_item("format", "rar")?;
-        result.set_item("plausible", false)?;
-        result.set_item("magic_matched", false)?;
-        result.set_item("strong_accept", false)?;
-        result.set_item("error", "")?;
-        result.set_item("archive_offset", start_offset)?;
-        result.set_item("segment_end", 0u64)?;
-        result.set_item("version", 0u8)?;
-        result.set_item("blocks_checked", 0usize)?;
-        result.set_item("end_block_found", false)?;
-        result.set_item("end_block_flags", 0u64)?;
-        result.set_item("first_header_offset", 0u64)?;
-        result.set_item("first_header_size", 0u64)?;
-        result.set_item("first_header_type", 0u64)?;
-        result.set_item("header_crc_checked", false)?;
-        result.set_item("header_crc_ok", false)?;
-        result.set_item("second_block_checked", false)?;
-        result.set_item("second_block_ok", false)?;
-        result.set_item("second_block_type", 0u64)?;
-        result.set_item("second_block_size", 0u64)?;
-        result.set_item("block_walk_ok", false)?;
-        result.set_item("evidence", PyList::empty(py))?;
-
-        let header = match self.read_field_at_bytes(
-            start_offset,
-            RAR5.len(),
-            "rar.signature",
-            FieldLocation::Head,
-        ) {
-            Ok(data) => data,
-            Err(fault) => {
-                set_view_read_fault(&result, &fault, "rar_signature_incomplete_or_unknown")?;
-                return Ok(result.unbind());
-            }
-        };
-        if header.starts_with(RAR5) {
-            result.set_item("magic_matched", true)?;
-            result.set_item("version", 5u8)?;
-            self.probe_rar5(py, &result, start_offset, max_blocks_to_walk)?;
-        } else if header.starts_with(RAR4) {
-            result.set_item("magic_matched", true)?;
-            result.set_item("version", 4u8)?;
-            self.probe_rar4(py, &result, start_offset, max_blocks_to_walk)?;
-        } else if header.starts_with(b"Rar!") {
-            result.set_item("magic_matched", true)?;
-            result.set_item("error", "rar_signature_incomplete_or_unknown")?;
-        } else {
-            result.set_item("error", "rar_signature_not_found")?;
-        }
-        Ok(result.unbind())
+        py.detach(|| self.probe_rar_native(start_offset, max_blocks_to_walk))?
+            .to_python(py)
     }
 
     #[pyo3(signature = (start_offset, max_next_header_check_bytes=1048576))]
@@ -183,7 +134,8 @@ impl AnalysisBinaryView {
         result.set_item("encryption_scan_complete", false)?;
         result.set_item("evidence", PyList::empty(py))?;
 
-        let header = match self.read_field_at_bytes(
+        let header = match self.read_field_at_bytes_detached(
+            py,
             start_offset,
             32,
             "7z.start_header",
@@ -257,7 +209,8 @@ impl AnalysisBinaryView {
         evidence.append("7z:start_header_crc")?;
         evidence.append("7z:next_header_range")?;
         if next_header_size <= max_next_header_check_bytes {
-            let next_header = match self.read_field_at_bytes(
+            let next_header = match self.read_field_at_bytes_detached(
+                py,
                 next_header_start,
                 next_header_size as usize,
                 "7z.next_header",
@@ -270,7 +223,7 @@ impl AnalysisBinaryView {
                     return Ok(result.unbind());
                 }
             };
-            let crc_ok = crc32(&next_header) == next_header_crc;
+            let crc_ok = py.detach(|| crc32(&next_header)) == next_header_crc;
             let nid = next_header.first().copied().unwrap_or(0);
             let nid_valid = nid == 0x01 || nid == 0x17;
             result.set_item("next_header_crc_checked", true)?;
@@ -280,10 +233,11 @@ impl AnalysisBinaryView {
             if crc_ok {
                 evidence.append("7z:next_header_crc")?;
                 if nid_valid {
-                    let encryption =
+                    let encryption = py.detach(|| {
                         crate::formats::seven_zip::seven_zip_encryption_facts_from_next_header(
                             &next_header,
-                        );
+                        )
+                    });
                     result.set_item("password_required", encryption.password_required)?;
                     result.set_item("encrypted_header", encryption.encrypted_header)?;
                     result.set_item("encrypted_payload", encryption.encrypted_payload)?;

@@ -11,6 +11,7 @@ from sunpack.core.support.filesystem_scan_errors import (
     filesystem_scan_failure, is_filesystem_scan_failure,
 )
 from sunpack.core.i18n import I18nContext
+from sunpack.core.support.path_map import PathMap
 
 
 class RunState:
@@ -20,10 +21,62 @@ class RunState:
         self.processed_keys: set[str] = set()
         self.cleanup_results: list[ArchiveCleanupResult] = []
         self.target_results: list[TargetRunResult] = []
+        self._target_slots: dict[int, int] = {}
+        self._target_outputs = PathMap()
+        self._cleanup_paths = PathMap()
         self.policy_skips: list[dict] = []
         self._scan_error_keys: set[tuple[str, str, str]] | None = None
         self._omitted_scan_errors = 0
         self._scan_language = "en"
+
+    def add_target_result(self, result: TargetRunResult) -> None:
+        slot = len(self.target_results)
+        self.target_results.append(result)
+        self._store_target_result(slot, result)
+
+    def _store_target_result(self, slot: int, result: TargetRunResult) -> None:
+        self._target_slots.pop(id(self.target_results[slot]), None)
+        self.target_results[slot] = result
+        self._target_slots[id(result)] = slot
+        if result.output_dir:
+            self._target_outputs.setdefault(result.output_dir, []).append(slot)
+
+    def replace_target_result(self, old: TargetRunResult, new: TargetRunResult) -> None:
+        slot = self._target_slots.pop(id(old), None)
+        if slot is None:
+            return
+        if old.output_dir:
+            slots = self._target_outputs.get(old.output_dir)
+            if slots is not None:
+                slots.remove(slot)
+                if not slots:
+                    del self._target_outputs[old.output_dir]
+        self._store_target_result(slot, new)
+
+    def add_cleanup_result(self, result: ArchiveCleanupResult) -> None:
+        slot = len(self.cleanup_results)
+        self.cleanup_results.append(result)
+        if result.path:
+            self._cleanup_paths.setdefault(result.path, []).append(slot)
+
+    def set_cleanup_results(self, results: Iterable[ArchiveCleanupResult]) -> None:
+        self.cleanup_results.clear()
+        self._cleanup_paths.clear()
+        for result in results:
+            self.add_cleanup_result(result)
+
+    def relocate_outputs(self, result) -> None:
+        for _path, slots in self._target_outputs.pop_under(result.path):
+            for slot in slots:
+                old = self.target_results[slot]
+                path = result.relocate(old.output_dir)
+                self._store_target_result(slot, replace(old, output_dir=path) if path != old.output_dir else old)
+        for _path, slots in self._cleanup_paths.pop_under(result.path):
+            for slot in slots:
+                old = self.cleanup_results[slot]
+                path = result.relocate(old.path)
+                self.cleanup_results[slot] = replace(old, path=path) if path != old.path else old
+                self._cleanup_paths.setdefault(path, []).append(slot)
 
     @property
     def scan_failures(self) -> list[FailureInfo]:

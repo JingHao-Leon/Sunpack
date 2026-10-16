@@ -5,7 +5,8 @@ import threading
 import time
 from typing import Any
 
-from sunpack.core.support.path_keys import case_key, path_key_is_under
+from sunpack.core.support.path_keys import case_key
+from sunpack.core.support.path_map import PathMap
 from sunpack.core.contracts.failures import FailureInfo, FailureKind
 from sunpack.core.contracts.results import DirectoryFlattenResult, RunSummary, OutcomeKind
 from sunpack.core.i18n import I18nContext
@@ -50,8 +51,8 @@ class RunReporter:
         self._nested_tasks = 0
         self._max_depth = 0
         self._task_lineages: dict[int, tuple[str, ...]] = {}
-        self._output_lineages: dict[str, tuple[str, ...]] = {}
-        self._top_level_outputs: list[str] = []
+        self._output_lineages = PathMap()
+        self._top_level_outputs = PathMap()
         self._interactive = not self.quiet and _terminal_supports_updates(self.stdout)
         self._use_color = self._interactive and os.environ.get("NO_COLOR") is None
         self._panel_tasks: list[int] = []
@@ -235,8 +236,8 @@ class RunReporter:
             if success and out_dir:
                 lineage = (*parent_lineage, name)
                 self._output_lineages[_absolute_key(out_dir)] = lineage
-                if depth == 1 and out_dir not in self._top_level_outputs:
-                    self._top_level_outputs.append(out_dir)
+                if depth == 1:
+                    self._top_level_outputs.setdefault(out_dir, out_dir)
 
             if self.quiet:
                 return
@@ -271,13 +272,10 @@ class RunReporter:
 
     def relocate_outputs(self, result: DirectoryFlattenResult) -> None:
         with self._lock:
-            self._top_level_outputs = list(dict.fromkeys(
-                result.relocate(path) for path in self._top_level_outputs
-            ))
-            self._output_lineages = {
-                _absolute_key(result.relocate(path)): lineage
-                for path, lineage in self._output_lineages.items()
-            }
+            for _path, original in self._top_level_outputs.pop_under(result.path):
+                relocated = result.relocate(original)
+                self._top_level_outputs[relocated] = relocated
+            self._output_lineages.relocate(result)
 
     def log_final_summary(
         self,
@@ -353,14 +351,14 @@ class RunReporter:
         if not path:
             return ()
         candidate = _absolute_key(path)
-        best_root = ""
-        best_lineage: tuple[str, ...] = ()
-        for output_root, lineage in self._output_lineages.items():
-            inside = path_key_is_under(candidate, output_root)
-            if inside and len(output_root) > len(best_root):
-                best_root = output_root
-                best_lineage = lineage
-        return best_lineage
+        while True:
+            lineage = self._output_lineages.get(candidate)
+            if lineage is not None:
+                return lineage
+            parent = os.path.dirname(candidate)
+            if parent == candidate:
+                return ()
+            candidate = parent
 
     def _update_task_locked(
         self,
@@ -450,7 +448,7 @@ class RunReporter:
         return "" if depth <= 1 else "  " * (depth - 1) + "+- "
 
     def _output_location(self) -> str:
-        outputs = [os.path.abspath(os.path.normpath(path)) for path in self._top_level_outputs if path]
+        outputs = [os.path.abspath(os.path.normpath(path)) for path in self._top_level_outputs.values() if path]
         if not outputs:
             return ""
         if len(outputs) == 1:

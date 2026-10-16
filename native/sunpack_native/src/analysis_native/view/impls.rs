@@ -27,11 +27,31 @@ impl AnalysisBinaryView {
             .map_err(reader_error_to_py)
     }
 
-    fn read_tail_bytes(&self, size: usize) -> PyResult<Vec<u8>> {
+    fn read_tail_bytes(&self, py: Python<'_>, size: usize) -> PyResult<Vec<u8>> {
         let view_size = self.reader.len();
         let read_size = size.min(view_size as usize);
         let offset = view_size.saturating_sub(read_size as u64);
-        self.read_at_bytes(offset, read_size)
+        self.read_at_bytes_detached(py, offset, read_size)
+    }
+
+    fn read_at_bytes_detached(
+        &self,
+        py: Python<'_>,
+        offset: u64,
+        size: usize,
+    ) -> PyResult<Vec<u8>> {
+        py.detach(|| self.read_at_bytes(offset, size))
+    }
+
+    fn read_field_at_bytes_detached(
+        &self,
+        py: Python<'_>,
+        offset: u64,
+        size: usize,
+        field: &'static str,
+        location: FieldLocation,
+    ) -> Result<Vec<u8>, ReadFault> {
+        py.detach(|| self.read_field_at_bytes(offset, size, field, location))
     }
 
     pub(crate) fn probe_zip_local_header_native(
@@ -50,16 +70,11 @@ impl AnalysisBinaryView {
         result.set_item("filename_len", 0u16)?;
         result.set_item("extra_len", 0u16)?;
 
-        let header = self.read_at_bytes(offset, 30)?;
+        let header = self.read_at_bytes_detached(py, offset, 30)?;
         if header.len() < 30 {
-            let fault = ReadFault::short_read(
-                "read_exact_at",
-                offset,
-                30,
-                header.len(),
-                self.reader.len(),
-            )
-            .with_field("zip.local_header.fixed", FieldLocation::Body);
+            let fault =
+                ReadFault::short_read("read_exact_at", offset, 30, header.len(), self.reader.len())
+                    .with_field("zip.local_header.fixed", FieldLocation::Body);
             set_view_read_fault(&result, &fault, "short_header")?;
             result.set_item("magic_matched", header.starts_with(b"PK"))?;
             return Ok(result.unbind());
@@ -127,7 +142,7 @@ impl AnalysisBinaryView {
 
         let size = self.reader.len();
         if let Some(offset) = requested_offset {
-            let record = self.read_at_bytes(offset, 22)?;
+            let record = self.read_at_bytes_detached(py, offset, 22)?;
             if record.len() == 22 && record.starts_with(ZIP_EOCD) {
                 let available = size
                     .saturating_sub(offset.saturating_add(22))
@@ -141,7 +156,7 @@ impl AnalysisBinaryView {
         if read_size < 4 {
             return Ok(result.unbind());
         }
-        let tail = self.read_tail_bytes(read_size)?;
+        let tail = self.read_tail_bytes(py, read_size)?;
         let base = size.saturating_sub(tail.len() as u64);
         let mut search_end = tail.len();
         let mut fallback: Option<(u64, [u8; 22], i64)> = None;
@@ -213,8 +228,13 @@ impl AnalysisBinaryView {
         result.set_item("content_integrity_warning", "")?;
         result.set_item("evidence", PyList::empty(py))?;
 
-        let eocd = match self.read_field_at_bytes(eocd_offset, 22, "zip.eocd", FieldLocation::Tail)
-        {
+        let eocd = match self.read_field_at_bytes_detached(
+            py,
+            eocd_offset,
+            22,
+            "zip.eocd",
+            FieldLocation::Tail,
+        ) {
             Ok(data) => data,
             Err(fault) => {
                 set_view_read_fault(&result, &fault, "eocd_too_small")?;
@@ -255,7 +275,8 @@ impl AnalysisBinaryView {
         if eocd_offset >= (ZIP64_EOCD_RECORD_SIZE + ZIP64_EOCD_LOCATOR_SIZE) as u64 {
             let block_offset =
                 eocd_offset - (ZIP64_EOCD_RECORD_SIZE + ZIP64_EOCD_LOCATOR_SIZE) as u64;
-            if let Ok(block) = self.read_field_at_bytes(
+            if let Ok(block) = self.read_field_at_bytes_detached(
+                py,
                 block_offset,
                 ZIP64_EOCD_RECORD_SIZE + ZIP64_EOCD_LOCATOR_SIZE,
                 "zip.zip64_eocd_tail",
@@ -293,10 +314,13 @@ impl AnalysisBinaryView {
         result.set_item("zip64_eocd_offset", zip64_eocd_offset)?;
         result.set_item(
             "zip64_locator_offset",
-            if zip64_present { eocd_offset - 20 } else { 0u64 },
+            if zip64_present {
+                eocd_offset - 20
+            } else {
+                0u64
+            },
         )?;
-        let is_multi_disk =
-            effective_disk_number != 0 || effective_central_directory_disk != 0;
+        let is_multi_disk = effective_disk_number != 0 || effective_central_directory_disk != 0;
         result.set_item("is_multi_disk", is_multi_disk)?;
         result.set_item("disk_number", effective_disk_number)?;
         result.set_item("central_directory_disk", effective_central_directory_disk)?;
@@ -365,15 +389,15 @@ impl AnalysisBinaryView {
             };
             offset
         } else {
-            let naive_physical_central_offset =
-                directory_end - effective_central_directory_size;
+            let naive_physical_central_offset = directory_end - effective_central_directory_size;
             let declared_physical_central_offset = effective_central_directory_offset;
             // Prefer the physically verified declared offset when the naive
             // back-computation misses the signature. Otherwise keep the
             // naive position so carrier/SFX prefixes retain archive_offset.
             if naive_physical_central_offset != declared_physical_central_offset {
                 let naive_ok = self
-                    .read_field_at_bytes(
+                    .read_field_at_bytes_detached(
+                        py,
                         naive_physical_central_offset,
                         4,
                         "zip.central_directory.signature",
@@ -381,7 +405,8 @@ impl AnalysisBinaryView {
                     )
                     .is_ok_and(|sig| sig.as_slice() == ZIP_CENTRAL);
                 let declared_ok = self
-                    .read_field_at_bytes(
+                    .read_field_at_bytes_detached(
+                        py,
                         declared_physical_central_offset,
                         4,
                         "zip.central_directory.signature",
@@ -424,7 +449,8 @@ impl AnalysisBinaryView {
             return Ok(result.unbind());
         }
 
-        let central_sig = match self.read_field_at_bytes(
+        let central_sig = match self.read_field_at_bytes_detached(
+            py,
             physical_central_offset,
             4,
             "zip.central_directory.signature",
@@ -441,15 +467,17 @@ impl AnalysisBinaryView {
             return Ok(result.unbind());
         }
         result.set_item("central_directory_present", true)?;
-        let (entries_checked, cd_ok, links_checked, links_ok, encrypted_entries, error) = self
-            .walk_zip_central_directory(
-                archive_offset,
-                physical_central_offset,
-                effective_central_directory_size,
-                effective_total_entries as usize,
-                max_cd_entries_to_walk,
-                disk_starts.filter(|_| is_multi_disk),
-            )?;
+        let (entries_checked, cd_ok, links_checked, links_ok, encrypted_entries, error) = py
+            .detach(|| {
+                self.walk_zip_central_directory(
+                    archive_offset,
+                    physical_central_offset,
+                    effective_central_directory_size,
+                    effective_total_entries as usize,
+                    max_cd_entries_to_walk,
+                    disk_starts.filter(|_| is_multi_disk),
+                )
+            })?;
         result.set_item("central_directory_entries_checked", entries_checked)?;
         result.set_item("central_directory_encrypted_entries", encrypted_entries)?;
         result.set_item("central_directory_walk_ok", cd_ok)?;
@@ -473,13 +501,15 @@ impl AnalysisBinaryView {
             result.set_item("plausible", true)?;
             result.set_item(
                 "content_integrity_warning",
-                self.zip_content_integrity_warning(
-                    archive_offset,
-                    physical_central_offset,
-                    effective_total_entries as usize,
-                    max_cd_entries_to_walk,
-                    disk_starts.filter(|_| is_multi_disk),
-                )?,
+                py.detach(|| {
+                    self.zip_content_integrity_warning(
+                        archive_offset,
+                        physical_central_offset,
+                        effective_total_entries as usize,
+                        max_cd_entries_to_walk,
+                        disk_starts.filter(|_| is_multi_disk),
+                    )
+                })?,
             )?;
             let evidence = PyList::empty(py);
             evidence.append("zip:eocd")?;
@@ -670,379 +700,6 @@ impl AnalysisBinaryView {
         Ok("")
     }
 
-    fn probe_rar4(
-        &self,
-        py: Python<'_>,
-        result: &Bound<'_, PyDict>,
-        start_offset: u64,
-        max_blocks: usize,
-    ) -> PyResult<()> {
-        let mut cursor = start_offset + RAR4.len() as u64;
-        let size = self.reader.len();
-        let evidence = PyList::empty(py);
-        evidence.append("rar4:signature")?;
-        for index in 0..max_blocks {
-            if cursor.saturating_add(7) > size {
-                result.set_item("blocks_checked", index)?;
-                let location = if index == 0 {
-                    FieldLocation::Head
-                } else {
-                    FieldLocation::Tail
-                };
-                let fault = ReadFault::short_read(
-                    "read_record",
-                    cursor,
-                    7,
-                    size.saturating_sub(cursor) as usize,
-                    size,
-                )
-                .with_field("rar4.block.header", location);
-                set_view_read_fault(result, &fault, "rar4_block_header_out_of_range")?;
-                return Ok(());
-            }
-            let fixed = self.read_at_bytes(cursor, 7)?;
-            let header_crc = u16_le(&fixed, 0);
-            let header_type = fixed[2];
-            let header_flags = u16_le(&fixed, 3);
-            let header_size = u16_le(&fixed, 5) as u64;
-            if index == 0 {
-                result.set_item("first_header_offset", cursor)?;
-                result.set_item("first_header_type", header_type)?;
-                result.set_item("first_header_size", header_size)?;
-            } else if index == 1 {
-                result.set_item("second_block_checked", true)?;
-                result.set_item("second_block_type", header_type)?;
-                result.set_item("second_block_size", header_size)?;
-            }
-            if !matches!(header_type, 0x72..=0x7B) {
-                result.set_item("blocks_checked", index)?;
-                result.set_item("error", "rar4_block_unknown_type")?;
-                return Ok(());
-            }
-            if header_size < 7 || cursor.saturating_add(header_size) > size {
-                result.set_item("blocks_checked", index)?;
-                let location = if index == 0 {
-                    FieldLocation::Head
-                } else {
-                    FieldLocation::Tail
-                };
-                let fault = ReadFault::short_read(
-                    "read_declared_range",
-                    cursor,
-                    usize::try_from(header_size).unwrap_or(usize::MAX),
-                    size.saturating_sub(cursor) as usize,
-                    size,
-                )
-                .with_field("rar4.block.header", location);
-                set_view_read_fault(result, &fault, "rar4_block_size_out_of_range")?;
-                return Ok(());
-            }
-            let full_header = self.read_at_bytes(cursor, header_size as usize)?;
-            let crc_ok = (crc32(&full_header[2..]) & 0xFFFF) == header_crc as u32;
-            if index == 0 {
-                result.set_item("header_crc_checked", true)?;
-                result.set_item("header_crc_ok", crc_ok)?;
-            } else if index == 1 {
-                result.set_item("second_block_ok", crc_ok)?;
-            }
-            if !crc_ok {
-                result.set_item("blocks_checked", index)?;
-                result.set_item("error", "rar4_block_crc_mismatch")?;
-                result.set_item("damaged_header_type", header_type)?;
-                let flag = match header_type {
-                    0x73 => "rar_main_header_crc_bad",
-                    0x74 => "rar_file_header_crc_bad",
-                    0x7A => "rar_service_header_crc_bad",
-                    0x7B => "rar_end_header_crc_bad",
-                    _ => "rar_header_crc_bad",
-                };
-                result.set_item("damage_flags", PyList::new(py, [flag])?)?;
-                return Ok(());
-            }
-            let mut block_size = header_size;
-            if header_flags & 0x8000 != 0 {
-                if header_size < 11 {
-                    result.set_item("blocks_checked", index)?;
-                    result.set_item("error", "rar4_block_add_size_missing")?;
-                    return Ok(());
-                }
-                block_size += u32_le(&full_header, 7) as u64;
-            }
-            let next_cursor = cursor.saturating_add(block_size);
-            if next_cursor > size {
-                result.set_item("blocks_checked", index)?;
-                let fault = ReadFault::short_read(
-                    "read_declared_range",
-                    cursor + header_size,
-                    usize::try_from(block_size.saturating_sub(header_size)).unwrap_or(usize::MAX),
-                    size.saturating_sub(cursor + header_size) as usize,
-                    size,
-                )
-                .with_field("rar4.block.payload", FieldLocation::Tail);
-                set_view_read_fault(result, &fault, "rar4_block_payload_out_of_range")?;
-                return Ok(());
-            }
-            if index == 0 && header_type != 0x73 {
-                result.set_item("blocks_checked", 1usize)?;
-                result.set_item("error", "rar4_main_header_missing")?;
-                return Ok(());
-            }
-            if index == 0 {
-                evidence.append("rar4:main_header")?;
-            } else if index == 1 {
-                result.set_item("block_walk_ok", true)?;
-            }
-            // A validated plaintext main header that declares MHD_PASSWORD
-            // (0x0080) means every following header is encrypted, so the block
-            // walk cannot continue without the password.  Mirror the RAR5
-            // encryption-header handling: this is strong structural evidence
-            // of a password-protected archive, and reporting a truncated
-            // chain here would misclassify a valid encrypted archive.  Stop at
-            // the end of the main header (segment_end == 0 tells the caller to
-            // derive the segment end from the next archive boundary) and let
-            // extraction retry with the password.
-            if index == 0 && header_flags & 0x0080 != 0 {
-                evidence.append("rar4:encryption_header")?;
-                result.set_item("plausible", true)?;
-                result.set_item("strong_accept", true)?;
-                result.set_item("header_encrypted", true)?;
-                result.set_item("password_required", true)?;
-                result.set_item("block_walk_ok", true)?;
-                result.set_item("blocks_checked", 1usize)?;
-                result.set_item("segment_end", 0u64)?;
-                result.set_item("evidence", evidence)?;
-                return Ok(());
-            }
-            if header_type == 0x7B {
-                evidence.append("rar4:end_block")?;
-                result.set_item("plausible", true)?;
-                result.set_item("strong_accept", true)?;
-                result.set_item("blocks_checked", index + 1)?;
-                result.set_item("end_block_found", true)?;
-                result.set_item("end_block_flags", u64::from(header_flags))?;
-                result.set_item("segment_end", next_cursor)?;
-                result.set_item("evidence", evidence)?;
-                return Ok(());
-            }
-            cursor = next_cursor;
-        }
-        result.set_item("blocks_checked", max_blocks)?;
-        result.set_item("segment_end", cursor)?;
-        result.set_item("plausible", true)?;
-        result.set_item("error", "rar4_block_walk_limit_reached")?;
-        result.set_item("evidence", evidence)?;
-        Ok(())
-    }
-
-    fn probe_rar5(
-        &self,
-        py: Python<'_>,
-        result: &Bound<'_, PyDict>,
-        start_offset: u64,
-        max_blocks: usize,
-    ) -> PyResult<()> {
-        let mut cursor = start_offset + RAR5.len() as u64;
-        let size = self.reader.len();
-        let evidence = PyList::empty(py);
-        evidence.append("rar5:signature")?;
-        for index in 0..max_blocks {
-            if cursor.saturating_add(6) > size {
-                result.set_item("blocks_checked", index)?;
-                let location = if index == 0 {
-                    FieldLocation::Head
-                } else {
-                    FieldLocation::Tail
-                };
-                let fault = ReadFault::short_read(
-                    "read_record",
-                    cursor,
-                    6,
-                    size.saturating_sub(cursor) as usize,
-                    size,
-                )
-                .with_field("rar5.block.header", location);
-                set_view_read_fault(result, &fault, "rar5_block_header_out_of_range")?;
-                return Ok(());
-            }
-            let first = self.read_at_bytes(cursor, 64)?;
-            let Some((header_size, after_size)) = read_vint(&first, 4) else {
-                result.set_item("blocks_checked", index)?;
-                let location = if index == 0 {
-                    FieldLocation::Head
-                } else {
-                    FieldLocation::Tail
-                };
-                let fault = ReadFault::short_read(
-                    "parse_variable_integer",
-                    cursor + 4,
-                    4,
-                    first.len().saturating_sub(4).min(4),
-                    size,
-                )
-                .with_field("rar5.block.header_size", location);
-                set_view_read_fault(result, &fault, "rar5_header_size_vint_missing")?;
-                return Ok(());
-            };
-            if after_size.saturating_sub(4) > 3 {
-                result.set_item("blocks_checked", index)?;
-                result.set_item("error", "rar5_header_size_vint_too_long")?;
-                return Ok(());
-            }
-            let header_total_size = 4u64
-                .saturating_add((after_size - 4) as u64)
-                .saturating_add(header_size);
-            if header_size == 0 || cursor.saturating_add(header_total_size) > size {
-                result.set_item("blocks_checked", index)?;
-                let location = if index == 0 {
-                    FieldLocation::Head
-                } else {
-                    FieldLocation::Tail
-                };
-                let fault = ReadFault::short_read(
-                    "read_declared_range",
-                    cursor,
-                    usize::try_from(header_total_size).unwrap_or(usize::MAX),
-                    size.saturating_sub(cursor) as usize,
-                    size,
-                )
-                .with_field("rar5.block.header", location);
-                set_view_read_fault(result, &fault, "rar5_header_size_out_of_range")?;
-                return Ok(());
-            }
-            let full = self.read_at_bytes(cursor, header_total_size as usize)?;
-            let Some((header_type, after_type)) = read_vint(&full, after_size) else {
-                result.set_item("blocks_checked", index)?;
-                result.set_item("error", "rar5_header_type_vint_missing")?;
-                return Ok(());
-            };
-            let Some((header_flags, after_flags)) = read_vint(&full, after_type) else {
-                result.set_item("blocks_checked", index)?;
-                result.set_item("error", "rar5_header_flags_vint_missing")?;
-                return Ok(());
-            };
-            if index == 0 {
-                result.set_item("first_header_offset", cursor)?;
-                result.set_item("first_header_type", header_type)?;
-                result.set_item("first_header_size", header_size)?;
-            } else if index == 1 {
-                result.set_item("second_block_checked", true)?;
-                result.set_item("second_block_type", header_type)?;
-                result.set_item("second_block_size", header_size)?;
-            }
-            if !matches!(header_type, 1..=5) && header_flags & 0x0004 == 0 {
-                result.set_item("blocks_checked", index)?;
-                result.set_item("error", "rar5_block_unknown_non_skippable_type")?;
-                return Ok(());
-            }
-            let stored_crc = u32_le(&full, 0);
-            let crc_ok = crc32(&full[4..]) == stored_crc;
-            if index == 0 {
-                result.set_item("header_crc_checked", true)?;
-                result.set_item("header_crc_ok", crc_ok)?;
-            } else if index == 1 {
-                result.set_item("second_block_ok", crc_ok)?;
-            }
-            if !crc_ok {
-                result.set_item("blocks_checked", index)?;
-                result.set_item("error", "rar5_block_crc_mismatch")?;
-                result.set_item("damaged_header_type", header_type)?;
-                let flag = match header_type {
-                    1 => "rar_main_header_crc_bad",
-                    2 => "rar_file_header_crc_bad",
-                    3 => "rar_service_header_crc_bad",
-                    5 => "rar_end_header_crc_bad",
-                    _ => "rar_header_crc_bad",
-                };
-                result.set_item("damage_flags", PyList::new(py, [flag])?)?;
-                return Ok(());
-            }
-            let mut field_cursor = after_flags;
-            if header_flags & 0x0001 != 0 {
-                let Some((_, after_extra)) = read_vint(&full, field_cursor) else {
-                    result.set_item("blocks_checked", index)?;
-                    result.set_item("error", "rar5_extra_area_size_vint_missing")?;
-                    return Ok(());
-                };
-                field_cursor = after_extra;
-            }
-            let mut data_size = 0u64;
-            if header_flags & 0x0002 != 0 {
-                let Some((value, _after_data)) = read_vint(&full, field_cursor) else {
-                    result.set_item("blocks_checked", index)?;
-                    result.set_item("error", "rar5_data_size_vint_missing")?;
-                    return Ok(());
-                };
-                data_size = value;
-            }
-            let next_cursor = cursor
-                .saturating_add(header_total_size)
-                .saturating_add(data_size);
-            if next_cursor > size {
-                result.set_item("blocks_checked", index)?;
-                let fault = ReadFault::short_read(
-                    "read_declared_range",
-                    cursor + header_total_size,
-                    usize::try_from(data_size).unwrap_or(usize::MAX),
-                    size.saturating_sub(cursor + header_total_size) as usize,
-                    size,
-                )
-                .with_field("rar5.block.payload", FieldLocation::Tail);
-                set_view_read_fault(result, &fault, "rar5_block_payload_out_of_range")?;
-                return Ok(());
-            }
-            // With RAR5 header encryption enabled the archive starts with a
-            // plaintext encryption header (type 4); the main/file headers
-            // that follow are encrypted and cannot be walked without the
-            // password.  The encryption header itself is still protected by
-            // the normal RAR5 header CRC, which we validated above, so it is
-            // strong structural evidence rather than a missing-main-header
-            // failure.
-            if index == 0 && header_type == 4 && next_cursor + 16 <= size {
-                evidence.append("rar5:encryption_header")?;
-                result.set_item("plausible", true)?;
-                result.set_item("strong_accept", true)?;
-                result.set_item("header_encrypted", true)?;
-                result.set_item("password_required", true)?;
-                result.set_item("block_walk_ok", true)?;
-                result.set_item("blocks_checked", 1usize)?;
-                result.set_item("segment_end", 0u64)?;
-                result.set_item("evidence", evidence)?;
-                return Ok(());
-            }
-            if index == 0 && header_type != 1 {
-                result.set_item("blocks_checked", 1usize)?;
-                result.set_item("error", "rar5_main_header_missing")?;
-                return Ok(());
-            }
-            if index == 0 {
-                evidence.append("rar5:main_header")?;
-            } else if index == 1 {
-                result.set_item("block_walk_ok", true)?;
-            }
-            if header_type == 5 {
-                let end_flags = read_vint(&full, field_cursor)
-                    .map(|(value, _)| value)
-                    .unwrap_or(0);
-                evidence.append("rar5:end_block")?;
-                result.set_item("plausible", true)?;
-                result.set_item("strong_accept", true)?;
-                result.set_item("blocks_checked", index + 1)?;
-                result.set_item("end_block_found", true)?;
-                result.set_item("end_block_flags", end_flags)?;
-                result.set_item("segment_end", next_cursor)?;
-                result.set_item("evidence", evidence)?;
-                return Ok(());
-            }
-            cursor = next_cursor;
-        }
-        result.set_item("blocks_checked", max_blocks)?;
-        result.set_item("segment_end", cursor)?;
-        result.set_item("plausible", true)?;
-        result.set_item("error", "rar5_block_walk_limit_reached")?;
-        result.set_item("evidence", evidence)?;
-        Ok(())
-    }
-
     fn walk_tar<'py>(
         &self,
         py: Python<'py>,
@@ -1099,7 +756,8 @@ impl AnalysisBinaryView {
             } else {
                 FieldLocation::Body
             };
-            let header = match self.read_field_at_bytes(
+            let header = match self.read_field_at_bytes_detached(
+                py,
                 cursor,
                 TAR_BLOCK_SIZE,
                 "tar.member.header",
@@ -1161,12 +819,14 @@ impl AnalysisBinaryView {
             }
             let (ok, error, member_size, ustar) = first_identity.map_or_else(
                 || tar_header_plausible(&header),
-                |identity| (
-                    identity.plausible,
-                    identity.error,
-                    identity.member_size,
-                    identity.ustar_magic,
-                ),
+                |identity| {
+                    (
+                        identity.plausible,
+                        identity.error,
+                        identity.member_size,
+                        identity.ustar_magic,
+                    )
+                },
             );
             if !ok {
                 result.set_item("entries_checked", checked)?;
@@ -1223,7 +883,8 @@ impl AnalysisBinaryView {
                     let extension_offset = cursor
                         .saturating_add(TAR_BLOCK_SIZE as u64)
                         .saturating_add(sparse_extension_span);
-                    let extension = match self.read_field_at_bytes(
+                    let extension = match self.read_field_at_bytes_detached(
+                        py,
                         extension_offset,
                         TAR_BLOCK_SIZE,
                         "tar.gnu_sparse.extension",
@@ -1231,8 +892,15 @@ impl AnalysisBinaryView {
                     ) {
                         Ok(data) => data,
                         Err(fault) => {
-                            set_view_read_fault(&result, &fault, "invalid_oldgnu_sparse_extension")?;
-                            result.set_item("damage_flags", PyList::new(py, ["sparse_header_bad"])?)?;
+                            set_view_read_fault(
+                                &result,
+                                &fault,
+                                "invalid_oldgnu_sparse_extension",
+                            )?;
+                            result.set_item(
+                                "damage_flags",
+                                PyList::new(py, ["sparse_header_bad"])?,
+                            )?;
                             return Ok(result);
                         }
                     };
@@ -1246,7 +914,8 @@ impl AnalysisBinaryView {
                     sparse_extension_span += TAR_BLOCK_SIZE as u64;
                     extended = extension[504] != 0 && extension[504] != b'0';
                 }
-                if parse_octal(&header[483..495]).is_some_and(|real_size| previous_end > real_size) {
+                if parse_octal(&header[483..495]).is_some_and(|real_size| previous_end > real_size)
+                {
                     result.set_item("error", "oldgnu_sparse_extent_out_of_range")?;
                     result.set_item("damage_flags", PyList::new(py, ["sparse_header_bad"])?)?;
                     result.set_item("plausible", checked > 0)?;
@@ -1297,7 +966,10 @@ impl AnalysisBinaryView {
                 )?,
             )?;
         }
-        if checked > 0 && checked >= max_entries && cursor.saturating_add(TAR_BLOCK_SIZE as u64) <= size {
+        if checked > 0
+            && checked >= max_entries
+            && cursor.saturating_add(TAR_BLOCK_SIZE as u64) <= size
+        {
             result.set_item("plausible", true)?;
             result.set_item("entries_checked", checked)?;
             result.set_item("entry_walk_ok", true)?;
@@ -1308,7 +980,7 @@ impl AnalysisBinaryView {
             result.set_item("damage_flags", PyList::empty(py))?;
             result.set_item(
                 "evidence",
-                PyList::new(py, ["tar:header_checksum", "tar:block_walk_sample"])?
+                PyList::new(py, ["tar:header_checksum", "tar:block_walk_sample"])?,
             )?;
         } else if checked > 0 && cursor == size {
             result.set_item("plausible", true)?;
@@ -1321,7 +993,10 @@ impl AnalysisBinaryView {
             result.set_item("damage_flags", PyList::new(py, ["missing_end_block"])?)?;
             result.set_item(
                 "evidence",
-                PyList::new(py, ["tar:header_checksum", "tar:block_walk", "tar:eof_boundary"])?
+                PyList::new(
+                    py,
+                    ["tar:header_checksum", "tar:block_walk", "tar:eof_boundary"],
+                )?,
             )?;
         } else if checked > 0 {
             result.set_item("plausible", true)?;
@@ -1361,10 +1036,11 @@ impl AnalysisBinaryView {
         result.set_item("integrity_confidence", "unknown")?;
         result.set_item("evidence", PyList::empty(py))?;
         result.set_item("damage_flags", PyList::empty(py))?;
-        let header = self.read_at_bytes(0, 64)?;
+        let header = self.read_at_bytes_detached(py, 0, 64)?;
         match format {
             "lz4" => {
-                return crate::formats::lz4::walk(&self.reader, 0, self.reader.len())
+                return py
+                    .detach(|| crate::formats::lz4::walk(&self.reader, 0, self.reader.len()))
                     .to_dict(py, self.reader.len());
             }
             "gzip" => {
@@ -1397,7 +1073,7 @@ impl AnalysisBinaryView {
                     ["gzip:magic", "gzip:method:deflate", "gzip:flags_valid"],
                 )?;
                 if self.reader.len() >= 18 {
-                    let tail = self.read_tail_bytes(4)?;
+                    let tail = self.read_tail_bytes(py, 4)?;
                     if tail.len() == 4 {
                         result.set_item("isize", u32_le(&tail, 0))?;
                         evidence.append("gzip:trailer")?;
@@ -1446,7 +1122,7 @@ impl AnalysisBinaryView {
                     result.set_item("damage_flags", PyList::new(py, ["xz_header_crc_bad"])?)?;
                     return Ok(result);
                 }
-                let footer = self.read_tail_bytes(12)?;
+                let footer = self.read_tail_bytes(py, 12)?;
                 if footer.len() == 12 && &footer[10..12] == b"YZ" {
                     if u32_le(&footer, 0) != crc32(&footer[4..10]) || footer[8..10] != header[6..8]
                     {
@@ -1561,16 +1237,12 @@ fn set_zip_eocd_candidate(
         "eocd_candidate_declared_entry_count_present",
         total_entries > 0,
     )?;
-    result.set_item(
-        "eocd_candidate_declared_cd_offset_present",
-        cd_offset > 0,
-    )?;
+    result.set_item("eocd_candidate_declared_cd_offset_present", cd_offset > 0)?;
     result.set_item("eocd_candidate_total_entries", total_entries)?;
     result.set_item("eocd_candidate_cd_offset", cd_offset)?;
     result.set_item("eocd_candidate_cd_size", cd_size)?;
     Ok(())
 }
-
 
 fn resolve_zip64_central_location(header: &[u8], extra: &[u8]) -> Option<(u64, u64)> {
     if header.len() < 46 {

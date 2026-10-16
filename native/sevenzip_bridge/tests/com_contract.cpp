@@ -490,19 +490,19 @@ void check_output_path_reservations()
     std::printf("Async output path reservations\n");
     const auto root = std::filesystem::temp_directory_path() /
         (L"sunpack-reserved-paths-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
-    OutputPathAllocator paths;
+    OutputPathAllocator paths(root);
     const auto original = root / L"entry.txt";
     check(paths.allocate(original, true) == original, "first output keeps original name");
     check(paths.allocate(root / L"ENTRY.txt", true) == root / L"ENTRY(1).txt", "pending case-insensitive collision advances without a disk file");
     check(paths.allocate(root / L"entry(1).txt", true) == root / L"entry(1)(1).txt", "explicit names cannot take a pending numbered output");
     check(paths.allocate(original, true) == root / L"entry(2).txt", "numbered reservations advance monotonically");
 
-    OutputPathAllocator failed_paths;
+    OutputPathAllocator failed_paths(root);
     const auto invalid = root / (std::wstring(260, L'a') + L".txt");
     check(failed_paths.allocate(invalid, true) == invalid, "reserve a name whose async create will fail");
     check(failed_paths.allocate(invalid, true) == root / (std::wstring(260, L'a') + L"(1).txt"), "failed create cannot spin on the same name");
 
-    OutputPathAllocator many;
+    OutputPathAllocator many(root);
     many.reserve(10001);
     many.allocate(original, true);
     std::filesystem::path last;

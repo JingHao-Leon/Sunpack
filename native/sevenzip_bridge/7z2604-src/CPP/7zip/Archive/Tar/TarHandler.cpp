@@ -812,7 +812,9 @@ Z7_COM7F_IMF(CHandler::Extract(const UInt32 *indices, UInt32 numItems,
 
     Int32 opRes = NExtract::NOperationResult::kOK;
     CMyComPtr<ISequentialInStream> inStream2;
-    if (!item->Is_Sparse())
+    if (item->Method_Error)
+      opRes = NExtract::NOperationResult::kUnsupportedMethod;
+    else if (!item->Is_Sparse())
       inStream2 = inStream;
     else
     {

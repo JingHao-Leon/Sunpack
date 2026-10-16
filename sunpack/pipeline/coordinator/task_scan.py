@@ -122,7 +122,7 @@ class ArchiveTaskScanner:
                 key = "failure.direct_file_required"
                 failure = FailureInfo(FailureKind.INVALID_INPUT, "input", i18n.t(key, path=path),
                                       message_key=key, message_params={"path": path}, details={"path": path})
-                self.context.target_results.append(TargetRunResult(
+                self.context.add_target_result(TargetRunResult(
                     path, OutcomeKind.FAILURE, failure=failure, error=failure.message, failure_message=failure.message,
                 ))
 

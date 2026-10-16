@@ -7,6 +7,21 @@ from sunpack_native import output_inventory_from_serialized
 from sunpack.pipeline.extraction.output_inventory import OutputInventory
 
 
+def test_manifest_sizes_distinguish_short_exact_and_oversized_outputs(tmp_path):
+    # Existing CRC/short-write cases cannot detect oversized content in formats
+    # without file CRCs, such as TAR. All three states share one native match.
+    inventory = _inventory(tmp_path, [
+        {"path": name, "size": size, "bytes_written": size, "status": "complete"}
+        for name, size in [("short", 9), ("exact", 10), ("long", 11)]
+    ])
+    result = inventory.verification_match(
+        [{"path": name, "size": 10} for name in ("short", "exact", "long")],
+        include_observations=True,
+    )
+    assert [item["state"] for item in result["observations"]] == ["partial", "complete", "failed"]
+    assert result["size_mismatch_count"] == 1
+
+
 def test_native_manifest_and_inventory_can_be_shared_across_concurrent_matches(tmp_path):
     from sunpack_native import archive_state_zip_manifest_native
 

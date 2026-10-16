@@ -72,13 +72,27 @@ class ArchiveTestCrcMethod:
         mismatches = list(match_result.get("mismatches") or [])
         missing = list(match_result.get("missing") or [])
         mismatch_count = int(match_result.get("mismatch_count", len(mismatches)) or 0)
+        size_mismatches = list(match_result.get("size_mismatches") or [])
+        size_mismatch_count = int(match_result.get("size_mismatch_count", 0) or 0)
         missing_count = int(match_result.get("missing_count", len(missing)) or 0)
         coverage = dict(match_result.get("coverage") or {})
-        if mismatch_count == 0 and missing_count == 0:
+        if mismatch_count == 0 and size_mismatch_count == 0 and missing_count == 0:
             coverage = _promote_verified_manifest_coverage(coverage, archive_manifest, inventory)
         issue_by_path: dict[str, list[VerificationIssue]] = {}
 
         issues: list[VerificationIssue] = []
+        if size_mismatch_count:
+            issue = VerificationIssue(
+                method=self.name,
+                code="fail.archive_output_size_mismatch",
+                message="Output file size exceeds the archive manifest size",
+                path=evidence.output_dir,
+                expected=retained,
+                actual=size_mismatches,
+            )
+            issues.append(issue)
+            for item in size_mismatches:
+                issue_by_path.setdefault(str(item.get("path") or ""), []).append(issue)
         if mismatch_count:
             issue = VerificationIssue(
                 method=self.name,
@@ -125,7 +139,7 @@ class ArchiveTestCrcMethod:
         completeness = _coverage_float(coverage, "completeness", 1.0)
         content_integrity = _content_integrity(
             archive_manifest,
-            mismatch_count=mismatch_count,
+            mismatch_count=mismatch_count + size_mismatch_count,
             missing_count=missing_count,
             completeness=completeness,
         )

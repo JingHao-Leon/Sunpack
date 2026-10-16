@@ -14,6 +14,7 @@ include!("types.rs");
 include!("binary.rs");
 include!("multivolume.rs");
 include!("impls.rs");
+include!("rar.rs");
 include!("signatures.rs");
 include!("tar.rs");
 include!("compression.rs");

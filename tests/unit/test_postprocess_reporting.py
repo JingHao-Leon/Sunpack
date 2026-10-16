@@ -32,14 +32,15 @@ def test_flatten_relocates_nested_outputs_and_reports_retained_work(tmp_path, mo
     parent = TargetRunResult("outer.carrier", OutcomeKind.COMPLETE_SUCCESS, output_dir=root)
     nested = TargetRunResult("inner.disguised", OutcomeKind.COMPLETE_SUCCESS, output_dir=leaf + "/inner")
     unrelated = TargetRunResult("other", OutcomeKind.COMPLETE_SUCCESS, output_dir=str(tmp_path / "other"))
-    state.target_results = [parent, nested, unrelated]
-    state.cleanup_results = [ArchiveCleanupResult(leaf + "/inner.001", "recycle", "failed", message="locked")]
+    for result in (parent, nested, unrelated):
+        state.add_target_result(result)
+    state.add_cleanup_result(ArchiveCleanupResult(leaf + "/inner.001", "recycle", "failed", message="locked"))
     runtime = object.__new__(_RequestRuntime)
     runtime.config = {"post_extract": {"archive_cleanup_mode": "keep"}}
     runtime.context = state
     runtime.submission = SimpleNamespace(request_id="request", stdout=io.StringIO(), targets=(PipelineTarget("outer.carrier"),))
     runtime.reporter = RunReporter(stdout=runtime.submission.stdout)
-    runtime.reporter._top_level_outputs = [root]
+    runtime.reporter._top_level_outputs[root] = root
     ownership = _RequestResults(runtime.submission, runtime.config)
     ownership.remember_results(state.target_results)
 
@@ -55,7 +56,7 @@ def test_flatten_relocates_nested_outputs_and_reports_retained_work(tmp_path, mo
     assert state.target_results[2] is unrelated
     assert response.summary.success_count == 3
     assert response.artifacts.shell_refresh_paths[0] == actual
-    assert runtime.reporter._top_level_outputs == [actual]
+    assert list(runtime.reporter._top_level_outputs.values()) == [actual]
     assert len(response.summary.cleanup_results) == (1 if publish_succeeded else 2)
     if not publish_succeeded:
         warning = response.summary.cleanup_results[-1]
@@ -101,6 +102,29 @@ def test_flatten_projection_handles_removed_wrappers_and_other_drives():
     assert result.relocate("C:/output-sibling") == "C:/output-sibling"
 
 
+def test_nested_relocation_updates_replacements_and_collapsed_output_roots(tmp_path):
+    # Single moves do not cover records that collapse onto the same root and
+    # then move again, or a replacement result leaving its previous index slot.
+    root = str(tmp_path / "out")
+    inner = root + "/wrapper/inner"
+    state = RunState()
+    for path in (root, inner, inner + "/payload/child"):
+        state.add_target_result(TargetRunResult(path + ".zip", OutcomeKind.COMPLETE_SUCCESS, output_dir=path))
+    state.add_cleanup_result(ArchiveCleanupResult(inner + "/payload/source.001", "delete", "failed"))
+    state.relocate_outputs(DirectoryFlattenResult(inner, inner, inner + "/payload", moved=1))
+    child = state.target_results[-1]
+    replacement = TargetRunResult(child.input_path, OutcomeKind.FAILURE, output_dir=child.output_dir, error="retained")
+    state.replace_target_result(child, replacement)
+    state.relocate_outputs(DirectoryFlattenResult(root, root, inner, moved=1))
+    retained = root + ".work"
+    state.relocate_outputs(DirectoryFlattenResult(root, retained, root))
+    assert [item.output_dir.replace("\\", "/") for item in state.target_results] == [
+        retained.replace("\\", "/"), retained.replace("\\", "/"), retained.replace("\\", "/") + "/child",
+    ]
+    assert state.target_results[-1].error == "retained"
+    assert state.cleanup_results[0].path.replace("\\", "/") == retained.replace("\\", "/") + "/source.001"
+
+
 def test_output_target_ownership_survives_junction_flatten_and_forget(tmp_path):
     """Cover alias lookup, nearest ownership and index retirement in one move.
 
@@ -144,7 +168,7 @@ def test_existing_final_report_shows_postprocess_warning_and_actual_output(quiet
     stream = io.StringIO()
     errors = io.StringIO()
     reporter = RunReporter("zh", stdout=stream, stderr=errors, quiet=quiet)
-    reporter._top_level_outputs = ["C:/output"]
+    reporter._top_level_outputs["C:/output"] = "C:/output"
     reporter.relocate_outputs(DirectoryFlattenResult("C:/output", "C:/output.work", "C:/output"))
     reporter.log_final_summary(0, RunSummary(target_results=(TargetRunResult("archive", OutcomeKind.COMPLETE_SUCCESS),), cleanup_results=(
         ArchiveCleanupResult("C:/output.work", "flatten", "failed", message="publish failed"),

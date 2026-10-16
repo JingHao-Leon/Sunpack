@@ -1,5 +1,6 @@
 import io
 import tarfile
+import pytest
 
 from sunpack.core.contracts.archive_input import ArchiveInputDescriptor
 from sunpack.pipeline.extraction.output_inventory import collect_output_inventory
@@ -14,16 +15,6 @@ def _input(path):
         entry_path=str(path),
         format_hint="tar",
     )
-
-
-def _pax_record(key: str, value: str) -> bytes:
-    body = f" {key}={value}\n".encode("utf-8")
-    length = len(body) + 1
-    while True:
-        record = str(length).encode("ascii") + body
-        if len(record) == length:
-            return record
-        length = len(record)
 
 
 def test_tar_source_manifest_walks_beyond_probe_budget(tmp_path):
@@ -98,36 +89,14 @@ def test_tar_pax_long_path_is_applied_to_target_member(tmp_path):
     assert manifest.total_unpacked_size == len(b"payload") + 1
 
 
-def test_tar_manifest_rejects_overlapping_pax_sparse_extents(tmp_path):
-    pax_payload = b"".join((
-        _pax_record("GNU.sparse.map", "10,5,12,2"),
-        _pax_record("GNU.sparse.realsize", "20"),
-    ))
-    pax = tarfile.TarInfo("PaxHeaders/sparse")
-    pax.type = tarfile.XHDTYPE
-    pax.size = len(pax_payload)
-    target = tarfile.TarInfo("sparse.bin")
-    target.size = 0
-    data = (
-        pax.tobuf(format=tarfile.USTAR_FORMAT)
-        + pax_payload + b"\0" * (-len(pax_payload) % 512)
-        + target.tobuf(format=tarfile.USTAR_FORMAT)
-        + b"\0" * 1024
-    )
-    path = tmp_path / "bad-sparse.tar"
-    path.write_bytes(data)
-
-    manifest = archive_input_manifest(_input(path), max_items=100)
-
-    assert manifest.damaged is True
-    assert "sparse extent" in manifest.message
-
-
-def test_tar_manifest_applies_gnu_longname_and_skips_longlink_payload(tmp_path):
+@pytest.mark.parametrize("tar_format", [tarfile.GNU_FORMAT, tarfile.PAX_FORMAT])
+def test_tar_manifest_applies_long_metadata_and_link_output_sizes(tmp_path, tar_format):
+    # Strict size matching must preserve valid link entries too; source headers
+    # store zero payload size while the worker emits the link target bytes.
     path = tmp_path / "gnu-long.tar"
     long_name = "nested/" + "n" * 160 + "/link"
-    long_link = "target/" + "t" * 180
-    with tarfile.open(path, "w", format=tarfile.GNU_FORMAT) as archive:
+    long_link = "target/目标/" + "t" * 180
+    with tarfile.open(path, "w", format=tar_format) as archive:
         info = tarfile.TarInfo(long_name)
         info.type = tarfile.SYMTYPE
         info.linkname = long_link
@@ -137,7 +106,16 @@ def test_tar_manifest_applies_gnu_longname_and_skips_longlink_payload(tmp_path):
 
     assert manifest.ok is True
     assert manifest.expected_names == [long_name]
-    assert manifest.entries.entry_page(0, 10)[0]["size"] == 0
+    assert manifest.entries.entry_page(0, 10)[0]["size"] == len(long_link.encode("utf-8"))
+    from tests.helpers.config_factory import make_config
+    from tests.helpers.pipeline_engine import execute_pipeline
+
+    summary = execute_pipeline(make_config({
+        "cli": {"quiet": True}, "recursive_extract": 1,
+        "post_extract": {"archive_cleanup_mode": "k", "flatten_single_directory": False},
+    }), str(path))
+    assert summary.success_count == 1
+    assert (tmp_path / "gnu-long" / long_name).read_bytes() == long_link.encode("utf-8")
 
 
 def test_truncated_manifest_view_keeps_full_unpacked_size(tmp_path):

@@ -77,7 +77,7 @@ impl AnalysisMultiVolumeView {
         offset: u64,
         size: usize,
     ) -> PyResult<Bound<'py, PyBytes>> {
-        let data = self.read_at_bytes(offset, size)?;
+        let data = py.detach(|| self.read_at_bytes(offset, size))?;
         Ok(PyBytes::new(py, &data))
     }
 
@@ -85,7 +85,7 @@ impl AnalysisMultiVolumeView {
         let view_size = self.reader.len();
         let read_size = size.min(view_size as usize);
         let offset = view_size.saturating_sub(read_size as u64);
-        let data = self.read_at_bytes(offset, read_size)?;
+        let data = py.detach(|| self.read_at_bytes(offset, read_size))?;
         Ok(PyBytes::new(py, &data))
     }
 

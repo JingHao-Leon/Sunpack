@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable, TextIO
 
 from sunpack.core.support.path_keys import case_key, path_key_is_under, path_key
+from sunpack.core.support.path_map import PathMap
 from sunpack.pipeline.discovery.detection.input_planning import ArchiveInputPlanningStage
 from sunpack.core.config.detection_view import discovery_run_config
 from sunpack.core.contracts.pipeline import PipelineArtifacts, PipelineDiscovery, PipelineResponse, PipelineTarget
@@ -873,7 +874,7 @@ class _SourceCleanup:
             with self._context.lock:
                 by_path = {path_key(item.path): item for item in self._context.cleanup_results}
                 by_path.update({path_key(item.path): item for item in outcome.failed})
-                self._context.cleanup_results[:] = list(by_path.values())
+                self._context.set_cleanup_results(by_path.values())
 
         return ReleaseOutcome(
             task_key=request.task_key,
@@ -1517,7 +1518,7 @@ class _RequestRuntime:
                 verification={"reused_completed_generation": True},
             )
             with self.context.lock:
-                self.context.target_results.append(result)
+                self.context.add_target_result(result)
                 self.context.processed_keys.add(task.key)
             ownership.remember_tasks([task])
             ownership.remember_results([result])
@@ -1654,7 +1655,7 @@ class _RequestRuntime:
 
     def _replace_target_result(self, old, new) -> None:
         with self.context.lock:
-            self.context.target_results[:] = [new if item is old else item for item in self.context.target_results]
+            self.context.replace_target_result(old, new)
 
     async def _promote_blocked_input(self, task, result, *, ownership, broker, cancellation):
         destination = ownership.input_dir_for_task(task)
@@ -1726,21 +1727,9 @@ class _RequestRuntime:
             result = DirectoryFlattenResult(output_dir, output_dir, errors=(str(exc),))
         with self.context.lock:
             if result.source_dir:
-                # Keep unrelated result identities stable: their coordinators
-                # may still need to replace a record after recursive promotion.
-                relocated_results = []
-                for item in self.context.target_results:
-                    relocated = result.relocate(item.output_dir)
-                    relocated_results.append(
-                        replace(item, output_dir=relocated) if relocated != item.output_dir else item
-                    )
-                self.context.target_results[:] = relocated_results
-                self.context.cleanup_results[:] = [
-                    replace(item, path=result.relocate(item.path))
-                    for item in self.context.cleanup_results
-                ]
+                self.context.relocate_outputs(result)
             if result.errors:
-                self.context.cleanup_results.append(ArchiveCleanupResult(
+                self.context.add_cleanup_result(ArchiveCleanupResult(
                     result.output_dir, "flatten", "failed", message="; ".join(result.errors),
                 ))
         if result.source_dir:
@@ -1807,7 +1796,7 @@ class _RequestResults:
         self.submission = submission
         self.config = config
         self._task_targets: dict[str, PipelineTarget] = {}
-        self._output_targets: dict[str, PipelineTarget] = {}
+        self._output_targets = PathMap()
         self._exact_targets: dict[str, PipelineTarget] = {}
         self._directory_targets: dict[str, PipelineTarget] = {}
         self._claimed_paths: list[str] = []
@@ -1861,10 +1850,7 @@ class _RequestResults:
             source_dir=_resolved_path_key(result.source_dir),
             output_dir=_resolved_path_key(result.output_dir),
         )
-        self._output_targets = {
-            path_key(result.relocate(path)): target
-            for path, target in self._output_targets.items()
-        }
+        self._output_targets.relocate(result)
 
     def output_dir_for_task(self, task) -> str:
         target = self._target_for_path(task.main_path)

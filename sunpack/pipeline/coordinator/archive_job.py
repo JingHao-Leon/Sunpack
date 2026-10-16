@@ -425,7 +425,7 @@ class ArchiveJobExecutor:
         with self.context.lock:
             if outcome.outcome_kind in {OutcomeKind.COMPLETE_SUCCESS, OutcomeKind.PARTIAL_SUCCESS}:
                 self.context.processed_keys.add(task.key)
-            self.context.target_results.append(result)
+            self.context.add_target_result(result)
         return result
 
     def _failure_message(self, task: ArchiveTask, outcome: ArchiveJobOutcome) -> str:

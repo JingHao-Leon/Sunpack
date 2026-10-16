@@ -49,6 +49,7 @@ public:
   bool _is_Warning;
   bool PaxGlobal_Defined;
   bool _is_PaxGlobal_Error;
+  bool _pax_unsupported_method;
   bool _are_Pax_Items;
   bool _are_Gnu;
   bool _are_Posix;
@@ -87,6 +88,7 @@ public:
 
   void Clear()
   {
+    _pax_unsupported_method = false;
     SeqStream = NULL;
     InStream = NULL;
     OpenCallback = NULL;

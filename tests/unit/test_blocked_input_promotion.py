@@ -89,7 +89,7 @@ def test_coordinator_rewrites_recorded_result_and_cleanup_input(tmp_path, collis
             failure=FailureInfo(FailureKind.WRONG_PASSWORD, "extraction", "wrong password"))
         runtime = object.__new__(_RequestRuntime)
         runtime.context = RunState()
-        runtime.context.target_results.append(original)
+        runtime.context.add_target_result(original)
         runtime.submission = submission
         runtime._shell_updates = SimpleNamespace(add=lambda paths: None)
         from sunpack.pipeline.coordinator.engine import _PathLeaseRegistry

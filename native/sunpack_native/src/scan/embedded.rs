@@ -13,7 +13,7 @@ use memchr::memmem;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::collections::{BTreeMap, BTreeSet};
-use std::io;
+use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::sync::OnceLock;
 
 use rayon::prelude::*;
@@ -32,7 +32,7 @@ const XZ_FOOTER_MAGIC: &[u8] = b"YZ";
 
 type PatternSpec = (&'static [u8], &'static str, &'static str);
 
-const PATTERNS: [PatternSpec; 14] = [
+const PATTERNS: [PatternSpec; 13] = [
     (ZIP_LOCAL, "zip_local", "zip"),
     (ZIP_EOCD, "zip_eocd", "zip_eocd"),
     (SEVEN_ZIP, "7z", "7z"),
@@ -46,7 +46,6 @@ const PATTERNS: [PatternSpec; 14] = [
     (crate::formats::lz4::MAGIC, "lz4", "lz4"),
     (b"\x2a\x4d\x18", "lz4_skippable", "lz4_skippable"),
     (b"PK\x06\x06", "zip64_eocd", "zip64_eocd"),
-    (b"PK\x01\x02", "zip_directory", "zip_directory"),
 ];
 
 #[cfg(target_arch = "x86_64")]
@@ -128,7 +127,6 @@ struct EmbeddedCandidate {
 struct RawHit {
     offset: u64,
     pattern: u8,
-    header_len: u32,
 }
 
 impl RawHit {
@@ -428,7 +426,7 @@ fn scan_native(
     xz_footer_ends.sort_unstable();
     let raw_hit_count = raw_hits
         .iter()
-        .filter(|hit| !matches!(hit.kind(), "xz_footer" | "zip64_eocd" | "zip_directory"))
+        .filter(|hit| !matches!(hit.kind(), "xz_footer" | "zip64_eocd"))
         .count()
         + discarded;
     raw_hits.retain(|hit| hit.kind() != "xz_footer");
@@ -443,7 +441,7 @@ fn scan_native(
         format != "lz4"
             && !raw_hits
                 .iter()
-                .any(|hit| hit.offset != 0 && !matches!(hit.kind(), "zip64_eocd" | "zip_directory"))
+                .any(|hit| hit.offset != 0 && !matches!(hit.kind(), "zip64_eocd"))
     });
 
     // Structural facts survive in the result; transient validation windows
@@ -466,7 +464,7 @@ fn scan_native(
     // Only validated root evidence survives in the cached native scan. Noise,
     // inner signatures and consumed directory records have no later users.
     raw_hits.retain(|hit| {
-        !matches!(hit.kind(), "zip_directory" | "zip64_eocd")
+        !matches!(hit.kind(), "zip64_eocd")
             && candidates
                 .binary_search_by_key(&(hit.offset, hit.format()), |candidate| {
                     (candidate.offset, candidate.format)
@@ -536,10 +534,11 @@ fn validate_raw_hits(
             }
         }
     }
-    let directories = DirectoryEvidence::new(reader, file_size, raw_hits)?;
     let mut candidates = zip_eocd_hits
         .par_iter()
-        .map(|hit| validate_zip_eocd(reader, file_size, hit.offset, &zip64_records, &directories))
+        .map_init(DirectoryEvidence::default, |directories, hit| {
+            validate_zip_eocd(reader, file_size, hit.offset, &zip64_records, directories)
+        })
         .collect::<io::Result<Vec<_>>>()?
         .into_iter()
         .flatten()
@@ -561,7 +560,7 @@ fn validate_raw_hits(
     let mut covered_until = 0u64;
     for hit in raw_hits
         .iter()
-        .filter(|hit| !matches!(hit.kind(), "zip_eocd" | "zip64_eocd" | "zip_directory"))
+        .filter(|hit| !matches!(hit.kind(), "zip_eocd" | "zip64_eocd"))
     {
         while range_index < seeded_ranges.len() && seeded_ranges[range_index].0 <= hit.offset {
             covered_until = covered_until.max(seeded_ranges[range_index].1);
@@ -826,7 +825,6 @@ fn scan_sample_candidate(
         check!(0);
         check!(1);
         check!(12);
-        check!(13);
         return;
     }
     if first == b'R' {
@@ -867,7 +865,6 @@ fn record_xz_footer(
         hits.results.push(RawHit {
             offset: base_offset + start as u64,
             pattern: PATTERNS.len() as u8,
-            header_len: 0,
         });
     }
 }
@@ -908,18 +905,9 @@ fn record_raw_hit(
         hits.discarded_results += 1;
         return;
     }
-    let header_len = if kind == "zip_directory" {
-        sample
-            .get(start..start + 46)
-            .and_then(crate::formats::zip::central_directory_record_len)
-            .unwrap_or(0) as u32
-    } else {
-        0
-    };
     hits.results.push(RawHit {
         offset: candidate_offset,
         pattern: pattern as u8,
-        header_len,
     });
 }
 
@@ -994,72 +982,99 @@ fn validate_candidate(
     }
 }
 
+#[derive(Clone, Copy)]
+struct DirectorySuffix {
+    start: u64,
+    end: u64,
+    entries: usize,
+}
+
+#[derive(Default)]
 struct DirectoryEvidence {
-    heads: Vec<u64>,
-    // Each head links to its proven directory suffix: end and record count.
-    suffixes: Vec<(u64, usize)>,
+    // Only directories requested by an EOCD receive an index. Per-Rayon-task
+    // suffixes reuse overlapping proposals without a shared lock or a
+    // signature object for every possible directory marker in the payload.
+    suffixes: Vec<DirectorySuffix>,
 }
 
 impl DirectoryEvidence {
-    fn new(file: &ManagedReader, size: u64, hits: &[RawHit]) -> io::Result<Self> {
-        let mut heads = Vec::new();
-        let mut suffixes = Vec::new();
-        for hit in hits.iter().filter(|hit| hit.kind() == "zip_directory") {
-            let len = if hit.header_len != 0 {
-                hit.header_len as usize
-            } else {
-                crate::formats::zip::central_directory_record_len(&read_at(file, hit.offset, 46)?)
-                    .unwrap_or(0)
-            };
-            if len == 0 {
-                continue;
-            }
-            if let Some(end) = hit
-                .offset
-                .checked_add(len as u64)
-                .filter(|end| *end <= size)
-            {
-                heads.push(hit.offset);
-                suffixes.push((end, 1));
-            }
-        }
-        // The scan already sorted heads. Reverse links give every overlapping
-        // EOCD proposal its full geometry without repeating any directory walk.
-        for index in (0..heads.len()).rev() {
-            let next = if heads.get(index + 1) == Some(&suffixes[index].0) {
-                Some(index + 1)
-            } else {
-                heads.binary_search(&suffixes[index].0).ok()
-            };
-            if let Some(next) = next {
-                suffixes[index] = (suffixes[next].0, suffixes[next].1 + 1);
-            }
-        }
-        Ok(Self { heads, suffixes })
+    fn find(&self, start: u64) -> Option<DirectorySuffix> {
+        self.suffixes
+            .binary_search_by_key(&start, |item| item.start)
+            .ok()
+            .map(|index| self.suffixes[index])
     }
 
     fn matches(
-        &self,
+        &mut self,
         file: &ManagedReader,
         start: u64,
         end: u64,
         entries: usize,
     ) -> io::Result<bool> {
-        let Ok(index) = self.heads.binary_search(&start) else {
-            return Ok(false);
+        let observed = if let Some(cached) = self.find(start) {
+            cached
+        } else {
+            let mut source = BufReader::with_capacity(64 * 1024, file.stream_cursor());
+            source.seek(SeekFrom::Start(start))?;
+            let mut cursor = start;
+            let mut path = Vec::new();
+            let mut suffix = loop {
+                if let Some(cached) = self.find(cursor) {
+                    break cached;
+                }
+                let mut fixed = [0u8; 46];
+                let length = if cursor.saturating_add(46) <= file.len() {
+                    source.read_exact(&mut fixed)?;
+                    crate::formats::zip::central_directory_record_len(&fixed)
+                } else {
+                    None
+                };
+                let Some(next) = length
+                    .and_then(|length| cursor.checked_add(length as u64))
+                    .filter(|next| *next <= file.len())
+                else {
+                    break DirectorySuffix {
+                        start: cursor,
+                        end: cursor,
+                        entries: 0,
+                    };
+                };
+                if path.len() >= MAX_ARCHIVE_METADATA_RECORDS {
+                    return Ok(false);
+                }
+                path.push(cursor);
+                source.seek_relative((next - cursor - 46) as i64)?;
+                cursor = next;
+            };
+            let first_new = self.suffixes.len();
+            for start in path.into_iter().rev() {
+                suffix = DirectorySuffix {
+                    start,
+                    end: suffix.end,
+                    entries: suffix.entries + 1,
+                };
+                self.suffixes.push(suffix);
+            }
+            // A walk appends nodes in reverse physical order. Existing nodes
+            // are disjoint from the newly visited path.
+            self.suffixes[first_new..].reverse();
+            if first_new != 0 {
+                self.suffixes.sort_unstable_by_key(|item| item.start);
+            }
+            suffix
         };
-        let (observed_end, observed_count) = self.suffixes[index];
-        if observed_count != entries || observed_end > end {
+        if observed.entries != entries || observed.end > end {
             return Ok(false);
         }
-        if observed_end == end {
+        if observed.end == end {
             return Ok(true);
         }
         // One optional ZIP directory digital signature belongs to the range.
-        let signature = read_at(file, observed_end, 6)?;
+        let signature = read_at(file, observed.end, 6)?;
         Ok(signature.len() == 6
             && signature.starts_with(b"PK\x05\x05")
-            && observed_end + 6 + u16::from_le_bytes([signature[4], signature[5]]) as u64 == end)
+            && observed.end + 6 + u16::from_le_bytes([signature[4], signature[5]]) as u64 == end)
     }
 }
 
@@ -1068,7 +1083,7 @@ fn validate_zip_eocd(
     size: u64,
     eocd_offset: u64,
     zip64_records: &BTreeMap<u64, Vec<(u64, crate::formats::zip::zip64::EndRecord)>>,
-    directories: &DirectoryEvidence,
+    directories: &mut DirectoryEvidence,
 ) -> std::io::Result<Option<EmbeddedCandidate>> {
     let header = read_at(file, eocd_offset, 22)?;
     if header.len() < 22 || &header[..4] != ZIP_EOCD {
@@ -1235,7 +1250,7 @@ fn validate_zip_boundary_evidence(
     end: u64,
     archive_offset: u64,
     entries: usize,
-    directories: &DirectoryEvidence,
+    directories: &mut DirectoryEvidence,
 ) -> io::Result<bool> {
     if entries == 0 {
         return Ok(start == end);
@@ -1502,13 +1517,8 @@ fn validate_rar4(
                 "rar4_header_encrypted_main_header_crc",
             )));
         }
-        let add_size = if flags & 0x8000 != 0 {
-            if header.len() < 11 {
-                return Ok(None);
-            }
-            u64::from(u32::from_le_bytes(header[7..11].try_into().unwrap()))
-        } else {
-            0
+        let Some(add_size) = crate::formats::rar::rar4_data_size(&header) else {
+            return Ok(None);
         };
         let Some(next) = header_end.checked_add(add_size) else {
             return Ok(None);
@@ -2351,7 +2361,6 @@ mod tests {
                     {
                         expected.results.push(RawHit {
                             pattern: PATTERNS.len() as u8,
-                            header_len: 0,
                             offset: 4096 + start as u64,
                         });
                     }
@@ -2388,7 +2397,6 @@ mod tests {
                 {
                     expected.results.push(RawHit {
                         pattern: PATTERNS.len() as u8,
-                        header_len: 0,
                         offset: start as u64,
                     });
                 }
@@ -2539,11 +2547,7 @@ mod tests {
         frame.extend_from_slice(&[1, 0, 0]);
         let second = frame.len() as u64;
         let source = ManagedReader::from_bytes(frame.repeat(2), ReaderConfig::default());
-        let hits = [0, second].map(|offset| RawHit {
-            pattern: 8,
-            offset,
-            header_len: 0,
-        });
+        let hits = [0, second].map(|offset| RawHit { pattern: 8, offset });
         let candidates = validate_raw_hits(&source, source.len(), &hits, &[]).unwrap();
         assert_eq!(candidates.len(), 1);
         assert_eq!(

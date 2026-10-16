@@ -1,9 +1,11 @@
 import json
+import io
 import subprocess
 import sys
 import tempfile
 import unittest
 import zipfile
+from binascii import crc32
 from pathlib import Path
 
 from tests.helpers.generated_fixtures import build_cli_pipeline_fixture
@@ -74,8 +76,20 @@ class CliBasicTests(unittest.TestCase):
         self.assertNotIn("deciding_rule", first_item)
 
     def test_inspect_analyze_json_shape_is_compact(self):
+        # Shape-only checks miss errors for valid empty archives and carved
+        # inputs. Reuse this CLI invocation to cover both at negligible cost;
+        # the distant payload also checks reuse of discovery's full scan.
         with tempfile.TemporaryDirectory() as tmp:
             fixture = build_cli_pipeline_fixture(Path(tmp))
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w") as archive:
+                archive.writestr("payload.txt", b"carrier payload")
+            prefix = b"x" * (2 * 1024 * 1024)
+            (fixture / "carrier.opaque").write_bytes(prefix + buffer.getvalue() + prefix)
+            fields = bytes(20)
+            (fixture / "empty.7z").write_bytes(
+                b"7z\xbc\xaf\x27\x1c\x00\x04" + crc32(fields).to_bytes(4, "little") + fields
+            )
             result = run_cli("inspect", "--json", "--analyze", str(fixture), "--no-pause")
 
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -92,6 +106,12 @@ class CliBasicTests(unittest.TestCase):
         self.assertLessEqual(len(analysis["candidates"]), 3)
         self.assertNotIn("prepass", analysis)
         self.assertNotIn("fuzzy", analysis)
+        by_name = {Path(item["path"]).name: item for item in payload["items"]}
+        for name in ("carrier.opaque", "empty.7z"):
+            self.assertEqual(by_name[name]["analysis"]["status"], "extractable", by_name[name])
+        carrier = by_name["carrier.opaque"]["analysis"]
+        self.assertEqual(carrier["primary_segment"]["start"], len(prefix))
+        self.assertLess(carrier["read_bytes"], 1024 * 1024)
 
     def test_inspect_archives_only_filters_output_items(self):
         with tempfile.TemporaryDirectory() as tmp:

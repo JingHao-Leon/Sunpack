@@ -13,7 +13,7 @@ from sunpack.core.contracts.tasks import ArchiveTask
 from sunpack.runtime.cli.persistent_runtime import load_request_config
 from sunpack.core.analysis import ArchiveAnalyzer
 from sunpack.core.analysis.request import AnalysisRequest
-from sunpack.core.analysis.source import analysis_source_for_descriptor
+from sunpack.core.analysis.source import FileAnalysisSource, analysis_source_for_descriptor
 from sunpack.pipeline.coordinator.detection_diagnostics import DetectionDiagnostics
 from sunpack.core.support.json_format import to_json_text
 from sunpack.pipeline.discovery.embedded.options import EmbeddedOptions
@@ -135,11 +135,14 @@ def _analysis_preview_by_path(results, config: dict) -> dict[str, dict]:
             continue
         task = _task_from_inspect_result(result)
         try:
-            source = analysis_source_for_descriptor(
-                task.archive_input(),
-                report_path=task.main_path,
-            )
             prepass = task.knowledge().get("inspection.prepass", {})
+            # Embedded discovery already resolved every range in the carrier.
+            # Keep its physical coordinate system and reuse those native facts.
+            source = (
+                FileAnalysisSource(task.carrier_path, report_path=task.main_path)
+                if isinstance(prepass, dict) and prepass.get("full_scan_complete")
+                else analysis_source_for_descriptor(task.archive_input(), report_path=task.main_path)
+            )
             report = analyzer.analyze(
                 source,
                 AnalysisRequest(
@@ -170,6 +173,8 @@ def _should_analyze_result(result) -> bool:
 
 
 def _task_from_inspect_result(result) -> ArchiveTask:
+    if isinstance(getattr(result, "task", None), ArchiveTask):
+        return result.task
     if isinstance(result.archive_input, dict):
         descriptor = ArchiveInputDescriptor.from_any(
             result.archive_input,

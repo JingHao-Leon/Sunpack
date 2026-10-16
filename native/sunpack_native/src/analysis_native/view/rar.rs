@@ -198,15 +198,12 @@ impl AnalysisBinaryView {
                 result.damage_flags = vec![flag];
                 return Ok(());
             }
-            let mut block_size = header_size;
-            if header_flags & 0x8000 != 0 {
-                if header_size < 11 {
-                    result.blocks_checked = index;
-                    result.error = "rar4_block_add_size_missing";
-                    return Ok(());
-                }
-                block_size += u32_le(&full_header, 7) as u64;
-            }
+            let Some(data_size) = crate::formats::rar::rar4_data_size(&full_header) else {
+                result.blocks_checked = index;
+                result.error = "rar4_block_add_size_missing";
+                return Ok(());
+            };
+            let block_size = header_size.saturating_add(data_size);
             let next_cursor = cursor.saturating_add(block_size);
             if next_cursor > size {
                 result.blocks_checked = index;

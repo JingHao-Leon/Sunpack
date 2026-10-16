@@ -50,15 +50,13 @@ fn parse_seven_zip_header_ast(
                     break;
                 }
             }
-            SZ_FILES_INFO => {
-                match parse_seven_zip_files_info(raw, &mut pos) {
-                    Ok(()) => {}
-                    Err(message) => {
-                        diagnostics.push(message);
-                        break;
-                    }
+            SZ_FILES_INFO => match parse_seven_zip_files_info(raw, &mut pos) {
+                Ok(()) => {}
+                Err(message) => {
+                    diagnostics.push(message);
+                    break;
                 }
-            }
+            },
             _ => {
                 diagnostics.push(format!("unsupported_header_nid_0x{nid:02x}"));
                 break;
@@ -100,15 +98,13 @@ pub(crate) struct SevenZipEncryptionFacts {
     pub(crate) scan_complete: bool,
 }
 
-pub(crate) fn seven_zip_encryption_facts_from_next_header(
-    raw: &[u8],
-) -> SevenZipEncryptionFacts {
+pub(crate) fn seven_zip_encryption_facts_from_next_header(raw: &[u8]) -> SevenZipEncryptionFacts {
     let Some(&next_header_nid) = raw.first() else {
         return SevenZipEncryptionFacts {
             password_required: false,
             encrypted_header: false,
             encrypted_payload: false,
-            scan_complete: false,
+            scan_complete: true,
         };
     };
     let header = SevenZipHeader {
@@ -136,17 +132,14 @@ pub(crate) fn seven_zip_encryption_facts_from_next_header(
             scan_complete: false,
         };
     };
-    let encrypted = ast
-        .unpack_info
-        .as_ref()
-        .is_some_and(|unpack| {
-            unpack.folders.iter().any(|folder| {
-                folder
-                    .coders
-                    .iter()
-                    .any(|coder| coder.method_id.as_slice() == [0x06, 0xf1, 0x07, 0x01])
-            })
-        });
+    let encrypted = ast.unpack_info.as_ref().is_some_and(|unpack| {
+        unpack.folders.iter().any(|folder| {
+            folder
+                .coders
+                .iter()
+                .any(|coder| coder.method_id.as_slice() == [0x06, 0xf1, 0x07, 0x01])
+        })
+    });
     let encrypted_header = next_header_nid == SZ_ENCODED_HEADER && encrypted;
     let encrypted_payload = next_header_nid == SZ_HEADER && encrypted;
     // A plaintext EncodedHeader is only a wrapper around the packed metadata.
@@ -480,7 +473,8 @@ fn validate_seven_zip_folder_graph(
         bind_pairs: &[(u64, u64)],
         states: &mut [u8],
     ) -> Result<(), String> {
-        let output_index = usize::try_from(output).map_err(|_| "folder_output_index_too_large".to_string())?;
+        let output_index =
+            usize::try_from(output).map_err(|_| "folder_output_index_too_large".to_string())?;
         match states.get(output_index).copied() {
             Some(1) => return Err("folder_bind_pair_cycle".to_string()),
             Some(2) => return Ok(()),
@@ -495,10 +489,15 @@ fn validate_seven_zip_folder_graph(
                 owner = Some((input_base, coder.num_in_streams));
                 break;
             }
-            input_base = input_base.checked_add(coder.num_in_streams).ok_or_else(|| "folder_input_stream_count_overflow".to_string())?;
-            output_base = output_base.checked_add(coder.num_out_streams).ok_or_else(|| "folder_output_stream_count_overflow".to_string())?;
+            input_base = input_base
+                .checked_add(coder.num_in_streams)
+                .ok_or_else(|| "folder_input_stream_count_overflow".to_string())?;
+            output_base = output_base
+                .checked_add(coder.num_out_streams)
+                .ok_or_else(|| "folder_output_stream_count_overflow".to_string())?;
         }
-        let (input_base, input_count) = owner.ok_or_else(|| "folder_output_owner_missing".to_string())?;
+        let (input_base, input_count) =
+            owner.ok_or_else(|| "folder_output_owner_missing".to_string())?;
         for input in input_base..input_base + input_count {
             if let Some((_, upstream)) = bind_pairs.iter().find(|(bound, _)| *bound == input) {
                 visit(*upstream, coders, bind_pairs, states)?;
@@ -508,7 +507,11 @@ fn validate_seven_zip_folder_graph(
         Ok(())
     }
 
-    let mut states = vec![0u8; usize::try_from(total_out).map_err(|_| "folder_output_count_too_large".to_string())?];
+    let mut states = vec![
+        0u8;
+        usize::try_from(total_out)
+            .map_err(|_| "folder_output_count_too_large".to_string())?
+    ];
     visit(main_output_stream, coders, bind_pairs, &mut states)?;
     if states.iter().any(|state| *state != 2) {
         return Err("folder_graph_disconnected".to_string());
@@ -668,10 +671,7 @@ fn parse_seven_zip_bool_vector(
     Ok(output)
 }
 
-fn parse_seven_zip_files_info(
-    data: &[u8],
-    pos: &mut usize,
-) -> Result<(), String> {
+fn parse_seven_zip_files_info(data: &[u8], pos: &mut usize) -> Result<(), String> {
     let num_files = read_sz_vint(data, pos)
         .ok_or_else(|| "7z FilesInfo file count is truncated".to_string())?;
     if num_files.value > SEVEN_Z_MAX_HEADER_FILES {

@@ -6,7 +6,7 @@
 
 use crate::io::reader::FileIdentity;
 use pyo3::types::PyTuple;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -277,6 +277,52 @@ impl<'py> Evidence<'py> {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReportHitKind {
+    ZipLocal,
+    ZipEocd,
+    ZipOther,
+    Rar,
+    SevenZip,
+    Tar,
+}
+
+impl ReportHitKind {
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "zip_local" => Some(Self::ZipLocal),
+            "zip_eocd" => Some(Self::ZipEocd),
+            "7z" => Some(Self::SevenZip),
+            "tar_ustar" => Some(Self::Tar),
+            name if name.starts_with("rar") => Some(Self::Rar),
+            name if name.starts_with("zip_") => Some(Self::ZipOther),
+            // Stream modules consume structural facts, not signature hits.
+            _ => None,
+        }
+    }
+}
+
+struct ReportSignatureHit {
+    kind: ReportHitKind,
+    offset: u64,
+}
+
+fn prepass_dicts<'py>(
+    prepass: &Bound<'py, PyDict>,
+    key: &str,
+) -> PyResult<Vec<Bound<'py, PyDict>>> {
+    let Some(value) = prepass.get_item(key)? else {
+        return Ok(Vec::new());
+    };
+    if value.is_none() {
+        return Ok(Vec::new());
+    }
+    value
+        .try_iter()?
+        .map(|item| item?.cast_into::<PyDict>().map_err(Into::into))
+        .collect()
+}
+
 /// Probe access shared by single-file and multi-volume analysis.
 struct ReportContext<'a, 'py> {
     py: Python<'py>,
@@ -286,6 +332,8 @@ struct ReportContext<'a, 'py> {
     // validation; a logical multi-volume stream is header-validated.
     stream_path: Option<&'a str>,
     prepass: Bound<'py, PyDict>,
+    hits: Vec<ReportSignatureHit>,
+    embedded: HashMap<String, Vec<Bound<'py, PyDict>>>,
     stream_structure: Option<Option<Bound<'py, PyDict>>>,
 }
 
@@ -300,22 +348,54 @@ impl AnalysisBinaryView {
         format_structure: bool,
         disk_starts: Option<&[u64]>,
         stream_path: Option<&str>,
-        run_prepass: impl FnOnce(usize, usize) -> PyResult<Py<PyDict>>,
     ) -> PyResult<Py<PyDict>> {
         self.ensure_open()?;
-        let prepass = match initial_prepass {
-            Some(prepass) if !prepass.is_empty() => prepass.copy()?,
-            _ if (signature_prepass || format_structure) && config.prepass_enabled => {
-                run_prepass(config.head_bytes, config.tail_bytes)?.into_bound(py)
+        let (prepass, hits) = match initial_prepass {
+            Some(prepass) if !prepass.is_empty() => {
+                let mut hits = Vec::new();
+                for hit in prepass_dicts(prepass, "hits")? {
+                    if let Some(kind) = ReportHitKind::from_name(&str_of(&hit, "name")?) {
+                        hits.push(ReportSignatureHit {
+                            kind,
+                            offset: u64_of(&hit, "offset")?,
+                        });
+                    }
+                }
+                (prepass.copy()?, hits)
             }
-            _ => PyDict::new(py),
+            _ if (signature_prepass || format_structure) && config.prepass_enabled => {
+                let data = py
+                    .detach(|| {
+                        signature_prepass_native(&self.reader, config.head_bytes, config.tail_bytes)
+                    })
+                    .map_err(reader_error_to_py)?;
+                let hits = data
+                    .hits
+                    .iter()
+                    .filter_map(|&(name, offset)| {
+                        ReportHitKind::from_name(name)
+                            .map(|kind| ReportSignatureHit { kind, offset })
+                    })
+                    .collect();
+                (signature_prepass_to_python(py, data)?.into_bound(py), hits)
+            }
+            _ => (PyDict::new(py), Vec::new()),
         };
+        let mut embedded: HashMap<String, Vec<Bound<'py, PyDict>>> = HashMap::new();
+        for item in prepass_dicts(&prepass, "embedded_candidates")? {
+            embedded
+                .entry(str_of(&item, "format")?)
+                .or_default()
+                .push(item);
+        }
         let mut context = ReportContext {
             py,
             view: self,
             disk_starts,
             stream_path,
             prepass,
+            hits,
+            embedded,
             stream_structure: None,
         };
         let mut evidences = Vec::new();
@@ -417,40 +497,16 @@ impl<'a, 'py> ReportContext<'a, 'py> {
         }
     }
 
-    fn prepass_list(&self, key: &str) -> PyResult<Vec<Bound<'py, PyDict>>> {
-        let Some(value) = self.prepass.get_item(key)? else {
-            return Ok(Vec::new());
-        };
-        if value.is_none() {
-            return Ok(Vec::new());
-        }
-        let mut items = Vec::new();
-        for item in value.try_iter()? {
-            items.push(item?.cast_into::<PyDict>()?);
-        }
-        Ok(items)
-    }
-
-    fn hits(&self, matches: impl Fn(&str) -> bool) -> PyResult<Vec<Bound<'py, PyDict>>> {
-        let mut hits = Vec::new();
-        for hit in self.prepass_list("hits")? {
-            if matches(&str_of(&hit, "name")?) {
-                hits.push(hit);
-            }
-        }
-        Ok(hits)
+    fn hits(&self, matches: impl Fn(ReportHitKind) -> bool) -> Vec<&ReportSignatureHit> {
+        self.hits.iter().filter(|hit| matches(hit.kind)).collect()
     }
 
     fn embedded(&self, format: &str, logical_only: bool) -> PyResult<Vec<Bound<'py, PyDict>>> {
         let mut items = Vec::new();
-        for item in self.prepass_list("embedded_candidates")? {
-            if str_of(&item, "format")? != format {
-                continue;
+        for item in self.embedded.get(format).into_iter().flatten() {
+            if !logical_only || str_of(item, "candidate_kind")? == "logical_archive" {
+                items.push(item.clone());
             }
-            if logical_only && str_of(&item, "candidate_kind")? != "logical_archive" {
-                continue;
-            }
-            items.push(item);
         }
         Ok(items)
     }
@@ -463,7 +519,7 @@ impl<'a, 'py> ReportContext<'a, 'py> {
 
     fn rar_module(&mut self, max_blocks: usize) -> PyResult<Evidence<'py>> {
         let py = self.py;
-        let hits = self.hits(|name| name.starts_with("rar"))?;
+        let hits = self.hits(|kind| kind == ReportHitKind::Rar);
         let embedded = self.embedded("rar", true)?;
         if hits.is_empty() && embedded.is_empty() {
             return Ok(Evidence::not_found(py, "rar"));
@@ -505,10 +561,7 @@ impl<'a, 'py> ReportContext<'a, 'py> {
             .map(|item| u64_of(item, "offset"))
             .collect::<PyResult<Vec<_>>>()?;
         if starts.is_empty() {
-            starts = hits
-                .iter()
-                .map(|hit| u64_of(hit, "offset"))
-                .collect::<PyResult<Vec<_>>>()?;
+            starts = hits.iter().map(|hit| hit.offset).collect::<Vec<_>>();
         }
         starts.sort_unstable();
         starts.dedup();
@@ -613,14 +666,11 @@ impl<'a, 'py> ReportContext<'a, 'py> {
                 .collect::<PyResult<Vec<_>>>()?;
             return combine_candidates(py, "7z", candidates, true);
         }
-        let hits = self.hits(|name| name == "7z")?;
+        let hits = self.hits(|kind| kind == ReportHitKind::SevenZip);
         if hits.is_empty() {
             return Ok(Evidence::not_found(py, "7z"));
         }
-        let mut starts = hits
-            .iter()
-            .map(|hit| u64_of(hit, "offset"))
-            .collect::<PyResult<Vec<_>>>()?;
+        let mut starts = hits.iter().map(|hit| hit.offset).collect::<Vec<_>>();
         starts.sort_unstable();
         starts.dedup();
         let mut candidates = Vec::new();
@@ -746,10 +796,10 @@ impl<'a, 'py> ReportContext<'a, 'py> {
             return combine_candidates(py, "tar", candidates, true);
         }
         let mut hit_starts = self
-            .hits(|name| name == "tar_ustar")?
+            .hits(|kind| kind == ReportHitKind::Tar)
             .iter()
-            .map(|hit| Ok(u64_of(hit, "offset")?.saturating_sub(257)))
-            .collect::<PyResult<Vec<_>>>()?;
+            .map(|hit| hit.offset.saturating_sub(257))
+            .collect::<Vec<_>>();
         hit_starts.sort_unstable();
         hit_starts.dedup();
 
@@ -860,7 +910,12 @@ impl<'a, 'py> ReportContext<'a, 'py> {
 
     fn zip_module(&mut self, max_entries: usize) -> PyResult<Evidence<'py>> {
         let py = self.py;
-        let hits = self.hits(|name| name.starts_with("zip_"))?;
+        let hits = self.hits(|kind| {
+            matches!(
+                kind,
+                ReportHitKind::ZipLocal | ReportHitKind::ZipEocd | ReportHitKind::ZipOther
+            )
+        });
         let embedded = self.embedded("zip", false)?;
         if hits.is_empty() && embedded.is_empty() {
             return Ok(Evidence::not_found(py, "zip"));
@@ -878,8 +933,8 @@ impl<'a, 'py> ReportContext<'a, 'py> {
         let mut earliest_local = None::<Option<u64>>;
         let mut eocd_hits = Vec::new();
         for hit in &hits {
-            if str_of(hit, "name")? == "zip_eocd" {
-                eocd_hits.push(u64_of(hit, "offset")?);
+            if hit.kind == ReportHitKind::ZipEocd {
+                eocd_hits.push(hit.offset);
             }
         }
         eocd_hits.sort_unstable_by(|left, right| right.cmp(left));
@@ -1466,7 +1521,7 @@ fn zip_from_embedded<'py>(py: Python<'py>, item: &Bound<'py, PyDict>) -> PyResul
 
 fn zip_from_native<'py>(
     native: Bound<'py, PyDict>,
-    hits: &[Bound<'py, PyDict>],
+    hits: &[&ReportSignatureHit],
     view_size: u64,
 ) -> PyResult<Evidence<'py>> {
     let magic_matched = truthy(&native, "magic_matched")?;
@@ -1546,7 +1601,7 @@ fn zip_from_native<'py>(
 
 fn zip_local_header_recovery<'py>(
     native: &Bound<'py, PyDict>,
-    hits: &[Bound<'py, PyDict>],
+    hits: &[&ReportSignatureHit],
     earliest_local: &mut Option<Option<u64>>,
 ) -> PyResult<Option<Evidence<'py>>> {
     if !ZIP_LOCAL_RECOVERY_ERRORS.contains(&str_of(native, "error")?.as_str()) {
@@ -1555,8 +1610,8 @@ fn zip_local_header_recovery<'py>(
     if earliest_local.is_none() {
         let mut start = None::<u64>;
         for hit in hits {
-            if str_of(hit, "name")? == "zip_local" {
-                let offset = u64_of(hit, "offset")?;
+            if hit.kind == ReportHitKind::ZipLocal {
+                let offset = hit.offset;
                 start = Some(start.map_or(offset, |current| current.min(offset)));
             }
         }

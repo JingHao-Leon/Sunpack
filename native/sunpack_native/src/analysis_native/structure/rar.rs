@@ -192,8 +192,7 @@ fn enrich_rar5_semantics(d: &Bound<'_, PyDict>, data: &[u8], file_size: u64) -> 
         let header_body = &data[..body_end];
         match header_type {
             1 => {
-                let (main_flags, next) =
-                    read_vint(header_body, cursor).unwrap_or((0, cursor));
+                let (main_flags, next) = read_vint(header_body, cursor).unwrap_or((0, cursor));
                 d.set_item("main_header.flags", main_flags)?;
                 d.set_item("main_header.extra_area", extra_size)?;
                 d.set_item(
@@ -215,11 +214,9 @@ fn enrich_rar5_semantics(d: &Bound<'_, PyDict>, data: &[u8], file_size: u64) -> 
                 let _ = next;
             }
             2 => {
-                let (file_flags, next) =
-                    read_vint(header_body, cursor).unwrap_or((0, cursor));
+                let (file_flags, next) = read_vint(header_body, cursor).unwrap_or((0, cursor));
                 cursor = next;
-                let (unpacked, next) =
-                    read_vint(header_body, cursor).unwrap_or((0, cursor));
+                let (unpacked, next) = read_vint(header_body, cursor).unwrap_or((0, cursor));
                 cursor = next;
                 let (_, next) = read_vint(header_body, cursor).unwrap_or((0, cursor));
                 cursor = next;
@@ -245,13 +242,11 @@ fn enrich_rar5_semantics(d: &Bound<'_, PyDict>, data: &[u8], file_size: u64) -> 
                 } else {
                     None
                 };
-                let (compression, next) =
-                    read_vint(header_body, cursor).unwrap_or((0, cursor));
+                let (compression, next) = read_vint(header_body, cursor).unwrap_or((0, cursor));
                 cursor = next;
                 let (_, next) = read_vint(header_body, cursor).unwrap_or((0, cursor));
                 cursor = next;
-                let (name_size, next) =
-                    read_vint(header_body, cursor).unwrap_or((0, cursor));
+                let (name_size, next) = read_vint(header_body, cursor).unwrap_or((0, cursor));
                 cursor = next;
                 if cursor > body_end {
                     break;
@@ -334,15 +329,11 @@ fn enrich_rar4_semantics(d: &Bound<'_, PyDict>, data: &[u8], file_size: u64) -> 
         let Some(header_end) = checked_usize_end(offset, header_size, data.len()) else {
             break;
         };
-        if header_size < 7
-            || u64::try_from(header_end).map_or(true, |end| end > file_size)
-        {
+        if header_size < 7 || u64::try_from(header_end).map_or(true, |end| end > file_size) {
             break;
         }
-        let add_size = if flags & 0x8000 != 0 && header_size >= 11 {
-            u32_le(data, offset + 7) as usize
-        } else {
-            0
+        let Some(add_size) = crate::formats::rar::rar4_data_size(&data[offset..header_end]) else {
+            break;
         };
         if blocks == 0 {
             d.set_item(
@@ -364,12 +355,21 @@ fn enrich_rar4_semantics(d: &Bound<'_, PyDict>, data: &[u8], file_size: u64) -> 
                 d.set_item("main_header.extra_area", header_size.saturating_sub(13))?;
             }
             0x74 if header_size >= 32 => {
-                let packed = u32_le(data, offset + 7) as u64;
-                let unpacked = u32_le(data, offset + 11) as u64;
+                let packed = add_size;
+                let large = flags & 0x0100 != 0;
+                if large && header_size < 40 {
+                    break;
+                }
+                let unpacked = u64::from(u32_le(data, offset + 11))
+                    | if large {
+                        u64::from(u32_le(data, offset + 36)) << 32
+                    } else {
+                        0
+                    };
                 let crc = u32_le(data, offset + 16);
                 let method = data[offset + 25];
                 let name_size = u16_le(data, offset + 26) as usize;
-                let Some(name_start) = offset.checked_add(32) else {
+                let Some(name_start) = offset.checked_add(if large { 40 } else { 32 }) else {
                     break;
                 };
                 if name_start > header_end {
@@ -412,7 +412,10 @@ fn enrich_rar4_semantics(d: &Bound<'_, PyDict>, data: &[u8], file_size: u64) -> 
             _ => {}
         }
         blocks += 1;
-        let Some(next) = header_end.checked_add(add_size) else {
+        let Some(next) = usize::try_from(add_size)
+            .ok()
+            .and_then(|size| header_end.checked_add(size))
+        else {
             break;
         };
         if next <= offset || next > data.len() {
@@ -550,14 +553,12 @@ fn inspect_rar4_block(data: &[u8], offset: usize, file_size: u64) -> (bool, u8, 
     let Some(min_header_end) = offset.checked_add(7) else {
         return (false, 0, 0, "rar4_second_block_too_small");
     };
-    if u64::try_from(offset).map_or(true, |value| value >= file_size)
-        || data.len() < min_header_end
+    if u64::try_from(offset).map_or(true, |value| value >= file_size) || data.len() < min_header_end
     {
         return (false, 0, 0, "rar4_second_block_too_small");
     }
     let header_crc = u16_le(data, offset);
     let header_type = data[offset + 2];
-    let header_flags = u16_le(data, offset + 3);
     let header_size = u16_le(data, offset + 5) as u64;
     if !matches!(header_type, 0x73..=0x7B) {
         return (
@@ -604,16 +605,15 @@ fn inspect_rar4_block(data: &[u8], offset: usize, file_size: u64) -> (bool, u8, 
         );
     }
     let mut block_size = header_size;
-    if header_flags & 0x8000 != 0 {
-        if header_size < 11 {
+    {
+        let Some(add_size) = crate::formats::rar::rar4_data_size(full_header) else {
             return (
                 false,
                 header_type,
                 block_size,
                 "rar4_second_block_add_size_missing",
             );
-        }
-        let add_size = u32_le(full_header, 7) as u64;
+        };
         let Some(updated_size) = block_size.checked_add(add_size) else {
             return (
                 false,
@@ -752,8 +752,7 @@ fn inspect_rar5_block(
     let Some(min_header_end) = offset.checked_add(6) else {
         return (false, 0, 0, "rar5_second_header_too_small");
     };
-    if u64::try_from(offset).map_or(true, |value| value >= file_size)
-        || data.len() < min_header_end
+    if u64::try_from(offset).map_or(true, |value| value >= file_size) || data.len() < min_header_end
     {
         return (false, 0, 0, "rar5_second_header_too_small");
     }
@@ -849,4 +848,3 @@ fn inspect_rar5_block(
     }
     (true, header_type, header_total_size, "")
 }
-

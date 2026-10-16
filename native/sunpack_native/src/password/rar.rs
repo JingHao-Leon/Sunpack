@@ -31,6 +31,7 @@ const RAR4_MAIN_HEADER_PASSWORD: u16 = 0x0080;
 const RAR4_FILE_PASSWORD: u16 = 0x0004;
 const RAR4_FILE_LARGE: u16 = 0x0100;
 const RAR4_FILE_SALT: u16 = 0x0400;
+#[cfg(test)]
 const RAR4_LONG_BLOCK: u16 = 0x8000;
 const RAR4_FILE_DIRECTORY_MASK: u16 = 0x00e0;
 const RAR4_END_NEXT_VOLUME: u16 = 0x0001;
@@ -532,19 +533,10 @@ fn parse_rar4_block(data: &[u8], offset: usize) -> Option<Rar4Block> {
     if computed_crc != stored_crc {
         return None;
     }
-    let data_size = if flags & RAR4_LONG_BLOCK != 0 {
-        if header_size < 11 {
-            return None;
-        }
-        u32::from_le_bytes([
-            data[offset + 7],
-            data[offset + 8],
-            data[offset + 9],
-            data[offset + 10],
-        ]) as usize
-    } else {
-        0
-    };
+    let data_size = usize::try_from(crate::formats::rar::rar4_data_size(
+        &data[offset..header_end],
+    )?)
+    .ok()?;
     let next_offset = header_end.checked_add(data_size)?;
     Some(Rar4Block {
         header_type,
@@ -602,12 +594,6 @@ fn parse_rar4_file_probe(data: &[u8], offset: usize, block: Rar4Block) -> Option
     if block.header_end < offset + 32 {
         return None;
     }
-    let packed_low = u32::from_le_bytes([
-        data[offset + 7],
-        data[offset + 8],
-        data[offset + 9],
-        data[offset + 10],
-    ]) as u64;
     let unpacked_low = u32::from_le_bytes([
         data[offset + 11],
         data[offset + 12],
@@ -624,17 +610,11 @@ fn parse_rar4_file_probe(data: &[u8], offset: usize, block: Rar4Block) -> Option
     let method = raw_method.checked_sub(0x30)?;
     let name_size = u16::from_le_bytes([data[offset + 26], data[offset + 27]]) as usize;
 
-    let (packed_high, unpacked_high, name_start) = if block.flags & RAR4_FILE_LARGE != 0 {
+    let (unpacked_high, name_start) = if block.flags & RAR4_FILE_LARGE != 0 {
         if block.header_end < offset + 40 {
             return None;
         }
         (
-            u32::from_le_bytes([
-                data[offset + 32],
-                data[offset + 33],
-                data[offset + 34],
-                data[offset + 35],
-            ]) as u64,
             u32::from_le_bytes([
                 data[offset + 36],
                 data[offset + 37],
@@ -644,7 +624,7 @@ fn parse_rar4_file_probe(data: &[u8], offset: usize, block: Rar4Block) -> Option
             offset + 40,
         )
     } else {
-        (0, 0, offset + 32)
+        (0, offset + 32)
     };
     let name_end = name_start.checked_add(name_size)?;
     if name_end > block.header_end {
@@ -653,7 +633,10 @@ fn parse_rar4_file_probe(data: &[u8], offset: usize, block: Rar4Block) -> Option
     if block.flags & RAR4_FILE_LARGE == 0 && unpacked_low == u32::MAX as u64 {
         return None;
     }
-    let pack_size = usize::try_from((packed_high << 32) | packed_low).ok()?;
+    let pack_size = usize::try_from(crate::formats::rar::rar4_data_size(
+        &data[offset..block.header_end],
+    )?)
+    .ok()?;
     let unpacked_size = usize::try_from((unpacked_high << 32) | unpacked_low).ok()?;
     let data_offset = block.header_end;
     let salt = if block.flags & RAR4_FILE_SALT != 0 {
@@ -1438,13 +1421,8 @@ fn walk_rar4_encrypted_headers(
             return Ok(incomplete(password_matched));
         }
         password_matched = true;
-        let data_size = if header_flags & RAR4_LONG_BLOCK != 0 {
-            if full.len() < 11 {
-                return Ok(incomplete(true));
-            }
-            u32::from_le_bytes([full[7], full[8], full[9], full[10]]) as u64
-        } else {
-            0
+        let Some(data_size) = crate::formats::rar::rar4_data_size(full) else {
+            return Ok(incomplete(true));
         };
         let next = encrypted_offset
             .checked_add(aligned_size as u64)

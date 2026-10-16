@@ -10,7 +10,7 @@ from io import BytesIO
 
 import pytest
 
-from sunpack_native import AnalysisBinaryView, inspect_rar_structure
+from sunpack_native import AnalysisBinaryView, inspect_rar_structure, probe_rar_bytes
 from sunpack.core.analysis.embedded import scan_embedded_archives
 from sunpack.core.analysis.engine import AnalysisEngine
 from sunpack.core.analysis.view import SharedBinaryView
@@ -124,11 +124,41 @@ def test_rar5_extra_area_larger_than_header_does_not_panic(tmp_path):
     assert result["format"] == "rar"
 
 
+def test_rar4_large_packed_sizes_agree_across_native_analysis_paths(tmp_path):
+    # Carrier extraction alone bypasses the standalone inspectors. This small
+    # matrix uniquely catches high-word/truncated-header errors in those paths;
+    # removing it leaves the single-file analysis APIs untested for large RAR4.
+    import struct
+
+    def block(kind, flags, body=b""):
+        raw = struct.pack("<BHH", kind, flags, 7 + len(body)) + body
+        return struct.pack("<H", crc32(raw) & 0xffff) + raw
+
+    for name, flags, low, high, complete in (
+        ("small", 0x8000, 0, b"", True),
+        ("large_zero", 0x8100, 0, bytes(8), True),
+        ("large_truncated", 0x8100, 0, struct.pack("<II", 1, 0), False),
+        ("large_overflow", 0x8100, 0xffffffff, struct.pack("<II", 0xffffffff, 0), False),
+        ("large_header_truncated", 0x8100, 0, b"", False),
+    ):
+        fixed = struct.pack("<IIBIIBBHI", low, 0, 2, 0, 0, 20, 0x30, 1, 0)
+        data = (b"Rar!\x1a\x07\x00" + block(0x73, 0, bytes(6))
+                + block(0x74, flags, fixed + high + b"a") + block(0x7b, 0))
+        path = _write_bytes(tmp_path / f"{name}.opaque", data)
+        observation = probe_rar_bytes(data, 0, 4096)
+        assert observation["end_block_found"] == complete, name
+        report = AnalysisEngine().analyze_path(str(path))
+        assert any(item.format == "rar" for item in report.selected) == complete, name
+        structure = inspect_rar_structure(str(path))
+        assert bool(structure["second_block_ok"]) == complete, name
+
+
 def test_clean_whole_input_formats_use_structure_evidence(tmp_path):
     payload = b"clean payload" * 32
     cases = {
         "zip": _zip_bytes(tmp_path),
         "7z": _seven_zip_bytes(),
+        "7z-empty": b"7z\xbc\xaf\x27\x1c\x00\x04" + crc32(bytes(20)).to_bytes(4, "little") + bytes(20),
         "rar4": _rar4_bytes(),
         "rar5": _rar5_bytes(),
         "gzip": gzip.compress(payload),
@@ -144,7 +174,7 @@ def test_clean_whole_input_formats_use_structure_evidence(tmp_path):
         path = _write_bytes(tmp_path / f"clean-{name}.bin", data)
         report = AnalysisEngine().analyze_path(str(path))
 
-        expected = "rar" if name in {"rar4", "rar5"} else name
+        expected = "rar" if name in {"rar4", "rar5"} else "7z" if name == "7z-empty" else name
         evidence = next(item for item in report.selected if item.format == expected)
         assert evidence.status == "extractable", name
         assert evidence.segments[0].start_offset == 0

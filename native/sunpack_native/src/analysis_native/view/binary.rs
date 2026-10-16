@@ -186,7 +186,7 @@ impl AnalysisBinaryView {
         result.set_item("next_header_offset", next_header_offset)?;
         result.set_item("next_header_size", next_header_size)?;
         result.set_item("segment_end", segment_end)?;
-        if next_header_size == 0 {
+        if next_header_size == 0 && next_header_offset != 0 {
             result.set_item("error", "invalid_next_header_range")?;
             return Ok(result.unbind());
         }
@@ -225,7 +225,7 @@ impl AnalysisBinaryView {
             };
             let crc_ok = py.detach(|| crc32(&next_header)) == next_header_crc;
             let nid = next_header.first().copied().unwrap_or(0);
-            let nid_valid = nid == 0x01 || nid == 0x17;
+            let nid_valid = next_header.is_empty() || nid == 0x01 || nid == 0x17;
             result.set_item("next_header_crc_checked", true)?;
             result.set_item("next_header_crc_ok", crc_ok)?;
             result.set_item("next_header_nid", nid)?;
@@ -341,7 +341,6 @@ impl AnalysisBinaryView {
             format_structure,
             None,
             Some(&self.path),
-            |head, tail| self.signature_prepass(py, head, tail),
         )
     }
 

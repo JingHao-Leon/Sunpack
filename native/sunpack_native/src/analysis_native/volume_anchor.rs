@@ -986,22 +986,10 @@ pub(crate) fn upgrade_relation_rar_end(
                 }
                 let flags = u16_le(&header, 3).unwrap();
                 let kind = header[2];
-                data_size = if flags & 0x8000 != 0 {
-                    let Some(low) = u32_le(&header, 7) else {
-                        break;
-                    };
-                    let high = if kind == 0x74 && flags & 0x100 != 0 {
-                        let Some(high) = u32_le(&header, 32) else {
-                            break;
-                        };
-                        u64::from(high) << 32
-                    } else {
-                        0
-                    };
-                    u64::from(low) | high
-                } else {
-                    0
+                let Some(size) = crate::formats::rar::rar4_data_size(&header) else {
+                    break;
                 };
+                data_size = size;
                 if kind == 0x74 && first_file {
                     out.continuation_from_previous |= flags & 1 != 0;
                     out.continuation_to_next |= flags & 2 != 0;

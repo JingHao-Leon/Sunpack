@@ -228,7 +228,6 @@ impl AnalysisMultiVolumeView {
             format_structure,
             Some(&self.volume_starts),
             None,
-            |head, tail| self.signature_prepass(py, head, tail),
         )
     }
 

@@ -7,6 +7,7 @@ import sys
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
+from pathlib import Path
 
 from sunpack_native import reader_cache_stats
 
@@ -84,6 +85,7 @@ async def run():
 asyncio.run(run())
 """, str(carrier), str(tmp_path / "output")],
         env={**os.environ, "RAYON_NUM_THREADS": "1"},
+        cwd=Path(__file__).resolve().parents[2],
         capture_output=True, text=True, timeout=30,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr

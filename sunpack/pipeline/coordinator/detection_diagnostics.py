@@ -1,9 +1,10 @@
 """Read-only typed discovery diagnostics for the CLI inspect command."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from sunpack.core.contracts.run_state import RunState
+from sunpack.core.contracts.tasks import ArchiveTask
 from sunpack.pipeline.coordinator.scan_session import DiscoveryScanSession
 from sunpack.pipeline.coordinator.task_provider import ArchiveTaskProvider
 from sunpack.pipeline.discovery.embedded.options import EmbeddedOptions
@@ -18,6 +19,7 @@ class DiscoveryDiagnostic:
     source: str
     reason: str
     archive_input: dict | None = None
+    task: ArchiveTask | None = field(default=None, repr=False, compare=False)
 
     @property
     def should_extract(self) -> bool:
@@ -62,6 +64,7 @@ class DetectionDiagnostics:
                     if path_key(trace.entry_path) in resolved
                     else None
                 ),
+                task=resolved.get(path_key(trace.entry_path)),
             )
             for trace in result.traces
         ]

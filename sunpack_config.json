@@ -10,13 +10,7 @@
   },
   "recursive_extract": "*",
   "recursive_authorization": {
-    "enabled": true,
-    "byte_ratio_exponent": 1,
-    "project_ratio_exponent": 1,
-    "authorization_bias": 0,
-    "minimum_authorization_score": 0.85,
-    "minimum_archive_byte_ratio": 0.1,
-    "hard_maximum_other_projects": 1000
+    "enabled": true
   },
   "embedded_scan": {
     "enabled": true,
@@ -103,8 +97,5 @@
         "date": "20270101 00:00 > d >= 20240101 00:00"
       }
     ]
-  },
-  "detection": {
-    "enabled": true
   }
 }

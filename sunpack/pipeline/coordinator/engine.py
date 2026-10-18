@@ -32,7 +32,8 @@ from sunpack.pipeline.extraction.output_inventory import OutputInventory
 from sunpack.core.i18n import I18nContext
 from sunpack.pipeline.postprocess.actions import PostProcessActions
 from sunpack.pipeline.postprocess.internal.cleanup import ArchiveCleanup
-from sunpack.core.passwords.internal.store import MAX_RECENT_PASSWORDS
+from sunpack.core.passwords.internal.store import MAX_RECENT_PASSWORDS, PasswordStore
+from sunpack.core.passwords.directory_context import PasswordScopeContext
 from sunpack.core.platform.windows.shell_notify import notify_shell_directories_updated
 from sunpack.core.support.output_reservation import OutputReservationRegistry, build_output_dir_resolver
 from sunpack.pipeline.extraction.internal.sevenzip.sevenzip_runner import SevenZipRunner
@@ -48,8 +49,7 @@ class _Submission:
     request_id: str
     targets: tuple[PipelineTarget, ...]
     direct: bool
-    user_passwords: tuple[str, ...]
-    builtin_passwords: tuple[str, ...]
+    password_store: PasswordStore
     config: dict
     origin: str = "foreground"
     detection_options: EmbeddedOptions = EmbeddedOptions()
@@ -78,7 +78,9 @@ class PipelineEngine:
         self._path_leases = _PathLeaseRegistry()
         self._recent_passwords: list[str] = []
         self._user_passwords = tuple(config.get("user_passwords", []) or [])
-        self._builtin_passwords = tuple(config.get("builtin_passwords", []) or [])
+        self._password_snapshot = config.get("password_snapshot")
+        if self._password_snapshot is None:
+            self._password_snapshot = PasswordStore.from_config(config).snapshot
         self._started = False
         self._closed = False
         self._owner_loop: asyncio.AbstractEventLoop | None = None
@@ -142,19 +144,26 @@ class PipelineEngine:
         normalized = tuple(self._normalize_target(target) for target in targets)
         if not normalized:
             raise ValueError("PipelineEngine.run requires at least one target")
-        request_config = copy.deepcopy(request_config if request_config is not None else self.config)
+        source = request_config if request_config is not None else self.config
+        password_snapshot = source.get("password_snapshot", self._password_snapshot)
+        request_config = copy.deepcopy({k: v for k, v in source.items() if k not in {"password_snapshot", "builtin_passwords", "password_store", "password_scope_context"}})
         detection_options = detection_options or EmbeddedOptions()
         request_config = discovery_run_config(request_config, deep_detect=detection_options.force_scan)
         user_passwords = tuple(request_config.get("user_passwords", self._user_passwords) or [])
-        builtin_passwords = tuple(request_config.get("builtin_passwords", self._builtin_passwords) or [])
         request_config["user_passwords"] = list(user_passwords)
-        request_config["builtin_passwords"] = list(builtin_passwords)
+        password_store = PasswordStore.from_sources(
+            cli_passwords=user_passwords,
+            clipboard_passwords=request_config.get("clipboard_passwords"),
+            recent_passwords=self._recent_passwords,
+            password_snapshot=password_snapshot,
+        )
+        request_config["password_store"] = password_store
+        request_config["password_scope_context"] = PasswordScopeContext(request_config.get("password_scope_dir", ""))
         submission = _Submission(
             request_id=uuid.uuid4().hex,
             targets=normalized,
             direct=bool(direct),
-            user_passwords=user_passwords,
-            builtin_passwords=builtin_passwords,
+            password_store=password_store,
             config=request_config,
             origin="watch" if str(origin).lower() == "watch" else "foreground",
             detection_options=detection_options,
@@ -249,13 +258,12 @@ class PipelineEngine:
 
         return await self._broker.run("cache_cleanup", "engine", clear, request_id="engine")
 
-    def update_password_sources(self, *, user_passwords: Iterable[str], builtin_passwords: Iterable[str]) -> None:
-        self._user_passwords = tuple(user_passwords)
-        self._builtin_passwords = tuple(builtin_passwords)
-
     def reconfigure_request(self, config: dict) -> None:
         """Refresh the snapshot source for future requests only."""
         _replace_mapping_in_place(self.config, config)
+        self._password_snapshot = config.get("password_snapshot")
+        if self._password_snapshot is None:
+            self._password_snapshot = PasswordStore.from_config(config).snapshot
 
     async def set_process_mode(self, *, mode: str) -> dict[str, Any]:
         return await self._services.sevenzip_runner.set_process_mode_asyncio(mode=mode)
@@ -1069,8 +1077,7 @@ class _RequestRuntime:
         request_runner.request_id = submission.request_id
         request_runner.origin = submission.origin
         self.extractor = ExtractionScheduler(
-            cli_passwords=submission.user_passwords,
-            builtin_passwords=submission.builtin_passwords,
+            password_store=submission.password_store,
             max_retries=self.config.get("max_retries", 3),
             process_config=worker_config,
             output_config=self.config.get("output", {}),
@@ -1312,14 +1319,7 @@ class _RequestRuntime:
             )
 
         if tasks:
-            await broker.run(
-                "directory_passwords",
-                self.submission.request_id,
-                self.job_executor.directory_password_contexts.annotate,
-                tasks,
-                request_id=self.submission.request_id,
-                cancellation=cancellation,
-            )
+            self.job_executor.password_scope_context.annotate(tasks)
 
         # Bound waiting coroutine state by the existing stage queue budget.
         # Each recursive batch owns its consumers, so a parent never holds a

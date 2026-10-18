@@ -8,7 +8,7 @@ from pathlib import Path
 from sunpack.core.config.payload_io import read_config_payload
 from sunpack.runtime.watch.service import watch_roots_path
 from sunpack.core.i18n import I18nContext
-from sunpack.core.passwords.internal.builtin import builtin_password_path, get_builtin_passwords
+from sunpack.core.passwords.internal.builtin import builtin_password_path, ensure_builtin_password_file
 from sunpack.runtime.watch.startup import disable_startup, enable_startup, startup_status
 from sunpack.core.support.process_executable import current_process_executable
 
@@ -553,7 +553,7 @@ class WindowsTrayIcon:
     def _open_builtin_passwords_file(self) -> None:
         passwords_path = builtin_password_path()
         if not passwords_path.exists():
-            get_builtin_passwords()
+            ensure_builtin_password_file()
         if passwords_path.exists():
             self._open_path(str(passwords_path))
 

@@ -59,7 +59,6 @@ def test_output_dir_override_is_relative_to_the_request_cwd(tmp_path):
         output_dir = "output"
         flatten_single_directory = None
         allow_partial = False
-        directory_passwords = None
 
     config = {}
 
@@ -75,7 +74,6 @@ def test_omitted_output_dir_keeps_default_beside_archive_behavior(tmp_path):
         output_dir = None
         flatten_single_directory = None
         allow_partial = False
-        directory_passwords = None
 
     config = {}
     overrides = apply_runtime_config_overrides(config, Args(), base_dir=str(tmp_path))

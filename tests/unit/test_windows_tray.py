@@ -24,8 +24,8 @@ def test_tray_open_watch_roots_file_creates_and_opens_txt(tmp_path, monkeypatch)
     assert opened == [str(roots_path)]
 
 
-def test_tray_open_builtin_passwords_file_creates_and_opens_txt(tmp_path, monkeypatch):
-    passwords_path = tmp_path / "builtin_passwords.txt"
+def test_tray_open_builtin_passwords_file_creates_and_opens_json(tmp_path, monkeypatch):
+    passwords_path = tmp_path / "builtin_passwords.json"
     opened = []
     tray = object.__new__(WindowsTrayIcon)
     tray._open_path = opened.append
@@ -33,10 +33,10 @@ def test_tray_open_builtin_passwords_file_creates_and_opens_txt(tmp_path, monkey
     monkeypatch.setattr(tray_module, "builtin_password_path", lambda: passwords_path)
 
     def create_passwords_file():
-        passwords_path.write_text("123456\n", encoding="utf-8")
+        passwords_path.write_text('{"passwords":[{"value":"123456"}]}', encoding="utf-8")
         return ["123456"]
 
-    monkeypatch.setattr(tray_module, "get_builtin_passwords", create_passwords_file)
+    monkeypatch.setattr(tray_module, "ensure_builtin_password_file", create_passwords_file)
 
     tray._open_builtin_passwords_file()
 

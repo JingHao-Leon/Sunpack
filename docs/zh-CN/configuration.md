@@ -59,6 +59,16 @@ CLI 的 `--recur`、`--cleanup` 和 `--out-dir` 等参数可为单次命令指�
 
 使用 `python sunpack.py watch add C:\Downloads` 添加监控目录，附加 `-o E:\Output` 可指定输出目录；未指定时使用 `watch.out_dir`。`watch list` 可查看目录。Watch 只监控每个根目录下的直接文件，不递归监控子目录。
 
-在归档旁放置 `sunpack-passwords.txt`，每行一个密码。将 `passwords.directory_passwords_enabled` 设为 `false` 可停止读取该文件；将 `watch.directory_password_file_auto_create` 设为 `false` 可停止 Watch 自动创建该文件。CLI 也可用 `-p` 或 `--pw-file` 提供密码。
+在 `builtin_passwords.json` 的 `passwords` 中填写 `value`，可用 `scopes` 指定一个或多个绝对目录；省略 `scopes` 即全局生效。CLI 也可用 `-p` 或 `--pw-file` 提供密码。
+
+```json
+{
+  "passwords": [
+    {"value": "全局密码"},
+    {"value": "目录密码", "scopes": ["D:/Downloads", "E:/Archives"]}
+  ],
+  "clipboard_history": []
+}
+```
 
 其他较少使用的设置可查看 `sunpack_advanced_config.json` 和 `config show`。`SUNPACK_CONFIG_OVERRIDES` 接受内联 JSON 对象或 JSON 文件路径，用于临时覆盖配置。

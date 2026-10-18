@@ -125,8 +125,6 @@
     "runtime_cache_cleanup_enabled": true,
     "runtime_cache_cleanup_idle_seconds": 10,
     "password_retry_debounce_seconds": 0.5,
-    "password_retry_include_subtree": true,
-    "directory_password_file_auto_create": true,
     "clipboard_monitor_enabled": true,
     "clipboard_builtin_max_entries": 30,
     "enabled": false,
@@ -142,10 +140,7 @@
     "state_dir": ""
   },
   "passwords": {
-    "clipboard_passwords_enabled": true,
-    "directory_passwords_enabled": true,
-    "directory_passwords_max_file_bytes": 1048576,
-    "directory_passwords_max_password_length": 512
+    "clipboard_passwords_enabled": true
   },
   "extraction": {
     "content_requirement": "complete"

@@ -1142,12 +1142,12 @@ Assert-PathMissing -LiteralPath (Join-Path $distAppRoot "sunpack-watch.exe") -De
 Assert-PackagedNativeExtension -PackageRoot $distAppRoot -BuildArch $buildArch
 
 Write-Step "Adding release metadata and helper scripts"
-$distPasswordPath = Join-Path $distAppRoot "builtin_passwords.txt"
+$distPasswordPath = Join-Path $distAppRoot "builtin_passwords.json"
 $distConfigPath = Join-Path $distAppRoot "sunpack_config.json"
 $distWatchRootsPath = Join-Path $distAppRoot "sunpack_watch_roots.txt"
 $distAdvancedConfigPath = Join-Path $distAppRoot "sunpack_advanced_config.json"
 $distIconPath = Join-Path $distAppRoot "sunpack.ico"
-Copy-Item -LiteralPath (Join-Path $repoRoot "builtin_passwords.txt") -Destination $distPasswordPath -Force
+Copy-Item -LiteralPath (Join-Path $repoRoot "builtin_passwords.json") -Destination $distPasswordPath -Force
 Copy-Item -LiteralPath (Join-Path $repoRoot "sunpack_config.json") -Destination $distConfigPath -Force
 Copy-IfExists -Source (Join-Path $repoRoot "sunpack_watch_roots.txt") -Destination $distWatchRootsPath
 Copy-Item -LiteralPath $iconPath -Destination $distIconPath -Force

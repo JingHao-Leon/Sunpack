@@ -26,7 +26,7 @@ def test_batched_jobs_finish_independent_work_and_nested_batches_before_raising(
         runtime._claim_tasks = lambda tasks: tasks
         runtime.source_cleanup = NS(register=lambda tasks: None)
         runtime.reporter = NS(tasks_discovered=lambda *a, **k: None)
-        runtime.job_executor = NS(directory_password_contexts=NS(annotate=lambda tasks: None))
+        runtime.job_executor = NS(password_scope_context=NS(annotate=lambda tasks: None))
         seen = set()
         children_done = asyncio.Event()
 

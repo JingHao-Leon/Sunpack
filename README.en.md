@@ -86,10 +86,11 @@ $r = Invoke-RestMethod 'https://api.github.com/repos/Qinjingxue/Sunpack/releases
 
 For maximum convenience, SunPack gathers passwords from several sources at run time, tries all candidate passwords at high speed — with thousands of candidates it is nearly imperceptible — and automatically finds and uses the correct one. The password sources are:
 
-- Built-in password file: used on every extraction. It can be opened and edited from the tray context menu in watch mode, and lives at `%ProgramData%\SunPack\builtin_passwords.txt` in the installed version. Watch mode automatically collects clipboard history into this file, with a default limit of 30 entries.
+- JSON password file: the installed version uses `%ProgramData%\SunPack\builtin_passwords.json`, editable through the Watch tray menu. Records in `passwords` contain `value` and optional `scopes` listing absolute directories; omit `scopes` for global use. Watch maintains a separate `clipboard_history`, limited to 30 entries by default.
 - User input: the context menu, and the interactive password prompt launched from the CLI.
 - Clipboard: the clipboard text is read as a password before extraction.
-- Per-directory password file: SunPack automatically looks for `sunpack-passwords.txt` in the directory and reads each line as one password; watch mode creates it automatically by default. Set `watch.directory_password_file_auto_create` to `false` to disable automatic creation.
+
+Recent successes only reorder currently eligible candidates and never expand their scope. File events refresh the password snapshot when the JSON file changes.
 
 ---
 

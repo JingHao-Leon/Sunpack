@@ -5,16 +5,12 @@
   "runtime": {
     "process_mode": "high"
   },
-  "watch": {
-    "directory_password_file_auto_create": true
-  },
   "recursive_extract": "*",
   "recursive_authorization": {
     "enabled": true
   },
   "embedded_scan": {
-    "enabled": true,
-    "recursive_candidate_ratio": 0.3
+    "enabled": true
   },
   "post_extract": {
     "archive_cleanup_mode": "r",

@@ -118,7 +118,7 @@ Name: "contextmenu"; Description: "{cm:TaskContextMenu}"; GroupDescription: "{cm
 Name: "autostart"; Description: "{cm:TaskAutostart}"; GroupDescription: "{cm:GroupBackgroundWatch}"; Flags: unchecked
 
 [Files]
-Source: "{#SourceDir}\*"; DestDir: "{app}"; Excludes: "sunpack.exe,sunpack_config.json,sunpack_watch_roots.txt,builtin_passwords.txt"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SourceDir}\*"; DestDir: "{app}"; Excludes: "sunpack.exe,sunpack_config.json,sunpack_watch_roots.txt,builtin_passwords.json"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SourceDir}\sunpack.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "{#SourceDir}\sunpack_config.json"; DestDir: "{commonappdata}\SunPack"; Flags: onlyifdoesntexist skipifsourcedoesntexist
 
@@ -601,7 +601,9 @@ begin
   Result :=
     (CompareText(FileName, 'sunpack_config.json') = 0) or
     (CompareText(FileName, 'sunpack_watch_roots.txt') = 0) or
-    (CompareText(FileName, 'builtin_passwords.txt') = 0);
+    (CompareText(FileName, 'builtin_passwords.txt') = 0) or
+    (CompareText(FileName, 'builtin_passwords.txt.bak') = 0) or
+    (CompareText(FileName, 'builtin_passwords.json') = 0);
 end;
 
 function ClearDirectory(Path: string): Boolean;
@@ -738,25 +740,106 @@ begin
   Lines[Index] := Line;
 end;
 
-function TextLinesContain(var Lines: TArrayOfString; const Needle: string): Boolean;
-var
-  Index: Integer;
-begin
-  Result := False;
-  for Index := 0 to GetArrayLength(Lines) - 1 do
-  begin
-    if Pos(Needle, Lines[Index]) > 0 then
-    begin
-      Result := True;
-      Exit;
-    end;
-  end;
-end;
-
 procedure SaveUTF8TextLines(const FilePath: string; const Lines: TArrayOfString);
 begin
   if not SaveStringsToUTF8FileWithoutBOM(FilePath, Lines, False) then
     RaiseException(Format(CustomMessage('EditableConfigCreateFailed'), [FilePath]));
+end;
+
+function PasswordJsonString(const Value: string): string;
+var
+  Index: Integer;
+  Ch: Char;
+begin
+  Result := '"';
+  for Index := 1 to Length(Value) do
+  begin
+    Ch := Value[Index];
+    if (Ch = '"') or (Ch = '\') then
+      Result := Result + '\' + Ch
+    else if Ord(Ch) < 32 then
+      Result := Result + '\u' + Format('%.4x', [Ord(Ch)])
+    else
+      Result := Result + Ch;
+  end;
+  Result := Result + '"';
+end;
+
+procedure EnsurePasswordJson(const DataPath: string);
+var
+  TargetPath, OldPath, Value, Passwords, History: string;
+  RawText: AnsiString;
+  Decoded: string;
+  LegacyLines: TStringList;
+  Lines, Output: TArrayOfString;
+  Index, BlockBegin, BlockEnd: Integer;
+begin
+  TargetPath := AddBackslash(DataPath) + 'builtin_passwords.json';
+  if FileExists(TargetPath) then Exit;
+  OldPath := AddBackslash(DataPath) + 'builtin_passwords.txt';
+  Passwords := '';
+  History := '';
+  if FileExists(OldPath) then
+  begin
+    if not LoadStringFromFile(OldPath, RawText) then
+      RaiseException(Format(CustomMessage('EditableConfigCreateFailed'), [OldPath]));
+    Decoded := Utf8Decode(RawText);
+    if Pos(#0, Decoded) > 0 then
+      RaiseException('Password values cannot contain NUL.');
+    for Index := 1 to Length(Decoded) do
+      case Ord(Decoded[Index]) of
+        11, 12, 28, 29, 30, 133, 8232, 8233: Decoded[Index] := #10;
+      end;
+    LegacyLines := TStringList.Create;
+    try
+      LegacyLines.Text := Decoded;
+      SetArrayLength(Lines, LegacyLines.Count);
+      for Index := 0 to LegacyLines.Count - 1 do
+        Lines[Index] := LegacyLines.Strings[Index];
+    finally
+      LegacyLines.Free;
+    end;
+    BlockBegin := -1;
+    BlockEnd := -1;
+    for Index := 0 to GetArrayLength(Lines) - 1 do
+    begin
+      if (BlockBegin < 0) and (Lines[Index] = WatchClipboardBlockBegin) then
+        BlockBegin := Index
+      else if (BlockBegin >= 0) and (BlockEnd < 0) and (Lines[Index] = WatchClipboardBlockEnd) then
+        BlockEnd := Index;
+    end;
+    for Index := 0 to GetArrayLength(Lines) - 1 do
+    begin
+      Value := Lines[Index];
+      if (Value <> '') and (Value <> WatchClipboardBlockBegin) and (Value <> WatchClipboardBlockEnd) and
+         (Value <> '# Built-in common password list. You can edit this file; use one password per line.') and
+         (Value <> '# 此文件为内置高频密码配置表，用户可自行编辑，每行一个密码。') and
+         (Value <> '# The following section is managed automatically by SunPack Watch.') and
+         (Value <> '# 以下区域由 SunPack Watch 自动维护，请勿手动编辑。') then
+      begin
+        if (BlockBegin >= 0) and (BlockEnd > BlockBegin) and (Index > BlockBegin) and (Index < BlockEnd) then
+        begin
+          if History <> '' then History := History + ',';
+          History := History + PasswordJsonString(Value);
+        end
+        else
+        begin
+          if Passwords <> '' then Passwords := Passwords + ',';
+          Passwords := Passwords + '{"value":' + PasswordJsonString(Value) + '}';
+        end;
+      end;
+    end;
+    if not FileExists(OldPath + '.bak') then
+      if not FileCopy(OldPath, OldPath + '.bak', True) then
+        RaiseException(Format(CustomMessage('EditableConfigCreateFailed'), [OldPath + '.bak']));
+  end
+  else
+    Passwords := '{"value":"123456"},{"value":"123"},{"value":"0000"},{"value":"789"}';
+  SetArrayLength(Output, 1);
+  Output[0] := '{"passwords":[' + Passwords + '],"clipboard_history":[' + History + ']}';
+  SaveUTF8TextLines(TargetPath + '.tmp', Output);
+  if not RenameFile(TargetPath + '.tmp', TargetPath) then
+    RaiseException(Format(CustomMessage('EditableConfigCreateFailed'), [TargetPath]));
 end;
 
 procedure EnsureLocalizedEditableConfigFiles;
@@ -768,34 +851,7 @@ begin
   DataPath := ExpandConstant('{commonappdata}\SunPack');
   ForceDirectories(DataPath);
 
-  FilePath := AddBackslash(DataPath) + 'builtin_passwords.txt';
-  SetArrayLength(Contents, 0);
-  if not FileExists(FilePath) then
-  begin
-    AppendTextLine(Contents, CustomMessage('BuiltinPasswordsFileHeader'));
-    AppendTextLine(Contents, '');
-    AppendTextLine(Contents, CustomMessage('BuiltinPasswordsWatchManagedNote'));
-    AppendTextLine(Contents, WatchClipboardBlockBegin);
-    AppendTextLine(Contents, WatchClipboardBlockEnd);
-    SaveUTF8TextLines(FilePath, Contents);
-  end
-  else
-  begin
-    if not LoadStringsFromFile(FilePath, Contents) then
-      RaiseException(Format(CustomMessage('EditableConfigCreateFailed'), [FilePath]));
-
-    if (not TextLinesContain(Contents, WatchClipboardBlockBegin)) and
-       (not TextLinesContain(Contents, WatchClipboardBlockEnd)) then
-    begin
-      if (GetArrayLength(Contents) = 0) or
-         (Contents[GetArrayLength(Contents) - 1] <> '') then
-        AppendTextLine(Contents, '');
-      AppendTextLine(Contents, CustomMessage('BuiltinPasswordsWatchManagedNote'));
-      AppendTextLine(Contents, WatchClipboardBlockBegin);
-      AppendTextLine(Contents, WatchClipboardBlockEnd);
-      SaveUTF8TextLines(FilePath, Contents);
-    end;
-  end;
+  EnsurePasswordJson(DataPath);
 
   FilePath := AddBackslash(DataPath) + 'sunpack_watch_roots.txt';
   if not FileExists(FilePath) then

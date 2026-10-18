@@ -78,8 +78,83 @@ def test_file_events_keep_last_valid_snapshot_clear_deletion_and_never_restore_d
     assert good.global_passwords == ("secret",)
 
 
-def test_clipboard_merge_preserves_manual_records_and_detects_edit_conflicts(tmp_path, monkeypatch):
-    # Unique coverage: concurrent writers, bounded history, editor conflict and no-op writes.
+def test_first_creation_publishes_complete_json_between_processes(tmp_path, monkeypatch):
+    # Only this test exposes partial first writes to another process and races publication.
+    path = tmp_path / "builtin_passwords.json"
+    child = """
+import json
+import sys
+from pathlib import Path
+from sunpack.core.passwords.internal import builtin
+builtin.builtin_password_path = lambda: Path(sys.argv[1])
+dump = builtin.json.dump
+def paused_dump(document, handle, **kwargs):
+    handle.write('{"passwords":')
+    handle.flush()
+    print('writing', flush=True)
+    sys.stdin.read(1)
+    handle.seek(0)
+    handle.truncate()
+    dump(document, handle, **kwargs)
+builtin.json.dump = paused_dump
+path = builtin.ensure_builtin_password_file()
+print(json.dumps(json.loads(path.read_text(encoding='utf-8'))), flush=True)
+"""
+    processes = [subprocess.Popen(
+        [sys.executable, "-c", child, str(path)],
+        cwd=Path(__file__).resolve().parents[2], stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    ) for _ in range(2)]
+    try:
+        for process in processes:
+            assert process.stdout.readline().strip() == "writing"
+        assert not path.exists()
+        first, second = processes
+        output, error = first.communicate(input="g", timeout=10)
+        assert first.returncode == 0, error
+        assert json.loads(output) == {
+            "passwords": [{"value": v} for v in builtin.DEFAULT_BUILTIN_PASSWORDS],
+            "clipboard_history": [],
+        }
+        seed(path, ["winner-updated"])
+        output, error = second.communicate(input="g", timeout=10)
+        assert second.returncode == 0, error
+        assert json.loads(output) == {"passwords": [{"value": "winner-updated"}], "clipboard_history": []}
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+                process.communicate()
+    assert list(tmp_path.iterdir()) == [path]
+    monkeypatch.setattr(builtin, "builtin_password_path", lambda: path)
+    seed(path, ["existing"])
+    before = path.stat().st_mtime_ns
+    assert builtin.ensure_builtin_password_file() == path
+    assert path.stat().st_mtime_ns == before
+    assert builtin.read_builtin_password_file(path).global_passwords == ("existing",)
+
+
+@pytest.mark.parametrize("stage", ["write", "publish"])
+def test_first_creation_cleans_failed_writes_and_publication(tmp_path, monkeypatch, stage):
+    # The concurrent success test cannot detect orphaned files after failed IO.
+    path = tmp_path / "builtin_passwords.json"
+    monkeypatch.setattr(builtin, "builtin_password_path", lambda: path)
+    def fail_write(document, handle, **kwargs):
+        handle.write('{"passwords":')
+        raise OSError("write failed")
+    def fail_publish(temp, target):
+        raise OSError("publish failed")
+    if stage == "write":
+        monkeypatch.setattr(builtin.json, "dump", fail_write)
+    else:
+        monkeypatch.setattr(Path, "rename", fail_publish)
+    with pytest.raises(OSError, match=f"{stage} failed"):
+        builtin.ensure_builtin_password_file()
+    assert not list(tmp_path.iterdir())
+
+
+def test_clipboard_merge_preserves_manual_records_with_concurrent_writers(tmp_path, monkeypatch):
+    # Unique coverage: cross-process history merges, bounds and no-op writes.
     path = tmp_path / "builtin_passwords.json"
     seed(path, [" manual "] , [("scoped", ["D:/Work"])])
     monkeypatch.setattr(builtin, "builtin_password_path", lambda: path)
@@ -115,15 +190,19 @@ sys.exit(0 if builtin.merge_watch_clipboard_passwords([sys.argv[2]], max_entries
     doc = json.loads(path.read_text(encoding="utf-8"))
     assert doc["passwords"] == original_records
     assert set(doc["clipboard_history"]) == {f"clip-{i}" for i in range(4)}
+    reads = []
+    read = builtin.read_task_text
+    def count_read(*args, **kwargs):
+        reads.append(args[0])
+        return read(*args, **kwargs)
+    monkeypatch.setattr(builtin, "read_task_text", count_read)
     assert builtin.merge_watch_clipboard_passwords(["last", "last"], max_entries=2)
+    assert reads == [path]
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    assert doc["passwords"] == original_records
+    assert len(doc["clipboard_history"]) == 2
+    assert doc["clipboard_history"][-1] == "last"
     before = path.stat().st_mtime_ns
     assert not builtin.merge_watch_clipboard_passwords(["last"], max_entries=2)
     assert path.stat().st_mtime_ns == before
-    write = builtin.write_task_text
-    def race(temp, content, **kwargs):
-        write(temp, content, **kwargs)
-        seed(path, ["editor-wins"])
-    monkeypatch.setattr(builtin, "write_task_text", race)
-    assert not builtin.merge_watch_clipboard_passwords(["racing"])
-    assert json.loads(path.read_text(encoding="utf-8"))["passwords"] == [{"value": "editor-wins"}]
     assert not list(tmp_path.glob(".*.tmp"))

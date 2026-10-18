@@ -684,7 +684,7 @@ class SingleArchiveExtractor:
                 with _phase(phase_timer, f"{phase_prefix}_segment_set_archive_input"):
                     # Carrier archive knowledge is not valid for each
                     # independent logical archive. Runtime-only context such as
-                    # inherited directory passwords lives outside ArchiveKnowledge.
+                    # the original password scope lives outside ArchiveKnowledge.
                     task.set_knowledge({})
                     task.set_archive_input(descriptor)
                     # Embedded boundary resolution may already have proven the

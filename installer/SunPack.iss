@@ -74,8 +74,7 @@ english.PrepareWatchStateQueryFailed=Could not determine the existing sunpack Wa
 english.PrepareBrokerRemoveFailed=The existing sunpack Watch Broker service could not be removed. Restart Windows and run the installer again.
 english.PrepareOldFilesRemoveFailed=Some old sunpack files could not be removed. Close sunpack and run the installer again.
 english.UninstallStopFailed=sunpack runtime processes or the Watch Broker service could not be stopped. Please restart Windows and run the uninstaller again.
-english.BuiltinPasswordsFileHeader=# Built-in common password list. You can edit this file; use one password per line.
-english.BuiltinPasswordsWatchManagedNote=# The following section is managed automatically by SunPack Watch.
+english.DataDirectoryPermissionsFailed=Failed to secure the SunPack data directory: %s
 english.WatchRootsFileHeader=# Watched folders. Add one folder per line.
 english.WatchRootsFileMapping=# Optional columns: input folder | output folder | deep_detect
 english.WatchRootsFileDeepDetect=# deep_detect accepts true or false; blank defaults to false.
@@ -104,8 +103,7 @@ chinesesimplified.PrepareWatchStateQueryFailed=无法确定现有 sunpack Watch 
 chinesesimplified.PrepareBrokerRemoveFailed=无法删除现有 sunpack Watch Broker 服务。请重启 Windows，然后重新运行安装程序。
 chinesesimplified.PrepareOldFilesRemoveFailed=无法删除部分旧版 sunpack 文件。请关闭 sunpack，然后重新运行安装程序。
 chinesesimplified.UninstallStopFailed=无法停止 sunpack 运行时进程或 Watch Broker 服务。请重启 Windows，然后重新运行卸载程序。
-chinesesimplified.BuiltinPasswordsFileHeader=# 此文件为内置高频密码配置表，用户可自行编辑，每行一个密码。
-chinesesimplified.BuiltinPasswordsWatchManagedNote=# 以下区域由 SunPack Watch 自动维护，请勿手动编辑。
+chinesesimplified.DataDirectoryPermissionsFailed=无法设置 SunPack 数据目录权限：%s
 chinesesimplified.WatchRootsFileHeader=# 监控文件夹配置，每行填写一个监控目录。
 chinesesimplified.WatchRootsFileMapping=# 可选字段格式：输入目录 | 输出目录 | deep_detect
 chinesesimplified.WatchRootsFileDeepDetect=# deep_detect 可填写 true 或 false；留空时默认为 false。
@@ -124,7 +122,7 @@ Source: "{#SourceDir}\sunpack_config.json"; DestDir: "{commonappdata}\SunPack"; 
 
 [Dirs]
 Name: "{app}"; Flags: uninsalwaysuninstall
-Name: "{commonappdata}\SunPack"; Permissions: users-modify
+Name: "{commonappdata}\SunPack"
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\*"
@@ -366,6 +364,34 @@ function PowerShellSingleQuotedString(Value: string): string;
 begin
   StringChangeEx(Value, '''', '''''', True);
   Result := '''' + Value + '''';
+end;
+
+procedure SecurePasswordDataDirectory(const DataPath: string);
+var
+  Command, Parameters: string;
+  ResultCode: Integer;
+begin
+  Command :=
+    '$ErrorActionPreference = ''Stop''; ' +
+    '$dataPath = ' + PowerShellSingleQuotedString(DataPath) + '; ' +
+    'if ([IO.File]::GetAttributes($dataPath) -band [IO.FileAttributes]::ReparsePoint) { throw ''SunPack data directory is a reparse point'' }; ' +
+    '$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value; ' +
+    '$acl = [Security.AccessControl.DirectorySecurity]::new(); ' +
+    '$acl.SetSecurityDescriptorSddlForm(''D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;'' + $sid + '')'', [Security.AccessControl.AccessControlSections]::Access); ' +
+    '[IO.Directory]::SetAccessControl($dataPath, $acl); ' +
+    'if ([IO.Directory]::GetFileSystemEntries($dataPath).Length -gt 0) { ' +
+    '  & ' + PowerShellSingleQuotedString(ExpandConstant('{sys}\icacls.exe')) + ' ($dataPath + ''\*'') /reset /T /L /Q; ' +
+    '  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; ' +
+    '}';
+  Parameters := '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ' + AddQuotes(Command);
+  if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+              Parameters, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    RaiseException(Format(CustomMessage('DataDirectoryPermissionsFailed'), [DataPath]))
+  else if ResultCode <> 0 then
+  begin
+    Log(Format('SunPack data directory ACL repair failed: %d', [ResultCode]));
+    RaiseException(Format(CustomMessage('DataDirectoryPermissionsFailed'), [DataPath]));
+  end;
 end;
 
 function HasExplicitTaskSelection: Boolean;
@@ -849,7 +875,9 @@ var
   Contents: TArrayOfString;
 begin
   DataPath := ExpandConstant('{commonappdata}\SunPack');
-  ForceDirectories(DataPath);
+  if not ForceDirectories(DataPath) then
+    RaiseException(Format(CustomMessage('EditableConfigCreateFailed'), [DataPath]));
+  SecurePasswordDataDirectory(DataPath);
 
   EnsurePasswordJson(DataPath);
 

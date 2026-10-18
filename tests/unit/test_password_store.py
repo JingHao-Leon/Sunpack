@@ -347,7 +347,7 @@ def test_password_resolver_skips_candidates_for_intrinsically_unencrypted_format
         assert scheduler.planned == []
 
 
-def test_password_resolver_uses_directory_passwords_before_user_and_builtin():
+def test_password_resolver_uses_scoped_passwords_before_user_and_builtin():
     tester = FakePasswordTester()
     tester.password_store = PasswordStore.from_sources(
         cli_passwords=["user-password"],

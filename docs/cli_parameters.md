@@ -197,7 +197,7 @@ Subcommands and options:
 | `add PATH...` | `-s`, `--start` | Start continuous monitoring after adding. |
 | `add PATH...` | `-i`, `--initial-scan` | Run an initial scan for newly added roots or roots whose deep mode changed. |
 | `add PATH...` | `-d`, `--deep-detect` | Persist `deep_detect=true` for each input root; update already registered roots too. |
-| `remove PATH...`, `rm PATH...` | — | Remove a monitored root by input directory, and clean up that root's per-directory password file. |
+| `remove PATH...`, `rm PATH...` | — | Remove a monitored root by input directory. |
 | `list`, `ls` | — | List the persisted input directories. |
 | `reload` | — | Re-read the configuration and monitored roots. |
 | `stop` | — | Stop continuous monitoring. |

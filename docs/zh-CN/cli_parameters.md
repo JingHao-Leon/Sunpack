@@ -197,7 +197,7 @@ G:\Incoming | | true
 | `add PATH...` | `-s`, `--start` | 添加后启动持续监控。 |
 | `add PATH...` | `-i`, `--initial-scan` | 对新增根或 deep 模式发生变化的根执行初始扫描。 |
 | `add PATH...` | `-d`, `--deep-detect` | 将各输入目录的 `deep_detect` 写为 `true`；已登记目录也会更新。 |
-| `remove PATH...`, `rm PATH...` | — | 按输入目录移除监控根，并清理该根的同目录密码文件。 |
+| `remove PATH...`, `rm PATH...` | — | 按输入目录移除监控根。 |
 | `list`, `ls` | — | 列出持久化的输入目录。 |
 | `reload` | — | 重新读取配置和监控根。 |
 | `stop` | — | 停止持续监控。 |

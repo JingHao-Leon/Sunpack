@@ -59,7 +59,9 @@ Available filters are `directory_prune` (skip directories), `whitelist` (include
 
 Add a monitored directory with `python sunpack.py watch add C:\Downloads`. Use `-o E:\Output` to choose its output directory, or set `watch.out_dir` for roots without one. `watch list` shows the configured roots. Watch monitors files directly in each root, not its subdirectories.
 
-Add records with `value` to `passwords` in `builtin_passwords.json`. Optional `scopes` lists absolute directories; omit it for global passwords. CLI passwords can also be supplied with `-p` or `--pw-file`.
+Persistent passwords come only from `builtin_passwords.json`, including its `clipboard_history`. Add records with `value` to `passwords`; optional `scopes` lists absolute directories and applies to their descendants too. Omit `scopes` for global passwords. Runtime sources are explicit input (`-p`, `--pw-file`, or the password prompt) and the current clipboard.
+
+Legacy `sunpack-passwords.txt` files are no longer read automatically. Add any passwords you still need to the JSON file yourself.
 
 ```json
 {

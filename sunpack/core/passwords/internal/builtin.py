@@ -30,14 +30,21 @@ def builtin_password_path() -> Path:
 
 def ensure_builtin_password_file() -> Path:
     path = builtin_password_path()
+    if path.exists():
+        return path
     path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
-        with open_service_file(path, "x", encoding="utf-8") as handle:
+        with open_service_file(temp, "x", encoding="utf-8") as handle:
             json.dump({"passwords": [{"value": v} for v in DEFAULT_BUILTIN_PASSWORDS],
                        "clipboard_history": []}, handle, ensure_ascii=False, indent=2)
             handle.write("\n")
-    except FileExistsError:
-        pass
+        try:
+            temp.rename(path)
+        except FileExistsError:
+            pass
+    finally:
+        temp.unlink(missing_ok=True)
     return path
 
 
@@ -235,10 +242,6 @@ def merge_watch_clipboard_passwords(passwords: list[str], *, max_entries: int = 
                 start, end = bounds
                 content = original[:start] + replacement + original[end:]
             write_task_text(temp, content, encoding="utf-8")
-            # Editors do not use our mutex. Refuse a stale read/merge/write.
-            if read_task_text(path, encoding="utf-8-sig") != original:
-                _LOG.warning("Password JSON changed during clipboard merge; write discarded")
-                return False
             temp.replace(path)
             return True
     except (OSError, ValueError, UnicodeError):

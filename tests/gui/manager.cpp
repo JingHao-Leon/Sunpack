@@ -98,7 +98,7 @@ void editing(Fixture& f) {
         assert(!describe_setting("/passwords/directory_passwords_enabled","",language)["known"].get<bool>());
         // Module identity, rather than position, survives copying/reordering.
         auto module=config_fields(parse_json(R"({"analysis":{"modules":[{"name":"gzip","max_probe_bytes":2048}]}})"),"",language);
-        assert(module.size()==1 && module[0]["known"].get<bool>());
+        assert(module.size()==1 && module[0]["known"].get<bool>() && module[0]["module"]=="gzip" && module[0]["blockLabel"]=="GZIP");
     }
     assert(log_directory(f.dir,Json({{"watch",{{"state_dir","other"}}}}))==f.dir/"other");
 }
@@ -151,13 +151,35 @@ void roots(Fixture& f) {
     auto rows=task_rows(log,all,view); assert(rows["total"]==501 && rows["rows"].size()==100 && rows["pages"]==6);
     assert(directory_rows(all,Json({{"passwords",Json::array()}}),Json::object()).size()==503);
 }
+void runtime_identity(Fixture& fixture) {
+    struct Child {
+        Handle process, thread;
+        Child(const fs::path& path) {
+            auto command=quote_arg(path.wstring())+L" --echo";
+            STARTUPINFOW startup{}; startup.cb=sizeof(startup); PROCESS_INFORMATION info{};
+            if(!CreateProcessW(path.c_str(),command.data(),nullptr,nullptr,FALSE,CREATE_SUSPENDED|CREATE_NO_WINDOW,nullptr,nullptr,&startup,&info)) win_error("Test runtime");
+            process.value=info.hProcess; thread.value=info.hThread;
+        }
+        void exit() { ResumeThread(thread); assert(WaitForSingleObject(process,10000)==WAIT_OBJECT_0); }
+        ~Child() { if(WaitForSingleObject(process,0)==WAIT_TIMEOUT) { TerminateProcess(process,1); WaitForSingleObject(process,10000); } }
+    };
+    auto installed=fixture.dir/"installed"/"sunpack-runtime.exe", other=fixture.dir/"other"/"sunpack-runtime.exe";
+    fs::create_directories(installed.parent_path()); fs::create_directories(other.parent_path());
+    fs::copy_file(executable_path(),installed); fs::copy_file(executable_path(),other);
+    RuntimeMonitor monitor(installed);
+    assert(!monitor.running());
+    Child unrelated(other); assert(!monitor.running()); // Same name, different installation.
+    { Child current(installed); assert(monitor.running()); current.exit(); assert(!monitor.running()); }
+    { Child restarted(installed); assert(monitor.running()); restarted.exit(); assert(!monitor.running()); }
+    unrelated.exit();
+}
 }
 int wmain(int argc,wchar_t** argv) {
     CoInitializeEx(nullptr,COINIT_MULTITHREADED);
     if(argc==3 && std::wstring(argv[1])==L"--mutex") { std::cout<<utf8(mutex_name(argv[2]))<<"\n"<<utf8(mutex_name(argv[2],L"SunPackWatchRoots"))<<"\n"; return 0; }
     if(argc>=2 && std::wstring(argv[1])==L"--echo") { Json args=Json::array(); for(int i=2;i<argc;++i) args.push_back(utf8(argv[i])); std::cout<<args.dump(); return 7; }
     if(argc==4 && std::wstring(argv[1])==L"--password-add") { edit_password(argv[2],"add",Json(),Json({{"value",utf8(argv[3])}})); return 0; }
-    try { Fixture f; projection(f); editing(f); roots(f); installer_upgrade(f); std::cout<<"GUI file contracts passed\n"; }
+    try { Fixture f; projection(f); editing(f); roots(f); installer_upgrade(f); runtime_identity(f); std::cout<<"GUI file contracts passed\n"; }
     catch(const std::exception& e) { std::cerr<<e.what()<<"\n"; return 1; }
     CliCommand cli{executable_path(),fs::temp_directory_path(),{L"--echo"}};
     Handle stop(CreateEventW(nullptr,TRUE,FALSE,nullptr));

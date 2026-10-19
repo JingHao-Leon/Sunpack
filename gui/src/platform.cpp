@@ -8,6 +8,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <memory>
+#include <tlhelp32.h>
 
 extern "C" NTSYSAPI WCHAR NTAPI RtlDowncaseUnicodeChar(WCHAR);
 namespace spg {
@@ -210,6 +211,28 @@ std::wstring quote_arg(const std::wstring& arg) {
     out.append(slash * 2, L'\\'); out += L'"'; return out;
 }
 fs::path executable_path() { std::wstring s(32768, 0); auto n = GetModuleFileNameW(nullptr, s.data(), DWORD(s.size())); s.resize(n); return s; }
+RuntimeMonitor::RuntimeMonitor(const fs::path& executable):expected_(path_key(executable)) {}
+bool RuntimeMonitor::running() {
+    if(process_.value!=INVALID_HANDLE_VALUE) {
+        if(WaitForSingleObject(process_,0)==WAIT_TIMEOUT) return true;
+        CloseHandle(process_.value); process_.value=INVALID_HANDLE_VALUE;
+    }
+    Handle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0));
+    if(snapshot.value==INVALID_HANDLE_VALUE) win_error("Runtime process snapshot");
+    PROCESSENTRY32W entry{}; entry.dwSize=sizeof(entry);
+    const auto filename=fs::path(expected_).filename().wstring();
+    for(BOOL more=Process32FirstW(snapshot,&entry);more;more=Process32NextW(snapshot,&entry)) {
+        if(CompareStringOrdinal(entry.szExeFile,-1,filename.c_str(),-1,TRUE)!=CSTR_EQUAL) continue;
+        Handle process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE,FALSE,entry.th32ProcessID));
+        if(!process.value) continue;
+        wchar_t path[32768]; DWORD count=DWORD(std::size(path));
+        if(!QueryFullProcessImageNameW(process,0,path,&count) || path_key(std::wstring(path,count))!=expected_ ||
+            WaitForSingleObject(process,0)!=WAIT_TIMEOUT) continue;
+        process_.value=process.value; process.value=INVALID_HANDLE_VALUE;
+        return true;
+    }
+    return false;
+}
 CliResult run_cli(const CliCommand& cli, const std::vector<std::wstring>& args, HANDLE stop) {
     if (!fs::is_regular_file(cli.executable)) throw std::runtime_error("未找到 SunPack CLI；请安装完整发行包或传入 --cli");
     std::wstring command = quote_arg(cli.executable.wstring());
@@ -225,7 +248,8 @@ CliResult run_cli(const CliCommand& cli, const std::vector<std::wstring>& args, 
     if(writer.value==INVALID_HANDLE_VALUE) win_error("CLI output capture");
     Handle nullInput(CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, nullptr));
     STARTUPINFOEXW si{}; si.StartupInfo.cb = sizeof(si);
-    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.StartupInfo.wShowWindow = SW_HIDE;
     si.StartupInfo.hStdOutput = writer; si.StartupInfo.hStdError = writer; si.StartupInfo.hStdInput = nullInput;
     SIZE_T bytes = 0; InitializeProcThreadAttributeList(nullptr, 1, 0, &bytes);
     std::vector<unsigned char> attributes(bytes);

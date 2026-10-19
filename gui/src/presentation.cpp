@@ -50,11 +50,16 @@ Json describe_setting(const std::string& pointer,const std::string& module,const
     auto category=group=="recursive_authorization"?"recursive_extract":group;
     auto& groups=catalog()["groups"];
     std::string label=meta.contains("label")?local(meta["label"],language):tr("readOnly",language);
-    if(!module.empty()) {
-        const auto& modules=catalog()["modules"];
-        label=(modules.contains(module)?local(modules[module],language):module)+" · "+label;
-    }
+    auto block=pointer.substr(0,pointer.rfind('/'));
+    if(block.empty()) block=pointer;
+    auto& blocks=catalog()["blocks"];
+    auto& modules=catalog()["modules"];
+    auto block_label=!module.empty()?(modules.contains(module)?local(modules[module],language):module):
+        blocks.contains(block)?local(blocks[block],language):groups.contains(group)?local(groups[group],language):label;
+    bool primary=pointer!="/watch/enabled" && pointer.size()>=8 && pointer.compare(pointer.size()-8,8,"/enabled")==0 && !meta.empty();
+    if(primary) label=block_label;
     Json result={{"label",label},{"category",category},{"categoryLabel",groups.contains(category)?local(groups[category],language):tr("readOnly",language)},
+        {"block",block},{"blockLabel",block_label},{"module",module},{"primary",primary},
         {"description",meta.contains("description")?local(meta["description"],language):tr("unknownDescription",language)},
         {"editor",meta.value("editor",std::string())},{"options",Json::array()},{"known",!meta.empty()}};
     if(meta.contains("options")) for(auto& option:meta["options"]) result["options"].push_back({{"value",option["value"]},{"label",local(option["label"],language)}});
@@ -81,9 +86,9 @@ std::string translated_error(const std::string& message,const std::string& langu
     // Keep OS / parser diagnostics, translated application errors come from the catalog.
     if(language=="zh") return message;
     static const std::pair<const char*,const char*> errors[]={
-        {"该字段已被外部修改，请重新选择后保存","This setting changed in another program. Refresh and edit it again."},
+        {"该字段已被外部修改，请重新选择后保存","This setting changed in another program. Review the latest value and edit it again."},
         {"输入类型与字段类型不一致","The value has the wrong type for this setting."},
-        {"密码记录已被外部修改，请重新选择","This password changed in another program. Refresh and edit it again."},
+        {"密码记录已被外部修改，请重新选择","This password changed in another program. Open it again to edit the latest value."},
         {"密码作用域必须是 Windows 绝对目录","Password folders must use absolute Windows paths."},
         {"目录不能为空且不能包含分隔符或换行","The folder must not be empty or contain separators or line breaks."},
         {"监控目录必须是已存在的文件夹","Choose an existing folder to monitor."},

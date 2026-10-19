@@ -52,8 +52,10 @@ void style_frame(HWND hwnd,UiThemeMode mode) {
     DwmSetWindowAttribute(hwnd,DWMWA_WINDOW_CORNER_PREFERENCE,&corners,sizeof(corners));
 }
 void apply_theme(UiPage page,UiThemeMode mode,HWND hwnd=nullptr) {
+    auto appearance=mode==UI_THEME_DARK?"dark":"light";
+    if(page_value(page,"appearance")==appearance) return;
     ui_theme_set_mode(mode);
-    set_text(page,"appearance",mode==UI_THEME_DARK?"dark":"light");
+    set_text(page,"appearance",appearance);
     if(hwnd) style_frame(hwnd,mode);
 }
 }
@@ -157,7 +159,7 @@ void Application::navigate(const std::string& tab) {
     }
     set_text(page_,"tab",tab);
     ui_page_set_float(page_,"pageOpacity",1.0f);
-    set_text(page_,"actionError",""); set_text(page_,"cliResult","");
+    set_text(page_,"actionError","");
 }
 void Application::bind_choices(const Json& fields) {
     for(auto& field:fields) {
@@ -170,11 +172,15 @@ void Application::bind_choices(const Json& fields) {
         auto host="choice-"+id;
         ui_page_on_widget_mount(page_,host.c_str(),[](UiPage,UiWidget parent,void* context){
             auto* binding=static_cast<ChoiceBinding*>(context); auto* self=binding->owner;
+            auto id=binding->field["id"].get<std::string>();
+            // Nested scope mounting visits descendants again when its parent
+            // mounts. One native selector belongs to each host for its lifetime.
+            auto existing=ui_widget_find_by_id(parent,("select-"+id).c_str());
+            if(existing) { ui_widget_destroy(existing); return; }
             std::vector<std::wstring> labels; std::vector<const wchar_t*> texts;
             for(auto& option:binding->field["options"]) labels.push_back(wide(option["label"].get<std::string>()));
             for(auto& label:labels) texts.push_back(label.c_str());
             auto combo=ui_combobox(texts.data(),int(texts.size()));
-            auto id=binding->field["id"].get<std::string>();
             ui_widget_set_id(combo,("select-"+id).c_str()); ui_widget_set_expand(combo,true); ui_widget_set_height(combo,32);
             auto drafts=page_value(self->page_,"drafts");
             int selected=drafts.contains(id)?drafts[id].value("choice",binding->field["choice"].get<int>()):binding->field["choice"].get<int>();
@@ -226,6 +232,7 @@ void Application::rebuild_theme(const std::string& language) {
     ui_widget_add_child(host,status_widget_); ui_widget_destroy(host);
 }
 void Application::dispatch() {
+    VisualBatch visual(window_);
     auto commands=page_value(page_,"requests");
     ui_page_set_json(page_,"requests","[]");
     ui_page_set_bool(page_,"dispatch",false);
@@ -327,14 +334,30 @@ void Application::open() {
     registry_=std::thread([this]{
         HKEY key{};
         // Observe the existing Run key; do not create startup entries merely by opening the UI.
-        if(RegOpenKeyExW(HKEY_CURRENT_USER,L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",0,KEY_NOTIFY,&key)!=ERROR_SUCCESS) return;
+        RegOpenKeyExW(HKEY_CURRENT_USER,L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",0,KEY_NOTIFY,&key);
         Handle event(CreateEventW(nullptr,TRUE,FALSE,nullptr));
         HANDLE waits[]={stop_,event};
-        while(RegNotifyChangeKeyValue(key,FALSE,REG_NOTIFY_CHANGE_LAST_SET,event,TRUE)==ERROR_SUCCESS) {
-            if(WaitForMultipleObjects(2,waits,FALSE,INFINITE)!=WAIT_OBJECT_0+1) break;
-            ResetEvent(event); changed(Startup);
+        bool watching=key && RegNotifyChangeKeyValue(key,FALSE,REG_NOTIFY_CHANGE_LAST_SET,event,TRUE)==ERROR_SUCCESS;
+        RuntimeMonitor runtime(executable_path().parent_path()/"sunpack-runtime.exe");
+        auto next=Clock::now();
+        Json previous;
+        for(;;) {
+            if(Clock::now()>=next) {
+                Json status;
+                try { status={{"known",true},{"running",runtime.running()}}; }
+                catch(...) { status={{"known",false},{"running",false}}; }
+                if(status!=previous) { publish({{"runtime",status}}); previous=std::move(status); }
+                next=Clock::now()+std::chrono::seconds(1);
+            }
+            auto remaining=std::chrono::ceil<std::chrono::milliseconds>(next-Clock::now()).count();
+            auto signal=WaitForMultipleObjects(watching?2:1,waits,FALSE,DWORD(std::max<int64_t>(0,remaining)));
+            if(signal==WAIT_OBJECT_0 || signal==WAIT_FAILED) break;
+            if(signal==WAIT_OBJECT_0+1) {
+                ResetEvent(event); changed(Startup);
+                watching=RegNotifyChangeKeyValue(key,FALSE,REG_NOTIFY_CHANGE_LAST_SET,event,TRUE)==ERROR_SUCCESS;
+            }
         }
-        RegCloseKey(key);
+        if(key) RegCloseKey(key);
     });
     } catch(const std::exception& e) { throw std::runtime_error(std::string(stage)+"："+e.what()); }
 }
@@ -410,8 +433,7 @@ void Application::work() {
                         view.password_query=p.value("query",std::string()); view.password_scope=p.value("scope",std::string("@global"));
                         if(view.password_scope.empty()) view.password_scope="@global";
                         view.password_page=p.value("page",size_t(0)); passwords_changed=true;
-                    } else if(op=="refresh") { flags|=Config|Passwords|Roots|Log|Startup; retries.clear(); }
-                    else if(op=="saveConfig") {
+                    } else if(op=="saveConfig") {
                         save_config_field(dir/"sunpack_config.json",p.at("pointer"),p.at("original"),p.at("type"),p.at("text"),p.at("boolean")); flags|=Config;
                     } else if(op=="password") {
                         Json replacement={{"value",p.value("value",std::string())}};
@@ -430,17 +452,16 @@ void Application::work() {
                         if(!options_.allow_cli) throw std::runtime_error("测试数据目录未绑定 CLI；请显式传入 --cli");
                         auto action=p.value("action",std::string());
                         std::vector<std::wstring> args={L"watch"};
-                        if(action=="start" || action=="stop" || action=="reload" || action=="status") args.push_back(wide(action));
+                        if(action=="start" || action=="stop" || action=="reload") args.push_back(wide(action));
                         else if(action=="startupEnable" || action=="startupDisable") { args.push_back(L"startup"); args.push_back(action=="startupEnable"?L"enable":L"disable"); }
                         else throw std::runtime_error("不支持的 CLI 操作");
-                        publish({{"busy",true},{"actionError",""},{"cliResult",""}});
                         auto result=run_cli(options_.cli,args,stop_);
                         try { wide(result.output); } catch(...) { result.output=tr("cliEncoding",language); }
                         Json feedback={{"busy",false},{"lastCommand",{{"action",action},{"code",result.code}}}};
                         if(result.code!=0) {
                             auto message=tr("cliFailed",language); auto at=message.find("{code}"); message.replace(at,6,std::to_string(result.code));
                             feedback["actionError"]=message+"\n"+result.output;
-                        } else if(action=="status") feedback["cliResult"]=result.output;
+                        }
                         publish(std::move(feedback)); flags|=Startup;
                     } else throw std::runtime_error("未知界面操作");
                     if(op=="saveConfig") publish({{"savedField",p.at("pointer")},{"savedEdits",{{p.at("pointer").get<std::string>(),p}}},{"settingError",Json::object()}});

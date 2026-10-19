@@ -44,10 +44,15 @@ void screenshot(Application& app,const wchar_t* name) {
 }
 int wmain(int argc,wchar_t** argv) {
     if(argc>1 && std::wstring(argv[1])==L"--fake-cli") {
-        Json args=Json::array(); for(int i=2;i<argc;++i) args.push_back(utf8(argv[i])); atomic_write(fs::current_path()/"cli-arguments.json",args.dump()); std::cout<<args.dump(); return 0;
+        Json args=Json::array(); for(int i=3;i<argc;++i) args.push_back(utf8(argv[i])); atomic_write(fs::current_path()/"cli-arguments.json",args.dump());
+        Handle gate(OpenEventW(SYNCHRONIZE,FALSE,argv[2])); assert(gate.value);
+        assert(WaitForSingleObject(gate,10000)==WAIT_OBJECT_0);
+        std::cout<<args.dump(); return 0;
     }
     CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
     auto dir=fs::temp_directory_path()/(L"sunpack-gui-ui-"+std::to_wstring(GetCurrentProcessId())); fs::create_directory(dir);
+    auto gate_name=L"Local\\SunPack.GUI.TestCommand."+std::to_wstring(GetCurrentProcessId());
+    Handle gate(CreateEventW(nullptr,TRUE,TRUE,gate_name.c_str()));
     try {
         atomic_write(dir/"sunpack_config.json",R"({"cli":{"language":"zh"},"runtime":{"process_mode":"normal"},"recursive_extract":"*","watch":{"state_dir":".sunpack_watch","out_dir":".","toast_enabled":true},"unknown":9007199254740993})");
         atomic_write(dir/"builtin_passwords.json",R"({"passwords":[{"value":"  #中文  "}],"clipboard_history":["history"]})");
@@ -55,7 +60,7 @@ int wmain(int argc,wchar_t** argv) {
         atomic_write(dir/".sunpack_watch"/"events.jsonl",Json({{"event","done"},{"path",utf8((dir/"carrier.001").wstring())}}).dump()+"\n");
         {
             Options options; options.data_dir=dir; options.allow_cli=true;
-            options.cli={executable_path(),dir,{L"--fake-cli"}};
+            options.cli={executable_path(),dir,{L"--fake-cli",gate_name}};
             Application app(options); std::cerr<<"Opening UI\n"; app.open(); std::cerr<<"UI opened\n";
             pump([&]{return state(app.page(),"ready")==true;});
             BOOL disabled=TRUE;
@@ -67,12 +72,51 @@ int wmain(int argc,wchar_t** argv) {
             click(app,"watchStart");
             pump([&]{return state(app.page(),"lastCommand").value("action",std::string())=="start";});
             assert(read_json(dir/"cli-arguments.json")==Json::array({"watch","start"}));
-            assert(state(app.page(),"actionError")=="" && state(app.page(),"cliResult")=="");
+            assert(state(app.page(),"actionError")=="");
+            pump([&]{return state(app.page(),"runtime")["known"]==true;});
+            assert(!ui_widget_find_by_id(ui_page_root(app.page()),"refresh"));
+            auto stable_commands=[&](const char* id,const std::string& action,const Json& args) {
+                auto tab=state(app.page(),"tab").get<std::string>();
+                auto page=ui_widget_find_by_id(ui_page_root(app.page()),("page-"+tab).c_str());
+                auto rect=ui_widget_get_rect(page);
+                fs::remove(dir/"cli-arguments.json");
+                ResetEvent(gate);
+                click(app,id);
+                // The dispatch signal is mounted before its posted message is
+                // handled. Force this intermediate layout to catch page jumps.
+                ui_window_relayout(app.window());
+                auto during=ui_widget_get_rect(page);
+                assert(during.left==rect.left && during.top==rect.top && during.right==rect.right && during.bottom==rect.bottom);
+                pump([&]{return state(app.page(),"busy")==true && read_json(dir/"cli-arguments.json")==args;});
+                assert(ui_widget_get_opacity(page)>=0.999f && ui_debug_widget_is_visible(page)==1);
+                SetEvent(gate);
+                pump([&]{return state(app.page(),"lastCommand").value("action",std::string())==action && state(app.page(),"busy")==false;});
+                assert(read_json(dir/"cli-arguments.json")==args);
+                assert(state(app.page(),"actionError")=="");
+                auto after=ui_widget_get_rect(page);
+                assert(after.left==rect.left && after.top==rect.top && after.right==rect.right && after.bottom==rect.bottom);
+                assert(ui_widget_get_opacity(page)>=0.999f && ui_debug_widget_is_visible(page)==1);
+                ui_widget_destroy(page);
+            };
+            stable_commands("watchStop","stop",Json::array({"watch","stop"}));
+            stable_commands("watchStart","start",Json::array({"watch","start"}));
             click(app,"tabConfig"); pump([&]{return state(app.page(),"tab")=="config";});
             auto content=ui_widget_find_by_id(ui_page_root(app.page()),"page-config");
             assert(content && ui_widget_get_opacity(content)>0); // No blank incoming frame.
             pump([&]{return ui_widget_get_opacity(content)>=0.999f;}); ui_widget_destroy(content);
+            stable_commands("watchReload","reload",Json::array({"watch","reload"}));
+            auto startup_enabled=state(app.page(),"startup")["enabled"].get<bool>();
+            stable_commands("startupToggle",startup_enabled?"startupDisable":"startupEnable",Json::array({"watch","startup",startup_enabled?"disable":"enable"}));
+            auto alternate=Json{{"enabled",!startup_enabled},{"command",""}}.dump();
+            ui_page_set_json(app.page(),"startup",alternate.c_str());
+            stable_commands("startupToggle",startup_enabled?"startupEnable":"startupDisable",Json::array({"watch","startup",startup_enabled?"enable":"disable"}));
+            auto original_startup=Json{{"enabled",startup_enabled},{"command",""}}.dump();
+            ui_page_set_json(app.page(),"startup",original_startup.c_str());
             std::cerr<<"Configuration view mounted\n";
+            auto selector_host=ui_widget_find_by_id(ui_page_root(app.page()),"choice-/runtime/process_mode");
+            char* selector_tree=ui_debug_dump_widget(selector_host); assert(selector_tree);
+            auto selector_info=parse_json(selector_tree); ui_debug_free(selector_tree); ui_widget_destroy(selector_host);
+            assert(selector_info["children"].size()==1);
             screenshot(app,L"configuration.png");
             auto system_appearance=state(app.page(),"appearance");
             auto theme=ui_widget_find_by_id(ui_page_root(app.page()),"themeSelector"); assert(theme);
@@ -135,7 +179,7 @@ int wmain(int argc,wchar_t** argv) {
             auto conf=read_json(dir/"sunpack_config.json"); conf["cli"]["language"]="en"; atomic_write(dir/"sunpack_config.json",conf.dump());
             pump([&]{return state(app.page(),"language")=="en";});
             assert(state(app.page(),"texts")["config"]=="Settings");
-            assert(state(app.page(),"fields")[0]["label"]=="App and command-line language");
+            assert(state(app.page(),"fields")[0]["label"]=="Language");
             screenshot(app,L"configuration-english.png");
             ui_page_set_text(app.page(),"configQuery",L"language");
             auto language=ui_widget_find_by_id(ui_page_root(app.page()),"select-/cli/language"); assert(language);
@@ -187,6 +231,17 @@ int wmain(int argc,wchar_t** argv) {
                 ui_widget_destroy(item); ui_widget_destroy(scroll);
             }
             screenshot(app,L"advanced-settings-small.png");
+            ui_page_set_text(app.page(),"configQuery",L"白名单");
+            auto blocks=state(app.page(),"shownBlocks");
+            if(blocks.size()!=1 || blocks[0]["fields"].size()!=5) std::cerr<<"Whitelist groups: "<<blocks<<"\n";
+            assert(blocks.size()==1 && blocks[0]["fields"].size()==5);
+            assert(blocks[0]["primary"]==true && blocks[0]["fields"][0]["label"]=="白名单");
+            auto block=ui_widget_find_by_id(ui_page_root(app.page()),"block-/filesystem/scan_filters/1"); assert(block);
+            for(auto& f:blocks[0]["fields"]) {
+                auto item=ui_widget_find_by_id(block,("field-"+f["id"].get<std::string>()).c_str()); assert(item); ui_widget_destroy(item);
+            }
+            ui_widget_destroy(block);
+            screenshot(app,L"whitelist-block-small.png");
             PostMessageW(static_cast<HWND>(ui_window_hwnd(app.window())),WM_CLOSE,0,0);
             pump([&]{return !IsWindow(static_cast<HWND>(ui_window_hwnd(app.window())));});
         }

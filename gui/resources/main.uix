@@ -3,7 +3,7 @@
 export default {
   data() { return {
     tab:'tasks',theme:'system',themeChoice:0,appearance:'light',pageOpacity:1,language:'en',texts:{},dispatch:false,requests:[],ready:false,busy:false,
-    actionError:'',cliResult:'',lastCommand:{},errors:{},logPath:'',cliAllowed:false,
+    actionError:'',lastCommand:{},errors:{},logPath:'',cliAllowed:false,runtime:{known:false,running:false},
     tasks:{rows:[],total:0,page:0,pages:1,malformed:0},passwords:{rows:[],total:0,page:0,pages:1},fields:[],directories:[],
     startup:{enabled:false,command:''},directoryQuery:'',directoryLimit:50,
     taskQuery:'',taskRoot:'',taskStatus:0,selectedTask:'',
@@ -18,12 +18,24 @@ export default {
     directoryCount() { return this.directories.filter(d=>this.tab==='passwords'||d.watch).length; },
     chosenTask() { return this.tasks.rows.find(t=>t.id===this.selectedTask)||{id:'',path:'',statusText:'',details:'',outputs:[]}; },
     categories() { let seen={}; return this.fields.filter(f=>{ if(seen[f.category]) return false; seen[f.category]=true; return true; }).map(f=>({id:f.category,label:f.categoryLabel})); },
-    matchingFields() { let q=this.configQuery.toLowerCase(); return this.fields.filter(f=>(!this.configCategory||f.category===this.configCategory)&&(f.label+' '+f.description+' '+f.id).toLowerCase().indexOf(q)>=0); },
-    shownFields() { return this.matchingFields.slice(this.configPage*30,(this.configPage+1)*30); },
-    configPages() { return Math.max(1,Math.ceil(this.matchingFields.length/30)); }
+    configBlocks() {
+      let groups=[],seen={};
+      this.fields.forEach(f=>{
+        let g=seen[f.block];
+        if(!g) { g={id:f.block,key:f.block+'@'+this.language,label:f.blockLabel,module:f.module,category:f.category,fields:[],primary:false}; seen[f.block]=g; groups.push(g); }
+        if(f.primary) { g.fields.unshift(f); g.primary=true; } else g.fields.push(f);
+      });
+      return groups;
+    },
+    matchingBlocks() { let q=this.configQuery.toLowerCase(); return this.configBlocks.filter(g=>(!this.configCategory||g.category===this.configCategory)&&(!q||(g.label+' '+g.module+' '+g.fields.map(f=>f.label+' '+f.description+' '+f.id).join(' ')).toLowerCase().indexOf(q)>=0)); },
+    shownBlocks() { return this.matchingBlocks.slice(this.configPage*8,(this.configPage+1)*8); },
+    configPages() { return Math.max(1,Math.ceil(this.matchingBlocks.length/8)); }
   },
   methods: {
-    send(op,payload) { this.requests=this.requests.concat([{op:op,payload:payload||{}}]); this.dispatch=true; },
+    send(op,payload) {
+      if(op==='cli') { if(this.busy) return; this.busy=true; this.actionError=''; }
+      this.requests=this.requests.concat([{op:op,payload:payload||{}}]); this.dispatch=true;
+    },
     go(tab) { this.send('navigate',{tab:tab}); },
     searchDirectory(value) { this.directoryQuery=value; this.directoryLimit=50; },
     searchConfig(value) { this.configQuery=value; this.configPage=0; },
@@ -59,7 +71,7 @@ export default {
 }
 </script>
 <style>
-  .app { flex:1; color:var(--fg); font-size:14px; }
+  .app { flex:1; gap:0px; color:var(--fg); font-size:14px; }
   .light { background:#f3f3f3; }
   .dark { background:#202020; }
   label { display:block; }
@@ -121,9 +133,19 @@ export default {
   ScrollView { flex:1; padding:2px 18px 6px 2px; }
   .setting-control { width:220px; gap:8px; }
   .setting-control input, .setting-control textarea { width:100%; }
+  .setting-control toggle { align-self:flex-end; }
   .setting-card { padding:16px 20px; gap:10px; border:1px solid var(--card-border); border-radius:8px; }
   .setting-card.light { background:#fbfbfb; border:1px solid #e5e5e5; }
   .setting-card.dark { background:#2b2b2b; border:1px solid #303030; }
+  .setting-card { gap:0px; padding:0px 20px; }
+  .block-fields { gap:0px; }
+  .setting-item { padding:16px 0px; gap:10px; }
+  .setting-item > textarea { width:100%; }
+  .setting-divider { height:1px; background:var(--card-border); }
+  .block-heading { padding:16px 0px 0px; font-size:14px; font-weight:600; }
+  .runtime-badge { flex-direction:row; align-items:center; gap:7px; }
+  .runtime-dot { width:8px; height:8px; border-radius:4px; background:#8a8a8a; }
+  .runtime-dot.running { background:#6ccb5f; }
   .setting-description { color:var(--fg-2); font-size:12px; }
   .choice-host { height:32px; flex-direction:row; }
   .inline-message { color:var(--fg-2); font-size:12px; }
@@ -175,13 +197,11 @@ export default {
         <button :class="!configCategory?'context-item on':'context-item'" @click="configCategory='',configPage=0"><label>{{ texts.allSettings }}</label></button>
         <ScrollView id="categoryScroll"><div class="column"><button v-for="c in categories" :key="c.id" :id="'category-'+c.id" :class="configCategory===c.id?'context-item on':'context-item'" @click="configCategory=c.id,configPage=0"><label>{{ c.label }}</label></button></div></ScrollView>
       </div>
-      <button id="refresh" class="context-item" @click="send('refresh')"><label>{{ texts.refresh }}</label></button>
       </div>
       <div class="workspace">
       <div id="page-tasks" v-show="tab==='tasks'" class="content" :opacity="pageOpacity" transition="opacity 180ms ease-out">
-        <div class="page-header"><label class="heading">{{ texts.tasks }}</label><div class="spacer"/></div>
-        <div class="row"><button id="watchStart" :enabled="cliAllowed &amp;&amp; !busy" @click="send('cli',{action:'start'})">{{ texts.startWatch }}</button><button id="watchStop" :enabled="cliAllowed &amp;&amp; !busy" @click="send('cli',{action:'stop'})">{{ texts.stopWatch }}</button><button :enabled="cliAllowed &amp;&amp; !busy" @click="send('cli',{action:'status'})">{{ texts.watchStatus }}</button></div>
-        <label v-show="cliResult" class="muted">{{ cliResult }}</label>
+        <div class="page-header"><label class="heading">{{ texts.tasks }}</label><div class="spacer"/><div id="runtimeStatus" class="runtime-badge"><div :class="runtime.known &amp;&amp; runtime.running?'runtime-dot running':'runtime-dot'"/><label class="muted">{{ !runtime.known?texts.runtimeUnknown:runtime.running?texts.runtimeRunning:texts.runtimeStopped }}</label></div></div>
+        <div class="row"><button id="watchStart" :enabled="cliAllowed" @click="send('cli',{action:'start'})">{{ texts.startWatch }}</button><button id="watchStop" :enabled="cliAllowed" @click="send('cli',{action:'stop'})">{{ texts.stopWatch }}</button></div>
         <label v-show="actionError" class="error">{{ actionError }}</label>
         <label class="muted">{{ texts.taskSearch }}</label><div class="row"><input id="taskSearch" class="fill" v-model="taskQuery" @submit="filterTasks(0)"/>
           <div id="taskStatusHost" style="width:180px;height:32px"/>
@@ -205,18 +225,24 @@ export default {
         <label v-show="tasks.malformed" class="error">{{ tasks.malformed }} {{ texts.invalidLogs }}</label>
       </div>
       <div id="page-config" v-show="tab==='config'" class="content" :opacity="pageOpacity" transition="opacity 180ms ease-out">
-        <div class="page-header"><label class="heading">{{ texts.config }}</label><div class="spacer"/><button :enabled="cliAllowed &amp;&amp; !busy" @click="send('cli',{action:'reload'})">{{ texts.reload }}</button></div>
+        <div class="page-header"><label class="heading">{{ texts.config }}</label><div class="spacer"/><button id="watchReload" :enabled="cliAllowed" @click="send('cli',{action:'reload'})">{{ texts.reload }}</button></div>
         <label v-show="actionError" class="error">{{ actionError }}</label>
         <label class="muted">{{ texts.settingSearch }}</label><input id="configSearch" :value="configQuery" @input="searchConfig"/>
         <ScrollView id="configListScroll"><div class="column">
           <div v-show="!configCategory &amp;&amp; !configQuery &amp;&amp; configPage===0" class="card settings-row">
             <div class="setting-copy"><label class="setting-title">{{ texts.startup }}</label><label class="muted">{{ texts.startupDescription }}</label></div>
-            <button id="startupToggle" :enabled="cliAllowed &amp;&amp; !busy" @click="send('cli',{action:startup.enabled?'startupDisable':'startupEnable'})">{{ startup.enabled?texts.startupOff:texts.startupOn }}</button>
+            <button id="startupToggle" :enabled="cliAllowed" @click="send('cli',{action:startup.enabled?'startupDisable':'startupEnable'})">{{ startup.enabled?texts.startupOff:texts.startupOn }}</button>
           </div>
           <div v-show="!configCategory &amp;&amp; !configQuery &amp;&amp; configPage===0" class="card settings-row"><div class="setting-copy"><label class="setting-title">{{ texts.theme }}</label><label class="muted">{{ texts.themeDescription }}</label></div><div id="themeHost" style="width:180px;height:32px"/></div>
-          <div v-for="f in shownFields" :key="f.key" :id="'field-'+f.id" :class="'setting-card '+appearance">
+          <div v-for="g in shownBlocks" :key="g.key" :id="'block-'+g.id" :class="'setting-card '+appearance">
+            <label v-show="(g.fields.length>1||g.module) &amp;&amp; !g.primary" class="block-heading">{{ g.label }}</label>
+            <!-- This Core UI version binds inner loops through a conditional
+                 scope. Groups are always nonempty; visibility uses v-show. -->
+            <div v-if="true" class="block-fields">
+            <div v-for="f in g.fields" :key="f.key" :id="'field-'+f.id" class="setting-item">
+            <div v-show="f.id!==g.fields[0].id" class="setting-divider"/>
             <div class="settings-row">
-              <div class="setting-copy"><label class="setting-title">{{ f.label }}</label><label class="setting-description">{{ f.description }}</label></div>
+              <div class="setting-copy"><label :class="f.primary?'subheading':'setting-title'">{{ f.label }}</label><label v-show="f.description" class="setting-description">{{ f.description }}</label></div>
               <div class="setting-control">
                 <toggle v-show="f.editor==='toggle'" :id="'toggle-'+f.id" :value="drafts[f.id]?drafts[f.id].boolean:f.boolean" @change="v=>changeField(f,v)"/>
                 <div v-show="f.editor==='choice'||f.editor==='recursive'" :id="'choice-'+f.id" class="choice-host"/>
@@ -227,8 +253,10 @@ export default {
             </div>
             <textarea v-show="f.editor==='lines'" :id="'lines-'+f.id" :value="drafts[f.id]?drafts[f.id].text:f.text" @input="v=>changeField(f,v)" style="height:110px"/>
             <div v-show="drafts[f.id]||savedField===f.id||settingError.id===f.id" class="row"><label v-show="settingError.id===f.id" class="error fill">{{ settingError.message }}</label><label v-show="savedField===f.id &amp;&amp; !drafts[f.id]" class="inline-message">{{ texts.saved }}</label><div class="spacer"/><button v-show="drafts[f.id]" :id="'save-'+f.id" type="primary" @click="saveField(f)">{{ texts.save }}</button></div>
+            </div>
+            </div>
           </div>
-          <label v-show="matchingFields.length===0" class="muted">{{ texts.noSettings }}</label>
+          <label v-show="matchingBlocks.length===0" class="muted">{{ texts.noSettings }}</label>
         </div></ScrollView>
         <div v-show="configPages>1" class="pager"><button :enabled="configPage>0" @click="configPage=configPage-1">{{ texts.previous }}</button><label>{{ configPage+1 }} / {{ configPages }}</label><button :enabled="configPage+1 &lt; configPages" @click="configPage=configPage+1">{{ texts.next }}</button></div>
       </div>
@@ -255,6 +283,6 @@ export default {
       </div>
     </div>
     <div v-show="errorList.length" class="card"><label class="error">{{ texts.fileProblems }}</label><label v-for="e in errorList" :key="e" class="error">{{ e }}</label></div>
-    <div v-if="dispatch" id="dispatch" style="width:0px;height:0px"/>
+    <div v-if="dispatch" id="dispatch" :visible="false" style="position:absolute;left:0px;top:0px;width:0px;height:0px"/>
   </div>
 </template>

@@ -2331,6 +2331,12 @@ void PageState::WireLoopScopeEventEx(Widget* target, const std::string& evName,
 
     if (evName == "click") {
         target->onClick = [callHandler]() { callHandler(JS_UNDEFINED); };
+    } else if (evName == "focus") {
+        target->onFocusHook = [callHandler]() { callHandler(JS_UNDEFINED); };
+    } else if (evName == "blur") {
+        target->onBlurHook = [callHandler]() { callHandler(JS_UNDEFINED); };
+    } else if (evName == "submit") {
+        target->onSubmitHook = [callHandler]() { callHandler(JS_UNDEFINED); };
     } else if (evName == "change" || evName == "input") {
         target->onValueChanged = [callHandler, ctx](bool v) {
             callHandler(JS_NewBool(ctx, v));
@@ -2352,7 +2358,7 @@ void PageState::WireLoopScopeEventEx(Widget* target, const std::string& evName,
             callHandler(obj);
         };
     }
-    // Other events (mousedown / mouseup / wheel / focus / blur) — add as needed.
+    // Other pointer events (mousedown / mouseup / wheel) — add as needed.
 }
 
 std::unique_ptr<CondInIter> PageState::BuildCondInIter(

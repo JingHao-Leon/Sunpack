@@ -11,6 +11,8 @@ preserved.
 
 Local changes:
 
+- Wire focus, blur and submit handlers inside keyed loop scopes as well as
+  ordinary templates, allowing inline settings to commit at edit completion.
 - Sample finite animations with a monotonic high precision clock and continue
   interrupted animations from their current visual position.
 - Pace visible motion on the existing render thread with vertical sync. Request

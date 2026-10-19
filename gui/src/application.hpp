@@ -42,6 +42,16 @@ class Application {
     void dispatch();
     void handle_command(Json command);
     void apply_pending();
+    // UI-thread queue: one write in flight, latest completed edit per key.
+    std::deque<Json> saves_;
+    Json active_save_;
+    bool closing_ = false;
+    bool field_pending(const std::string& id) const;
+    void save_field(const std::string& id, Json draft = Json());
+    void queue_save(Json job);
+    void start_save();
+    void acknowledge_save(const Json& ack);
+    void save_error(const std::string& key, const std::string& message);
     static LRESULT CALLBACK subclass(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
 public:
     explicit Application(Options options) : options_(std::move(options)) {}

@@ -161,11 +161,12 @@ void button_texts(Application& app,bool relayout=true) {
     };
     check(tree);
 }
-void save(Application& app) {
-    auto generation=state(app.page(),"saveGeneration").get<int>();
-    click(app,"saveAll");
-    pump([&]{return state(app.page(),"saveGeneration").get<int>()>generation && state(app.page(),"saving")==false;});
-    if(state(app.page(),"saveError")!="") throw std::runtime_error(state(app.page(),"saveError").get<std::string>());
+void finish_input(Application& app) {
+    ui_window_focus_widget(app.window(),0);
+    ui_debug_pump();
+    pump([&]{return state(app.page(),"requests").empty() && state(app.page(),"dispatch")==false && state(app.page(),"saving")==false && state(app.page(),"pendingFields").empty();},"Automatic writes");
+    auto errors=state(app.page(),"saveErrors");
+    if(!errors.empty()) throw std::runtime_error(errors.dump());
 }
 void screenshot(Application& app,const wchar_t* name) {
     wchar_t path[32768];
@@ -374,8 +375,8 @@ int wmain(int argc,wchar_t** argv) {
             pump([&]{return state(app.page(),"tasks")["total"]==1;});
             // The status selector handle belongs to Application, like themeSelector.
             assert(!ui_widget_find_by_id(ui_page_root(app.page()),"filterTasks"));
-            assert(state(app.page(),"changeCount")==0);
-            assert(rendered_widget(app,"saveAll").value("enabled",true)==false);
+            assert(!ui_widget_find_by_id(ui_page_root(app.page()),"saveAll"));
+            assert(!ui_widget_find_by_id(ui_page_root(app.page()),"discardAll"));
             auto error=ui_page_last_error(app.page()); if(error && *error) std::cerr<<error<<"\n";
             screenshot(app,L"tasks.png");
             click(app,"watchStart");
@@ -465,26 +466,27 @@ int wmain(int argc,wchar_t** argv) {
             // Native enum control writes a constrained value inline.
             auto priority=ui_widget_find_by_id(ui_page_root(app.page()),"select-/runtime/process_mode"); assert(priority);
             assert(ui_debug_combo_select(app.window(),priority,2)==0);
-            assert(state(app.page(),"changeCount")==1);
             assert(ui_debug_combo_select(app.window(),priority,1)==0);
-            assert(state(app.page(),"changeCount")==0);
             assert(ui_debug_combo_select(app.window(),priority,2)==0);
             ui_widget_destroy(priority);
-            assert(read_json(dir/"sunpack_config.json")["runtime"]["process_mode"]=="normal");
-            save(app);
+            finish_input(app);
             pump([&]{return read_json(dir/"sunpack_config.json")["runtime"]["process_mode"]=="high";});
             ui_page_set_text(app.page(),"configQuery",L"toast_enabled");
             auto toast=ui_widget_find_by_id(ui_page_root(app.page()),"toggle-/watch/toast_enabled"); assert(toast);
             assert(ui_debug_toggle_set(app.window(),toast,0)==0);
             assert(state(app.page(),"toggleDrafts").size()==1 && state(app.page(),"drafts").empty());
             assert(ui_debug_toggle_set(app.window(),toast,1)==0);
-            assert(state(app.page(),"changeCount")==0);
             {
             AnimationFrames animation;
             assert(ui_debug_toggle_set(app.window(),toast,0)==0);
             pump([&]{return animation.finished && animation.stopped;},"Toggle motion");
             assert(animation.frames>1 && !animation.layout);
             }
+            finish_input(app);
+            // Auto-save can refresh the filtered field while the pointer is
+            // stationary. Start the hover check from outside the control.
+            assert(ui_debug_mouse_move(app.window(),0,0)==0);
+            toast=ui_widget_find_by_id(ui_page_root(app.page()),"toggle-/watch/toast_enabled"); assert(toast);
             {
                 AnimationFrames animation;
                 auto bounds=ui_widget_get_rect(toast);
@@ -495,18 +497,15 @@ int wmain(int argc,wchar_t** argv) {
                 assert(ui_debug_mouse_down(app.window(),x,y)==0);
                 pump([&]{return animation.finished && animation.stopped;},"Toggle press");
                 assert(ui_debug_mouse_up(app.window(),x,y)==0);
-                assert(state(app.page(),"changeCount")==0);
-                assert(ui_debug_key(app.window(),VK_SPACE)==0);
-                assert(state(app.page(),"changeCount")==1);
-                animation.finished=animation.stopped=false;
+                    assert(ui_debug_key(app.window(),VK_SPACE)==0);
+                    animation.finished=animation.stopped=false;
                 assert(ui_debug_mouse_move(app.window(),0,0)==0);
                 pump([&]{return animation.finished && animation.stopped;},"Toggle release");
                 assert(!animation.layout);
             }
             ui_widget_destroy(toast);
-            click(app,"saveAll");
-            click(app,"tabTasks"); // Rapid navigation must not overwrite the save command.
-            pump([&]{return read_json(dir/"sunpack_config.json")["watch"]["toast_enabled"]==false;});
+            click(app,"tabTasks"); // Rapid navigation must not overwrite automatic writes.
+            pump([&]{return read_json(dir/"sunpack_config.json")["watch"]["toast_enabled"]==false;},"Toggle saved after navigation");
             pump([&]{return state(app.page(),"tab")=="tasks";});
             pump([&]{return state(app.page(),"saving")==false;});
             click(app,"tabConfig"); pump([&]{return state(app.page(),"tab")=="config";});
@@ -520,18 +519,19 @@ int wmain(int argc,wchar_t** argv) {
             ui_widget_destroy(output);
             assert(state(app.page(),"drafts")["/watch/out_dir"]["text"]=="输出目录");
             screenshot(app,L"configuration-inline-small.png");
-            auto generation=state(app.page(),"saveGeneration").get<int>();
-            click(app,"saveAll");
-            // More typing can arrive before the queued dispatch/save completes.
-            // Saving must keep that newer draft instead of clearing it.
-            click(app,"input-/watch/out_dir"); ui_debug_type_text(app.window(),L"后续");
-            try { pump([&]{return read_json(dir/"sunpack_config.json")["watch"]["out_dir"]=="输出目录";}); }
-            catch(...) { std::cerr<<"Save config: "<<state(app.page(),"saveError")<<"\n"; throw; }
-            pump([&]{return state(app.page(),"saveGeneration").get<int>()>generation;});
+            {
+                // Hold the real writer lock to exercise new input arriving while
+                // a completed field edit is being persisted. No timing sleeps.
+                FileMutex hold(dir/"sunpack_config.json");
+                click(app,"configSearch"); ui_debug_pump();
+                click(app,"input-/watch/out_dir"); ui_debug_type_text(app.window(),L"后续");
+            }
+            try { pump([&]{return read_json(dir/"sunpack_config.json")["watch"]["out_dir"]=="输出目录" && !state(app.page(),"saving").get<bool>();},"Completed edit before continued typing"); }
+            catch(...) { std::cerr<<"Automatic config: file="<<read_json(dir/"sunpack_config.json")<<" drafts="<<state(app.page(),"drafts")<<" errors="<<state(app.page(),"saveErrors")<<" ui="<<ui_page_last_error(app.page())<<"\n"; throw; }
             assert(state(app.page(),"drafts")["/watch/out_dir"]["text"]=="输出目录后续");
-            save(app);
-            pump([&]{return read_json(dir/"sunpack_config.json")["watch"]["out_dir"]=="输出目录后续";});
-            pump([&]{return !state(app.page(),"drafts").contains("/watch/out_dir");});
+            finish_input(app);
+            assert(read_json(dir/"sunpack_config.json")["watch"]["out_dir"]=="输出目录后续");
+            assert(!state(app.page(),"drafts").contains("/watch/out_dir"));
             // Keep unsaved input when an external writer changes the same field;
             // the save must report a conflict without overwriting that writer.
             output=ui_widget_find_by_id(ui_page_root(app.page()),"input-/watch/out_dir");
@@ -539,10 +539,12 @@ int wmain(int argc,wchar_t** argv) {
             ui_widget_destroy(output);
             auto changed=read_json(dir/"sunpack_config.json"); changed["watch"]["out_dir"]="external"; atomic_write(dir/"sunpack_config.json",changed.dump());
             pump([&]{for(auto& field:state(app.page(),"fields")) if(field["id"]=="/watch/out_dir") return field["text"]=="external"; return false;});
-            click(app,"saveAll"); pump([&]{return state(app.page(),"saveError")!="";});
+            click(app,"configSearch"); pump([&]{return state(app.page(),"saveErrors").contains("/watch/out_dir");});
             assert(read_json(dir/"sunpack_config.json")["watch"]["out_dir"]=="external");
             assert(state(app.page(),"drafts")["/watch/out_dir"]["text"]=="unsaved");
-            click(app,"discardAll");
+            click(app,"input-/watch/out_dir"); ui_debug_type_text(app.window(),L" corrected");
+            finish_input(app);
+            assert(read_json(dir/"sunpack_config.json")["watch"]["out_dir"]=="unsaved corrected");
             // External language replacement updates visible and generated controls.
             auto conf=read_json(dir/"sunpack_config.json"); conf["cli"]["language"]="en"; atomic_write(dir/"sunpack_config.json",conf.dump());
             pump([&]{return state(app.page(),"language")=="en";});
@@ -554,7 +556,7 @@ int wmain(int argc,wchar_t** argv) {
             auto language=ui_widget_find_by_id(ui_page_root(app.page()),"select-/cli/language"); assert(language);
             assert(ui_debug_combo_select(app.window(),language,0)==0);
             ui_widget_destroy(language);
-            save(app);
+            finish_input(app);
             pump([&]{return state(app.page(),"language")=="zh";});
             ui_window_set_size(app.window(),1120,720);
             click(app,"tabPasswords"); pump([&]{return state(app.page(),"tab")=="passwords";});
@@ -572,7 +574,7 @@ int wmain(int argc,wchar_t** argv) {
             ui_window_set_size(app.window(),850,560);
             screenshot(app,L"password-editor-small.png");
             assert(read_json(dir/"builtin_passwords.json")["passwords"].size()==1);
-            save(app);
+            click(app,"finishPassword"); finish_input(app);
             try { pump([&]{return read_json(dir/"builtin_passwords.json")["passwords"].size()==3;}); }
             catch(...) { std::cerr<<"Save password: "<<state(app.page(),"actionError")<<"\n"; throw; }
             assert(read_json(dir/"builtin_passwords.json")["passwords"][2]["value"]=="  #批量  ");
@@ -580,7 +582,8 @@ int wmain(int argc,wchar_t** argv) {
             try { pump([&]{return state(app.page(),"passwords")["total"]==3;}); }
             catch(...) { std::cerr<<"Password model: "<<state(app.page(),"passwords")<<" errors="<<state(app.page(),"errors")<<"\n"; throw; }
             std::cerr<<"Password model updated\n";
-            // One save spans config, multiple password edits, and a watched folder.
+            // Creation actions persist immediately. Unrelated incomplete forms
+            // never join another field or record's automatic write.
             auto pending_root=dir/L"pending-root", pending_second=dir/L"pending-second"; fs::create_directory(pending_root); fs::create_directory(pending_second);
             auto disk_roots=read_file(dir/"sunpack_watch_roots.txt");
             click(app,"tabTasks"); pump([&]{return state(app.page(),"tab")=="tasks";});
@@ -588,23 +591,22 @@ int wmain(int argc,wchar_t** argv) {
             assert(rendered_widget(app,"directoryPane").value("visible",true));
             click(app,"rootInput"); ui_debug_type_text(app.window(),(pending_root.wstring()+L"\n"+pending_second.wstring()+L"\n"+pending_root.wstring()).c_str());
             button_texts(app); screenshot(app,L"root-inline-batch-small.png");
-            click(app,"finishRoot"); pump([&]{return state(app.page(),"rootEdits").size()==1 && state(app.page(),"staging")==false;});
-            assert(read_file(dir/"sunpack_watch_roots.txt")==disk_roots);
+            click(app,"finishRoot"); finish_input(app);
+            assert(read_file(dir/"sunpack_watch_roots.txt")!=disk_roots);
             click(app,"tabPasswords"); pump([&]{return state(app.page(),"tab")=="passwords";});
             click(app,"newPassword"); click(app,"passwordValue"); ui_debug_type_text(app.window(),L"pending scoped");
             click(app,"passwordScopes"); ui_debug_type_text(app.window(),pending_root.c_str());
-            click(app,"finishPassword"); pump([&]{return state(app.page(),"passwordEdits").size()==1 && state(app.page(),"staging")==false;});
+            click(app,"finishPassword"); finish_input(app);
             click(app,"newPassword"); click(app,"passwordValue"); ui_debug_type_text(app.window(),L"pending global");
+            click(app,"finishPassword"); finish_input(app);
             click(app,"tabConfig"); pump([&]{return state(app.page(),"tab")=="config";});
             ui_page_set_text(app.page(),"configQuery",L"out_dir");
             output=ui_widget_find_by_id(ui_page_root(app.page()),"input-/watch/out_dir"); ui_text_input_set_text(output,L""); ui_widget_destroy(output);
             click(app,"input-/watch/out_dir"); ui_debug_type_text(app.window(),L"batch-output");
-            assert(state(app.page(),"changeCount")==4);
-            auto background=read_json(dir/"builtin_passwords.json"); assert(background["passwords"].size()==3);
+            auto background=read_json(dir/"builtin_passwords.json"); assert(background["passwords"].size()==5);
             background["clipboard_history"].push_back("external while editing"); atomic_write(dir/"builtin_passwords.json",background.dump());
-            screenshot(app,L"global-pending-save.png");
-            save(app);
-            assert(state(app.page(),"changeCount")==0);
+            screenshot(app,L"automatic-save.png");
+            finish_input(app);
             assert(read_json(dir/"sunpack_config.json")["watch"]["out_dir"]=="batch-output");
             assert(read_roots(dir/"sunpack_watch_roots.txt").entries.size()==3);
             auto committed=read_json(dir/"builtin_passwords.json"); assert(committed["passwords"].size()==5);
@@ -624,6 +626,46 @@ int wmain(int argc,wchar_t** argv) {
                 assert(std::abs((row.top+row.bottom-1)/2-(edit.top+edit.bottom)/2)<=1);
             }
             screenshot(app,L"passwords-unified.png");
+            // Existing records auto-save on blur and retain their editor. A
+            // second completed edit while the first owns the writer lock must
+            // rebase onto our own saved record rather than conflict with it.
+            auto record=state(app.page(),"passwords")["rows"][0];
+            click(app,("edit-password-"+record["id"].get<std::string>()).c_str());
+            auto password_input=ui_widget_find_by_id(ui_page_root(app.page()),"passwordValue"); assert(password_input);
+            ui_text_area_set_text(password_input,L""); ui_widget_destroy(password_input);
+            click(app,"passwordValue"); ui_debug_type_text(app.window(),L"edited password");
+            {
+                FileMutex hold(dir/"builtin_passwords.json");
+                click(app,"passwordScopes"); ui_debug_pump();
+                click(app,"passwordValue"); ui_debug_type_text(app.window(),L" latest");
+                ui_window_focus_widget(app.window(),0); ui_debug_pump();
+            }
+            finish_input(app);
+            assert(state(app.page(),"passwordEditor")==true);
+            assert(parse_json(state(app.page(),"passwordOriginal").get<std::string>())["value"]=="edited password latest");
+            assert(read_json(dir/"builtin_passwords.json")["passwords"][0]["value"]=="edited password latest");
+            click(app,"deletePassword"); finish_input(app);
+            assert(read_json(dir/"builtin_passwords.json")["passwords"].size()==4);
+            assert(state(app.page(),"passwordEditor")==false);
+            click(app,"tabTasks"); pump([&]{return state(app.page(),"tab")=="tasks";});
+            click(app,("directory-"+utf8(path_key(pending_root))).c_str());
+            pump([&]{return state(app.page(),"taskRoot")==utf8(pending_root.wstring());});
+            click(app,"editSelectedRoot"); ui_debug_pump();
+            click(app,"rootOutput"); ui_debug_type_text(app.window(),L"automatic-output");
+            assert(ui_debug_key(app.window(),VK_RETURN)==0);
+            finish_input(app);
+            auto deep=ui_widget_find_by_id(ui_page_root(app.page()),"rootDeepToggle"); assert(deep);
+            assert(ui_debug_toggle_set(app.window(),deep,1)==0); ui_widget_destroy(deep);
+            finish_input(app);
+            assert(state(app.page(),"rootEditor")==true);
+            bool updated=false;
+            auto root_snapshot=read_roots(dir/"sunpack_watch_roots.txt");
+            for(auto& entry:root_snapshot.entries)
+                if(path_key(entry.input)==path_key(pending_root)) { updated=entry.output=="automatic-output" && entry.deep; }
+            assert(updated);
+            click(app,"closeRootEditor"); click(app,"allRoots");
+            pump([&]{return state(app.page(),"taskRoot")=="";});
+
             atomic_write(dir/".sunpack_watch"/"events.jsonl",Json({{"event","failed_password"},{"path",utf8((dir/"carrier.001").wstring())}}).dump()+"\n");
             try { pump([&]{return state(app.page(),"tasks")["rows"][0]["status"]=="挂起：等待密码";}); }
             catch(...) { std::cerr<<"Log model: "<<state(app.page(),"tasks")<<" errors="<<state(app.page(),"errors")<<"\n"; throw; }
@@ -748,9 +790,38 @@ int wmain(int argc,wchar_t** argv) {
             assert(state(app.page(),"passwordValue")=="  #history value  ");
             assert(state(app.page(),"passwordOriginal")=="");
             assert(read_json(dir/"builtin_passwords.json")["clipboard_history"]==history["clipboard_history"]);
-            click(app,"discardAll");
+            click(app,"closePasswordEditor");
+            click(app,"tabConfig"); pump([&]{return state(app.page(),"tab")=="config";});
+            ui_page_set_text(app.page(),"configQuery",L"max_folders");
+            auto invalid_input=ui_widget_find_by_id(ui_page_root(app.page()),"input-/watch/max_folders"); assert(invalid_input);
+            ui_text_input_set_text(invalid_input,L""); ui_widget_destroy(invalid_input);
+            click(app,"input-/watch/max_folders"); ui_debug_type_text(app.window(),L"0");
+            assert(ui_debug_key(app.window(),VK_RETURN)==0);
+            pump([&]{return state(app.page(),"saveErrors").contains("/watch/max_folders") && !state(app.page(),"saving").get<bool>();});
+            assert(read_json(dir/"sunpack_config.json")["watch"]["max_folders"]==16);
+            ui_page_set_text(app.page(),"configQuery",L"out_dir");
+            auto independent=ui_widget_find_by_id(ui_page_root(app.page()),"input-/watch/out_dir"); assert(independent);
+            ui_text_input_set_text(independent,L""); ui_widget_destroy(independent);
+            click(app,"input-/watch/out_dir"); ui_debug_type_text(app.window(),L"independent");
+            assert(ui_debug_key(app.window(),VK_RETURN)==0);
+            pump([&]{return read_json(dir/"sunpack_config.json")["watch"]["out_dir"]=="independent" && !state(app.page(),"saving").get<bool>();});
+            assert(state(app.page(),"saveErrors").contains("/watch/max_folders"));
+            PostMessageW(static_cast<HWND>(ui_window_hwnd(app.window())),WM_CLOSE,0,0);
+            pump([&]{return state(app.page(),"closeError")!="" && !state(app.page(),"saving").get<bool>();});
+            assert(IsWindow(static_cast<HWND>(ui_window_hwnd(app.window()))));
+            ui_page_set_text(app.page(),"configQuery",L"max_folders");
+            invalid_input=ui_widget_find_by_id(ui_page_root(app.page()),"input-/watch/max_folders"); assert(invalid_input);
+            ui_text_input_set_text(invalid_input,L""); ui_widget_destroy(invalid_input);
+            click(app,"input-/watch/max_folders"); ui_debug_type_text(app.window(),L"17");
+            finish_input(app);
+            assert(read_json(dir/"sunpack_config.json")["watch"]["max_folders"]==17);
+            ui_page_set_text(app.page(),"configQuery",L"out_dir");
+            auto closing_input=ui_widget_find_by_id(ui_page_root(app.page()),"input-/watch/out_dir"); assert(closing_input);
+            ui_text_input_set_text(closing_input,L""); ui_widget_destroy(closing_input);
+            click(app,"input-/watch/out_dir"); ui_debug_type_text(app.window(),L"close-flush");
             PostMessageW(static_cast<HWND>(ui_window_hwnd(app.window())),WM_CLOSE,0,0);
             pump([&]{return !IsWindow(static_cast<HWND>(ui_window_hwnd(app.window())));});
+            assert(read_json(dir/"sunpack_config.json")["watch"]["out_dir"]=="close-flush");
         }
         fs::remove_all(dir); std::cout<<"GUI interface and observation passed\n";
     } catch(const std::exception& e) { std::cerr<<e.what()<<"\n"; std::error_code ec; fs::remove_all(dir,ec); return 1; }

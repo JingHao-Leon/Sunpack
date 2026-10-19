@@ -563,7 +563,7 @@ void Application::work() {
                         if(!options_.allow_cli) throw std::runtime_error("测试数据目录未绑定 CLI；请显式传入 --cli");
                         auto action=p.value("action",std::string());
                         std::vector<std::wstring> args={L"watch"};
-                        if(action=="start" || action=="stop" || action=="reload") args.push_back(wide(action));
+                        if(action=="start" || action=="stop") args.push_back(wide(action));
                         else if(action=="startupEnable" || action=="startupDisable") { args.push_back(L"startup"); args.push_back(action=="startupEnable"?L"enable":L"disable"); }
                         else throw std::runtime_error("不支持的 CLI 操作");
                         auto result=run_cli(options_.cli,args,stop_);

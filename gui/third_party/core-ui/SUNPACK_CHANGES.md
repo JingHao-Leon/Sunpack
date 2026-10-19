@@ -20,6 +20,10 @@ Local changes:
 - Give ToggleSwitch separate movement, color and hover/pressed shape animations,
   keyboard handling, dark-theme thumb contrast and system animation preference.
 - Keep layout geometry stable while drawing translated subtrees.
+- Animate ComboBox popup entrance/exit, including upward opening and interrupted
+  motion, on the same finite paint-only animation host. Respect system settings.
+- Remove the redundant ScrollView layout during wheel dispatch: scrolling already
+  shifts arranged rectangles, and the extra layout lost the text measure context.
 
 The framework is MIT licensed; see [LICENSE](LICENSE). The original license and
 copyright notices are preserved, including [LunaSVG](third_party/lunasvg/LICENSE),
@@ -32,3 +36,4 @@ Motion references:
 - https://learn.microsoft.com/en-us/windows/apps/design/motion/
 - https://learn.microsoft.com/en-us/windows/apps/design/motion/page-transitions
 - https://github.com/microsoft/microsoft-ui-xaml/blob/main/controls/dev/CommonStyles/ToggleSwitch_themeresources.xaml
+- https://github.com/microsoft/microsoft-ui-xaml/blob/main/dxaml/xcp/dxaml/lib/ComboBox_Partial.cpp

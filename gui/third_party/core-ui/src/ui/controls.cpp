@@ -2021,6 +2021,7 @@ void ComboBoxWidget::ClampDropdownScroll_(int visibleRows) {
 }
 
 void ComboBoxWidget::OpenDropdown_() {
+    if (open_ || items_.empty()) return;
     open_ = true;
     const auto layout = ComputeDropdownLayout_();
     ClampDropdownScroll_(layout.visibleRows);
@@ -2030,6 +2031,39 @@ void ComboBoxWidget::OpenDropdown_() {
         dropdownScrollIndex_ = selectedIndex_ - layout.visibleRows + 1;
     }
     ClampDropdownScroll_(layout.visibleRows);
+    AnimatePopup_(true);
+}
+
+void ComboBoxWidget::Close() {
+    if (!open_) return;
+    open_ = false; // Stop accepting popup input immediately, retain its exit frame.
+    hoveredIndex_ = -1;
+    AnimatePopup_(false);
+}
+
+void ComboBoxWidget::AnimatePopup_(bool opening) {
+    BOOL animate = TRUE;
+    SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &animate, 0);
+    const float target = opening ? 1.0f : 0.0f;
+    if (!animate) {
+        popupOpacity_.SetImmediate(target);
+        popupProgress_.SetImmediate(target);
+        return;
+    }
+    popupOpacity_.Retarget(target);
+    popupProgress_.Retarget(target, {opening ? 167.0f : 83.0f, EasingFunction::FluentEnter});
+    if (PopupAnimating()) GetContext().RegisterAnimatingWidget(this);
+}
+
+void ComboBoxWidget::UpdateAnimation() {
+    const auto now = AnimationClockMs();
+    popupOpacity_.SampleFrame(now);
+    popupProgress_.SampleFrame(now);
+}
+
+float ComboBoxWidget::PopupOffset_(const DropdownLayout& layout) const {
+    // Approach from the owning edge, including when the viewport opens upward.
+    return (layout.opensUpward ? 8.0f : -8.0f) * (1.0f - popupProgress_.Current());
 }
 
 int ComboBoxWidget::DropdownItemAt(float x, float y) const {
@@ -2040,18 +2074,30 @@ int ComboBoxWidget::DropdownItemAt(float x, float y) const {
         y < drop.top || y >= drop.bottom) {
         return -1;
     }
+    y -= PopupOffset_(layout);
+    if (y < drop.top || y >= drop.bottom) return -1;
     const int visibleRow = static_cast<int>((y - drop.top) / itemHeight_);
     const int index = dropdownScrollIndex_ + visibleRow;
     return index >= 0 && index < (int)items_.size() ? index : -1;
 }
 
 void ComboBoxWidget::OnDrawOverlay(Renderer& r) {
-    if (!open_) return;
+    if ((!open_ && !PopupAnimating()) || popupOpacity_.Current()<=0.001f) return;
     bool dark = theme::IsDark();
 
     const auto layout = ComputeDropdownLayout_();
     if (layout.visibleRows <= 0) return;
     D2D1_RECT_F dropBg = layout.rect;
+    const bool fading = popupOpacity_.Current()<0.999f;
+    const float offset = PopupOffset_(layout);
+    const bool translating = std::abs(offset)>0.001f;
+    if (fading) r.PushOpacity(popupOpacity_.Current(), dropBg);
+    // Clip to the final popup bounds so the entrance never paints over its
+    // owner. Only paint changes; item geometry and parent layout stay stable.
+    if (translating) {
+        r.PushClip(dropBg);
+        r.PushTransform(D2D1::Matrix3x2F::Translation(0.0f, offset));
+    }
     // Popup uses the control's border-radius if set; otherwise Fluent 8px.
     float cr = (css.borderRadius >= 0) ? css.borderRadius : 8.0f;
     float fontSize = (css.fontSize > 0) ? css.fontSize : theme::kFontSizeNormal;
@@ -2148,6 +2194,8 @@ void ComboBoxWidget::OnDrawOverlay(Renderer& r) {
     }
 
     r.PopRoundedClip();
+    if (translating) { r.PopTransform(); r.PopClip(); }
+    if (fading) r.PopOpacity();
 }
 
 bool ComboBoxWidget::OnMouseDown(const MouseEvent& e) {
@@ -2170,7 +2218,7 @@ bool ComboBoxWidget::OnMouseMove(const MouseEvent& e) {
 bool ComboBoxWidget::OnMouseUp(const MouseEvent& e) {
     if (open_ && hoveredIndex_ >= 0) {
         selectedIndex_ = hoveredIndex_;
-        open_ = false;
+        Close();
         if (onSelectionChanged) onSelectionChanged(selectedIndex_);
         return true;
     }

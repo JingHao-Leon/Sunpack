@@ -213,8 +213,10 @@ export default {
   .history-list.light { background:#fbfbfb; }
   .history-list.dark { background:#2b2b2b; }
   .history-entry { gap:0px; }
-  .scope-value { padding:2px 0px 12px; }
+  .scope-value { padding:2px 0px 0px; }
   .history-row { flex-direction:row; align-items:center; gap:12px; padding:4px 0px; min-height:40px; }
+  .password-row { padding:12px 0px; }
+  .password-copy { flex:1; gap:0px; }
   .history-copy { width:132px; }
   .history-divider { height:1px; background:var(--card-border); }
   .nav-item { transition:background-color 140ms ease-out; }
@@ -298,7 +300,7 @@ export default {
         <label v-show="tasks.malformed" class="error">{{ tasks.malformed }} {{ texts.invalidLogs }}</label>
       </div>
       <div id="page-config" v-show="tab==='config'" class="content">
-        <div class="page-header"><label class="heading">{{ texts.config }}</label><div class="spacer"/><button id="watchReload" :enabled="cliAllowed" @click="send('cli',{action:'reload'})">{{ texts.reload }}</button></div>
+        <div class="page-header"><label class="heading">{{ texts.config }}</label></div>
         <label v-show="actionError" class="error">{{ actionError }}</label>
         <label class="muted">{{ texts.settingSearch }}</label><input id="configSearch" :value="configQuery" @input="searchConfig"/>
         <ScrollView id="configListScroll"><div id="configBlocks" class="column">
@@ -345,8 +347,7 @@ export default {
           </div>
           <div :class="'history-list '+appearance"><label v-show="passwords.total===0" class="muted">{{ texts.noPasswords }}</label>
             <div v-for="p in passwords.rows" :key="p.id" :id="'password-'+p.id" class="history-entry">
-              <div class="row history-row"><label class="fill">{{ p.value }}</label><button v-show="passwordScope==='@history'" class="history-copy" :id="'copy-history-'+p.id" @click="editPassword(p)">{{ texts.copyPassword }}</button><button v-show="passwordScope==='@all'" :id="'edit-password-'+p.id" @click="editPassword(p)">{{ texts.edit }}</button></div>
-              <label v-show="passwordScope==='@all'" class="muted scope-value">{{ texts.scopeLabel }} · {{ p.scopes||texts.allFolders }}</label>
+              <div class="row history-row" :class="'row history-row '+(passwordScope==='@all'?'password-row':'')"><div class="password-copy"><label>{{ p.value }}</label><label v-show="passwordScope==='@all'" class="muted scope-value">{{ texts.scopeLabel }} · {{ p.scopes||texts.allFolders }}</label></div><button v-show="passwordScope==='@history'" class="history-copy" :id="'copy-history-'+p.id" @click="editPassword(p)">{{ texts.copyPassword }}</button><button v-show="passwordScope==='@all'" :id="'edit-password-'+p.id" @click="editPassword(p)">{{ texts.edit }}</button></div>
               <div class="history-divider"/>
             </div>
           </div>

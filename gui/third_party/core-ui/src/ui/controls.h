@@ -516,7 +516,11 @@ public:
     }
 
     bool IsOpen() const { return open_; }
-    void Close() { open_ = false; hoveredIndex_ = -1; }
+    void Close();
+    void UpdateAnimation();
+    bool PopupAnimating() const { return popupOpacity_.Active() || popupProgress_.Active(); }
+    float PopupOpacity() const { return popupOpacity_.Current(); }
+    float PopupProgress() const { return popupProgress_.Current(); }
 
     void OnDraw(Renderer& r) override;
     void OnDrawOverlay(Renderer& r) override;
@@ -543,6 +547,8 @@ private:
     DropdownLayout ComputeDropdownLayout_() const;
     void OpenDropdown_();
     void ClampDropdownScroll_(int visibleRows);
+    void AnimatePopup_(bool opening);
+    float PopupOffset_(const DropdownLayout& layout) const;
 
     std::vector<std::wstring> items_;
     std::vector<std::string>  i18nKeys_;   // L83: parallel to items_; "" = literal
@@ -550,6 +556,8 @@ private:
     int hoveredIndex_ = -1;
     int dropdownScrollIndex_ = 0;
     bool open_ = false;
+    AnimatedFloat popupOpacity_{0.0f, 83.0f, EasingFunction::Linear};
+    AnimatedFloat popupProgress_{0.0f, 167.0f, EasingFunction::FluentEnter};
     float itemHeight_ = 28.0f;
     static constexpr int kMaxVisibleRows = 12;
 };

@@ -85,7 +85,8 @@ GUI 关闭即退出，Watch 的生命周期独立于 GUI。
   日志位置随实际主配置的 `watch.state_dir` 变化重新绑定。共享冲突等临时读取错误
   保留上一份有效数据，仅调度最多三次 5/20/80 ms 的单次重试，之后等待新通知。
   目录不存在时观察现有祖先，创建后重新绑定。
-- Watch 启停、重载、自启开关仅启动现有 CLI 命令。自启显示值直接读取
+- Watch 启停、自启开关仅启动现有 CLI 命令。配置和监控目录保存后由后台文件观察器
+  自动加载；GUI 不提供重复的手动重载操作。自启显示值直接读取
   `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\SunPackWatchService`。
   CLI 输出以自动删除的临时句柄捕获，不保存额外历史，不启动 GUI 的 IPC 服务。
   成功保存与 CLI 退出码 0 不弹出提示；失败在当前操作区域显示。
@@ -111,6 +112,10 @@ Core UI 的完整源代码在 `third_party/core-ui`，连同原始许可证一�
 垂直同步，并在呈现后请求下一帧，最终帧不再请求后续帧。不增加线程、空闲轮询或
 常驻高精度系统计时器。开关分别处理 167 ms 滑块位移、83 ms 颜色变化与悬停/按压
 形变，快速反向切换从当前视觉位置续接，键盘空格/回车同样可操作。
+下拉框沿展开方向做 167 ms 短距离滑入和 83 ms 淡入，关闭时保留 83 ms 退出画面，
+但立即停止接收列表输入。反向操作从当前位置续接，尊重系统动画设置；展开与关闭均不
+改变父容器布局。滚轮直接复用 ScrollView 的坐标平移，移除了窗口事件分发中重复且没有
+文本测量上下文的布局，避免中文按钮宽度被估算值覆盖；滚动条拖动保持同样的平移路径。
 `src/motion.cpp` 是管理器使用固定 Core UI 动画接口的集中适配，位移只影响绘制，
 不逐帧重排布局。时间、曲线、开关形变依据
 [WinUI 开关模板](https://github.com/microsoft/microsoft-ui-xaml/blob/main/controls/dev/CommonStyles/ToggleSwitch_themeresources.xaml)、

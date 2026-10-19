@@ -37,7 +37,8 @@ struct AnimationFrames {
 };
 Json state(UiPage page,const char* key) { char* text=ui_page_get_json(page,key); if(!text) throw std::runtime_error(std::string("UI state unavailable: ")+key); auto j=parse_json(text); ui_page_free(text); return j; }
 UiRect rect(Application& app,const std::string& id) {
-    auto widget=ui_widget_find_by_id(ui_page_root(app.page()),id.c_str()); assert(widget);
+    auto widget=ui_widget_find_by_id(ui_page_root(app.page()),id.c_str());
+    if(!widget) throw std::runtime_error("Widget missing: "+id);
     auto result=ui_widget_get_rect(widget); ui_widget_destroy(widget); return result;
 }
 Json rendered_widget(Application& app,const std::string& id) {
@@ -118,8 +119,8 @@ void click(Application& app,const char* id) {
     assert(ui_debug_click(app.window(),widget)==0);
     ui_widget_destroy(widget);
 }
-void button_texts(Application& app) {
-    ui_window_relayout(app.window());
+void button_texts(Application& app,bool relayout=true) {
+    if(relayout) ui_window_relayout(app.window());
     char* dump=ui_debug_dump_tree(app.window()); assert(dump);
     auto tree=parse_json(dump); ui_debug_free(dump);
     std::function<void(const Json&)> check=[&](const Json& node) {
@@ -146,6 +147,53 @@ void screenshot(Application& app,const wchar_t* name) {
     char* tree=ui_debug_dump_tree(app.window());
     if(tree) { atomic_write(fs::path(path)/(std::wstring(name)+L".json"),tree); ui_debug_free(tree); }
     assert(ui_debug_screenshot(app.window(),(fs::path(path)/name).c_str())==0);
+}
+void popup_motion(Application& app,const char* id,bool upward=false) {
+    settle_motion(app);
+    auto* combo=dynamic_cast<ui::ComboBoxWidget*>(ui::GetContext().GetWindow(app.window())->Root()->FindById(id));
+    assert(combo);
+    BOOL animations=TRUE; SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION,0,&animations,0);
+    AnimationFrames animation;
+    auto open=[&] {
+        if(!upward) { click(app,id); return; }
+        // Open a partially visible control at the lower scroll edge without
+        // the click helper first scrolling its center into the viewport.
+        float x=(combo->rect.left+combo->rect.right)/2,y=combo->rect.top+4;
+        assert(ui_debug_mouse_down(app.window(),x,y)==0);
+        assert(ui_debug_mouse_up(app.window(),x,y)==0);
+    };
+    open();
+    assert(combo->IsOpen());
+    if(animations) assert(combo->PopupAnimating() && combo->PopupOpacity()<1 && combo->PopupProgress()<1);
+    pump([&]{return !combo->PopupAnimating() && (!animations || animation.stopped);},"Popup entrance");
+    auto bounds=combo->rect, drop=combo->DropdownRect();
+    assert(combo->PopupOpacity()==1 && combo->PopupProgress()==1);
+    if(upward && drop.bottom>bounds.top) {
+        std::cerr<<"Popup geometry: "<<rendered_widget(app,id)<<"; scroll="<<rendered_widget(app,"configListScroll").at("rect")
+                 <<"; viewport="<<ui::Viewport().top<<","<<ui::Viewport().bottom<<"; popup="<<drop.top<<","<<drop.bottom<<'\n';
+        throw std::runtime_error("Expected popup to open upward");
+    }
+    if(animations) assert(animation.frames>1 && !animation.layout);
+    screenshot(app,upward?L"dropdown-up.png":L"dropdown-down.png");
+    animation.stopped=false;
+    assert(ui_debug_key(app.window(),VK_ESCAPE)==0);
+    assert(!combo->IsOpen());
+    if(animations) assert(combo->PopupAnimating() && combo->PopupOpacity()>0);
+    // Reopen during exit; it must resume from its current visual state.
+    open();
+    assert(combo->IsOpen());
+    pump([&]{return !combo->PopupAnimating() && (!animations || animation.stopped);},"Popup reversal");
+    drop=combo->DropdownRect();
+    float x=(drop.left+drop.right)/2,y=drop.top+(combo->SelectedIndex()+0.5f)*combo->ItemHeight();
+    int selected=combo->DropdownItemAt(x,y); assert(selected==combo->SelectedIndex());
+    animation.stopped=false;
+    assert(ui_debug_mouse_down(app.window(),x,y)==0);
+    assert(ui_debug_mouse_up(app.window(),x,y)==0);
+    assert(!combo->IsOpen());
+    pump([&]{return !combo->PopupAnimating() && (!animations || animation.stopped);},"Popup exit");
+    assert(combo->PopupOpacity()==0 && combo->PopupProgress()==0 && !animation.layout);
+    assert(combo->SelectedIndex()==selected);
+    assert(combo->rect.left==bounds.left && combo->rect.right==bounds.right);
 }
 }
 int wmain(int argc,wchar_t** argv) {
@@ -237,7 +285,7 @@ int wmain(int argc,wchar_t** argv) {
                 auto* indicator=ui::GetContext().GetWindow(app.window())->Root()->FindById("navIndicator");
                 assert(indicator->animationY>0);
             }
-            stable_commands("watchReload","reload",Json::array({"watch","reload"}));
+            assert(!ui_widget_find_by_id(ui_page_root(app.page()),"watchReload"));
             auto startup_enabled=state(app.page(),"startup")["enabled"].get<bool>();
             stable_commands("startupToggle",startup_enabled?"startupDisable":"startupEnable",Json::array({"watch","startup",startup_enabled?"disable":"enable"}));
             auto alternate=Json{{"enabled",!startup_enabled},{"command",""}}.dump();
@@ -260,6 +308,14 @@ int wmain(int argc,wchar_t** argv) {
             pump([&]{return state(app.page(),"appearance")=="dark";});
             assert(ui_debug_combo_select(app.window(),theme,0)==0);
             assert(state(app.page(),"appearance")==system_appearance);
+            popup_motion(app,"themeSelector");
+            ui_window_set_size(app.window(),850,560); ui_window_relayout(app.window());
+            auto popup_scroll=ui_widget_find_by_id(ui_page_root(app.page()),"configListScroll"); assert(popup_scroll);
+            auto viewport=rect(app,"configListScroll"), recursive=rect(app,"select-/recursive_extract");
+            ui_debug_scroll_set(popup_scroll,recursive.top-viewport.bottom+18);
+            popup_motion(app,"select-/recursive_extract",true);
+            ui_debug_scroll_set(popup_scroll,0); ui_widget_destroy(popup_scroll);
+            ui_window_set_size(app.window(),1120,720); ui_window_relayout(app.window());
             // FindById reuses Application's owned theme handle, rather than
             // adding a reference. Its owner releases it during locale changes.
             // Native enum control writes a constrained value inline.
@@ -416,6 +472,13 @@ int wmain(int argc,wchar_t** argv) {
             assert(state(app.page(),"passwords")["rows"][0]["scopes"]==utf8(pending_root.wstring()));
             for(int i=0;i<14;++i) ui_debug_type_char(app.window(),8);
             pump([&]{return state(app.page(),"passwords")["total"]==5;});
+            ui_window_relayout(app.window());
+            auto saved_rows=state(app.page(),"passwords")["rows"];
+            for(auto& entry:saved_rows) {
+                auto id=entry["id"].get<std::string>();
+                auto row=rect(app,"password-"+id), edit=rect(app,"edit-password-"+id);
+                assert(std::abs((row.top+row.bottom-1)/2-(edit.top+edit.bottom)/2)<=1);
+            }
             screenshot(app,L"passwords-unified.png");
             atomic_write(dir/".sunpack_watch"/"events.jsonl",Json({{"event","failed_password"},{"path",utf8((dir/"carrier.001").wstring())}}).dump()+"\n");
             try { pump([&]{return state(app.page(),"tasks")["rows"][0]["status"]=="挂起：等待密码";}); }
@@ -442,7 +505,24 @@ int wmain(int argc,wchar_t** argv) {
             ui_debug_scroll_set(config_scroll,100000); ui_window_relayout(app.window()); button_texts(app);
             auto startup_after=rect(app,"startupToggle");
             assert(startup_before.right-startup_before.left==startup_after.right-startup_after.left);
-            ui_debug_scroll_set(config_scroll,0); ui_debug_wheel(app.window(),config_scroll,-1200); ui_debug_pump(); button_texts(app);
+            ui_debug_scroll_set(config_scroll,0);
+            // Inspect the actual wheel result before any forced relayout can
+            // repair a width computed without the window's text measurer.
+            ui_debug_wheel(app.window(),config_scroll,-120);
+            auto startup_wheel=rect(app,"startupToggle");
+            if(std::abs((startup_before.right-startup_before.left)-(startup_wheel.right-startup_wheel.left))>0.1f)
+                throw std::runtime_error("Wheel changed startup button width");
+            button_texts(app,false);
+            ui_debug_wheel(app.window(),config_scroll,120);
+            button_texts(app,false);
+            auto scroll_bounds=rect(app,"configListScroll");
+            float bar_x=scroll_bounds.right-4,bar_y=scroll_bounds.top+8;
+            ui_debug_mouse_down(app.window(),bar_x,bar_y);
+            ui_debug_mouse_move(app.window(),bar_x,bar_y+12);
+            ui_debug_mouse_up(app.window(),bar_x,bar_y+12);
+            auto startup_drag=rect(app,"startupToggle");
+            assert(std::abs((startup_before.right-startup_before.left)-(startup_drag.right-startup_drag.left))<0.1f);
+            button_texts(app,false);
             ui_debug_scroll_set(config_scroll,0); ui_widget_destroy(config_scroll); ui_window_relayout(app.window());
             for(auto pair:{std::pair<const char*,const char*>{"categoryScroll","category-cli"},{"configListScroll","field-/cli/language"}}) {
                 auto scroll=ui_widget_find_by_id(ui_page_root(app.page()),pair.first);
@@ -511,6 +591,7 @@ int wmain(int argc,wchar_t** argv) {
             auto history_rows=state(app.page(),"passwords")["rows"];
             for(auto& entry:history_rows) {
                 auto bounds=rect(app,"password-"+entry["id"].get<std::string>());
+                if(bounds.bottom-bounds.top>44) std::cerr<<"History row: "<<rendered_widget(app,"password-"+entry["id"].get<std::string>())<<'\n';
                 assert(bounds.bottom-bounds.top<=44);
                 if(bounds.top>=history_view.top && bounds.bottom<=history_view.bottom) ++visible;
             }

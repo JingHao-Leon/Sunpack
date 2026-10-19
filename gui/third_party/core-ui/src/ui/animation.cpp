@@ -27,9 +27,9 @@ void AnimatedFloat::Retarget(float value) {
 }
 
 void AnimatedFloat::Retarget(float value, const AnimationSpec& spec) {
-    spec_ = spec;
     if (target_ == value && active_) return;
     if (target_ == value && !active_) {
+        spec_ = spec;
         current_ = value;
         start_ = value;
         startTick_ = 0;
@@ -38,6 +38,7 @@ void AnimatedFloat::Retarget(float value, const AnimationSpec& spec) {
     // Retarget from the current visual position, including rapid reversals.
     auto now = AnimationClockMs();
     Sample(now);
+    spec_ = spec; // Sample the old curve before changing direction/duration.
     target_ = value;
     start_ = current_;
     startTick_ = now;

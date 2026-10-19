@@ -1175,6 +1175,10 @@ void UiWindowImpl::UpdateToggleAnimTimer() {
             if (cb && cb->animating_) {
                 needsWidgetTimer = true;
             }
+            auto* combo = dynamic_cast<ComboBoxWidget*>(w);
+            if (combo && combo->PopupAnimating()) {
+                needsWidgetTimer = true;
+            }
             auto* rb = dynamic_cast<RadioButtonWidget*>(w);
             if (rb && rb->animating_) {
                 needsWidgetTimer = true;
@@ -2152,6 +2156,12 @@ void UiWindowImpl::BeginAnimationFrame() {
             ticked = true;
             if (cb->animating_) keep = true;
         }
+        auto* combo = dynamic_cast<ComboBoxWidget*>(w);
+        if (combo && combo->PopupAnimating()) {
+            combo->UpdateAnimation();
+            ticked = true;
+            if (combo->PopupAnimating()) keep = true;
+        }
         auto* rb = dynamic_cast<RadioButtonWidget*>(w);
         if (rb && rb->animating_) {
             rb->UpdateAnimation();
@@ -2795,8 +2805,8 @@ void UiWindowImpl::OnMouseDown(float x, float y) {
 
             if (inDropdown) {
                 cb->SetSelectedIndex(dropdownIndex);
-                if (cb->onSelectionChanged) cb->onSelectionChanged(dropdownIndex);
                 cb->Close();
+                if (cb->onSelectionChanged) cb->onSelectionChanged(dropdownIndex);
                 handledByDropdown = true;
             } else if (inCombo) {
                 cb->Close();
@@ -3108,7 +3118,9 @@ void UiWindowImpl::OnMouseWheel(float x, float y, int delta) {
             else if (auto* sv = dynamic_cast<ScrollViewWidget*>(w)) {
                 if (sv->visible) {
                     handled = sv->OnMouseWheel(e);
-                    if (handled) sv->DoLayout();
+                    // ScrollView already shifts its arranged subtree. A second
+                    // layout here runs outside ActiveMeasureContextScope and
+                    // replaces measured CJK button widths with ASCII estimates.
                 }
             }
         }

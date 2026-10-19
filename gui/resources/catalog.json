@@ -228,10 +228,6 @@
       "zh": "程序配置",
       "en": "Program settings"
     },
-    "reload": {
-      "zh": "重载监控配置",
-      "en": "Reload Watch settings"
-    },
     "settingSearch": {
       "zh": "搜索配置名称或说明",
       "en": "Search settings and descriptions"

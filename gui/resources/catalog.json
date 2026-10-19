@@ -148,10 +148,6 @@
       "zh": "深度检测",
       "en": "Deep detection"
     },
-    "saveRoot": {
-      "zh": "保存目录",
-      "en": "Save folder"
-    },
     "deleteRoot": {
       "zh": "删除目录",
       "en": "Remove folder"
@@ -248,14 +244,6 @@
       "zh": "没有匹配的配置。",
       "en": "No matching settings."
     },
-    "save": {
-      "zh": "保存",
-      "en": "Save"
-    },
-    "saved": {
-      "zh": "已保存",
-      "en": "Saved"
-    },
     "saving": {
       "zh": "正在保存…",
       "en": "Saving…"
@@ -315,10 +303,6 @@
     "deletePassword": {
       "zh": "删除密码",
       "en": "Delete password"
-    },
-    "savePasswords": {
-      "zh": "保存密码",
-      "en": "Save passwords"
     },
     "entries": {
       "zh": "条",
@@ -455,6 +439,46 @@
     "runtimeUnknown": {
       "zh": "状态未知",
       "en": "Status unavailable"
+    },
+    "saveChanges": {
+      "zh": "保存更改",
+      "en": "Save changes"
+    },
+    "discardChanges": {
+      "zh": "放弃更改",
+      "en": "Discard changes"
+    },
+    "pendingChanges": {
+      "zh": "项待保存",
+      "en": "pending changes"
+    },
+    "noChanges": {
+      "zh": "没有未保存的更改",
+      "en": "No unsaved changes"
+    },
+    "finishEditing": {
+      "zh": "完成编辑",
+      "en": "Done editing"
+    },
+    "addToList": {
+      "zh": "添加到列表",
+      "en": "Add to list"
+    },
+    "partialSave": {
+      "zh": "部分更改已保存，其余更改仍待保存：",
+      "en": "Some changes were saved. Remaining changes are still pending: "
+    },
+    "rootConflict": {
+      "zh": "此监控目录已被其他程序修改，请放弃更改后重新编辑。",
+      "en": "This monitored folder changed in another program. Discard changes and edit it again."
+    },
+    "configConflict": {
+      "zh": "配置已在外部删除，请放弃更改后重新编辑。",
+      "en": "A setting was removed externally. Discard changes and edit it again."
+    },
+    "closeUnsaved": {
+      "zh": "还有未保存的更改。关闭窗口将放弃这些更改，是否关闭？",
+      "en": "There are unsaved changes. Closing this window will discard them. Close anyway?"
     }
   },
   "groups": {

@@ -6,6 +6,20 @@
 using namespace spg;
 namespace {
 Json state(UiPage page,const char* key) { char* text=ui_page_get_json(page,key); if(!text) throw std::runtime_error(std::string("UI state unavailable: ")+key); auto j=parse_json(text); ui_page_free(text); return j; }
+UiRect rect(Application& app,const std::string& id) {
+    auto widget=ui_widget_find_by_id(ui_page_root(app.page()),id.c_str()); assert(widget);
+    auto result=ui_widget_get_rect(widget); ui_widget_destroy(widget); return result;
+}
+Json rendered_widget(Application& app,const std::string& id) {
+    char* dump=ui_debug_dump_tree(app.window()); assert(dump);
+    auto tree=parse_json(dump); ui_debug_free(dump);
+    std::function<const Json*(const Json&)> find=[&](const Json& node)->const Json* {
+        if(node.value("id",std::string())==id) return &node;
+        if(node.contains("children")) for(auto& child:node["children"]) if(auto* result=find(child)) return result;
+        return nullptr;
+    };
+    auto* found=find(tree); assert(found); return *found;
+}
 void pump(const std::function<bool()>& condition) {
     auto deadline=GetTickCount64()+10000;
     for(;;) {
@@ -31,6 +45,12 @@ void click(Application& app,const char* id) {
     assert(ui_debug_widget_is_visible(widget)==1);
     assert(ui_debug_click(app.window(),widget)==0);
     ui_widget_destroy(widget);
+}
+void save(Application& app) {
+    auto generation=state(app.page(),"saveGeneration").get<int>();
+    click(app,"saveAll");
+    pump([&]{return state(app.page(),"saveGeneration").get<int>()>generation && state(app.page(),"saving")==false;});
+    if(state(app.page(),"saveError")!="") throw std::runtime_error(state(app.page(),"saveError").get<std::string>());
 }
 void screenshot(Application& app,const wchar_t* name) {
     wchar_t path[32768];
@@ -67,6 +87,8 @@ int wmain(int argc,wchar_t** argv) {
             if(SUCCEEDED(DwmGetWindowAttribute(static_cast<HWND>(ui_window_hwnd(app.window())),DWMWA_TRANSITIONS_FORCEDISABLED,&disabled,sizeof(disabled)))) assert(!disabled);
             std::cerr<<"Initial files loaded\n";
             assert(state(app.page(),"tasks")["total"]==1);
+            assert(state(app.page(),"changeCount")==0);
+            assert(rendered_widget(app,"saveAll").value("enabled",true)==false);
             auto error=ui_page_last_error(app.page()); if(error && *error) std::cerr<<error<<"\n";
             screenshot(app,L"tasks.png");
             click(app,"watchStart");
@@ -132,17 +154,23 @@ int wmain(int argc,wchar_t** argv) {
             // Native enum control writes a constrained value inline.
             auto priority=ui_widget_find_by_id(ui_page_root(app.page()),"select-/runtime/process_mode"); assert(priority);
             assert(ui_debug_combo_select(app.window(),priority,2)==0);
+            assert(state(app.page(),"changeCount")==1);
+            assert(ui_debug_combo_select(app.window(),priority,1)==0);
+            assert(state(app.page(),"changeCount")==0);
+            assert(ui_debug_combo_select(app.window(),priority,2)==0);
             ui_widget_destroy(priority);
-            click(app,"save-/runtime/process_mode");
+            assert(read_json(dir/"sunpack_config.json")["runtime"]["process_mode"]=="normal");
+            save(app);
             pump([&]{return read_json(dir/"sunpack_config.json")["runtime"]["process_mode"]=="high";});
             ui_page_set_text(app.page(),"configQuery",L"toast_enabled");
             auto toast=ui_widget_find_by_id(ui_page_root(app.page()),"toggle-/watch/toast_enabled"); assert(toast);
             assert(ui_debug_toggle_set(app.window(),toast,0)==0);
             ui_widget_destroy(toast);
-            click(app,"save-/watch/toast_enabled");
+            click(app,"saveAll");
             click(app,"tabTasks"); // Rapid navigation must not overwrite the save command.
             pump([&]{return read_json(dir/"sunpack_config.json")["watch"]["toast_enabled"]==false;});
             pump([&]{return state(app.page(),"tab")=="tasks";});
+            pump([&]{return state(app.page(),"saving")==false;});
             click(app,"tabConfig"); pump([&]{return state(app.page(),"tab")=="config";});
             ui_page_set_text(app.page(),"configQuery",L"");
             click(app,"configSearch"); ui_debug_type_text(app.window(),L"out_dir");
@@ -154,15 +182,16 @@ int wmain(int argc,wchar_t** argv) {
             ui_widget_destroy(output);
             assert(state(app.page(),"drafts")["/watch/out_dir"]["text"]=="输出目录");
             screenshot(app,L"configuration-inline-small.png");
-            click(app,"save-/watch/out_dir");
+            auto generation=state(app.page(),"saveGeneration").get<int>();
+            click(app,"saveAll");
             // More typing can arrive before the queued dispatch/save completes.
             // Saving must keep that newer draft instead of clearing it.
             click(app,"input-/watch/out_dir"); ui_debug_type_text(app.window(),L"后续");
             try { pump([&]{return read_json(dir/"sunpack_config.json")["watch"]["out_dir"]=="输出目录";}); }
-            catch(...) { std::cerr<<"Save config: "<<state(app.page(),"settingError")<<"\n"; throw; }
-            pump([&]{return state(app.page(),"savedField")=="/watch/out_dir";});
+            catch(...) { std::cerr<<"Save config: "<<state(app.page(),"saveError")<<"\n"; throw; }
+            pump([&]{return state(app.page(),"saveGeneration").get<int>()>generation;});
             assert(state(app.page(),"drafts")["/watch/out_dir"]["text"]=="输出目录后续");
-            click(app,"save-/watch/out_dir");
+            save(app);
             pump([&]{return read_json(dir/"sunpack_config.json")["watch"]["out_dir"]=="输出目录后续";});
             pump([&]{return !state(app.page(),"drafts").contains("/watch/out_dir");});
             // Keep unsaved input when an external writer changes the same field;
@@ -172,9 +201,10 @@ int wmain(int argc,wchar_t** argv) {
             ui_widget_destroy(output);
             auto changed=read_json(dir/"sunpack_config.json"); changed["watch"]["out_dir"]="external"; atomic_write(dir/"sunpack_config.json",changed.dump());
             pump([&]{for(auto& field:state(app.page(),"fields")) if(field["id"]=="/watch/out_dir") return field["text"]=="external"; return false;});
-            click(app,"save-/watch/out_dir"); pump([&]{return state(app.page(),"settingError").value("id",std::string())=="/watch/out_dir";});
+            click(app,"saveAll"); pump([&]{return state(app.page(),"saveError")!="";});
             assert(read_json(dir/"sunpack_config.json")["watch"]["out_dir"]=="external");
             assert(state(app.page(),"drafts")["/watch/out_dir"]["text"]=="unsaved");
+            click(app,"discardAll");
             // External language replacement updates visible and generated controls.
             auto conf=read_json(dir/"sunpack_config.json"); conf["cli"]["language"]="en"; atomic_write(dir/"sunpack_config.json",conf.dump());
             pump([&]{return state(app.page(),"language")=="en";});
@@ -185,7 +215,7 @@ int wmain(int argc,wchar_t** argv) {
             auto language=ui_widget_find_by_id(ui_page_root(app.page()),"select-/cli/language"); assert(language);
             assert(ui_debug_combo_select(app.window(),language,0)==0);
             ui_widget_destroy(language);
-            click(app,"save-/cli/language");
+            save(app);
             pump([&]{return state(app.page(),"language")=="zh";});
             ui_window_set_size(app.window(),1120,720);
             click(app,"tabPasswords"); pump([&]{return state(app.page(),"tab")=="passwords";});
@@ -196,7 +226,9 @@ int wmain(int argc,wchar_t** argv) {
             assert(state(app.page(),"passwordValue")=="添加的密码\n  #批量  \n\n添加的密码");
             screenshot(app,L"passwords.png");
             ui_window_set_size(app.window(),850,560);
-            screenshot(app,L"password-editor-small.png"); click(app,"savePassword");
+            screenshot(app,L"password-editor-small.png");
+            assert(read_json(dir/"builtin_passwords.json")["passwords"].size()==1);
+            save(app);
             try { pump([&]{return read_json(dir/"builtin_passwords.json")["passwords"].size()==3;}); }
             catch(...) { std::cerr<<"Save password: "<<state(app.page(),"actionError")<<"\n"; throw; }
             assert(read_json(dir/"builtin_passwords.json")["passwords"][2]["value"]=="  #批量  ");
@@ -204,6 +236,33 @@ int wmain(int argc,wchar_t** argv) {
             try { pump([&]{return state(app.page(),"passwords")["total"]==3;}); }
             catch(...) { std::cerr<<"Password model: "<<state(app.page(),"passwords")<<" errors="<<state(app.page(),"errors")<<"\n"; throw; }
             std::cerr<<"Password model updated\n";
+            // One save spans config, multiple password edits, and a watched folder.
+            auto pending_root=dir/L"pending-root"; fs::create_directory(pending_root);
+            auto disk_roots=read_file(dir/"sunpack_watch_roots.txt");
+            click(app,"tabTasks"); pump([&]{return state(app.page(),"tab")=="tasks";});
+            click(app,"newRoot"); click(app,"rootInput"); ui_debug_type_text(app.window(),pending_root.c_str());
+            click(app,"finishRoot"); pump([&]{return state(app.page(),"rootEdits").size()==1 && state(app.page(),"staging")==false;});
+            assert(read_file(dir/"sunpack_watch_roots.txt")==disk_roots);
+            click(app,"tabPasswords"); pump([&]{return state(app.page(),"tab")=="passwords";});
+            click(app,"newPassword"); click(app,"passwordValue"); ui_debug_type_text(app.window(),L"pending scoped");
+            click(app,"passwordScopes"); ui_debug_type_text(app.window(),pending_root.c_str());
+            click(app,"finishPassword"); pump([&]{return state(app.page(),"passwordEdits").size()==1 && state(app.page(),"staging")==false;});
+            click(app,"newPassword"); click(app,"passwordValue"); ui_debug_type_text(app.window(),L"pending global");
+            click(app,"tabConfig"); pump([&]{return state(app.page(),"tab")=="config";});
+            ui_page_set_text(app.page(),"configQuery",L"out_dir");
+            output=ui_widget_find_by_id(ui_page_root(app.page()),"input-/watch/out_dir"); ui_text_input_set_text(output,L""); ui_widget_destroy(output);
+            click(app,"input-/watch/out_dir"); ui_debug_type_text(app.window(),L"batch-output");
+            assert(state(app.page(),"changeCount")==4);
+            auto background=read_json(dir/"builtin_passwords.json"); assert(background["passwords"].size()==3);
+            background["clipboard_history"].push_back("external while editing"); atomic_write(dir/"builtin_passwords.json",background.dump());
+            screenshot(app,L"global-pending-save.png");
+            save(app);
+            assert(state(app.page(),"changeCount")==0);
+            assert(read_json(dir/"sunpack_config.json")["watch"]["out_dir"]=="batch-output");
+            assert(read_roots(dir/"sunpack_watch_roots.txt").entries.size()==2);
+            auto committed=read_json(dir/"builtin_passwords.json"); assert(committed["passwords"].size()==5);
+            assert(committed["passwords"][3]["scopes"][0]==utf8(pending_root.wstring()));
+            assert(committed["clipboard_history"].back()=="external while editing");
             atomic_write(dir/".sunpack_watch"/"events.jsonl",Json({{"event","failed_password"},{"path",utf8((dir/"carrier.001").wstring())}}).dump()+"\n");
             try { pump([&]{return state(app.page(),"tasks")["rows"][0]["status"]=="挂起：等待密码";}); }
             catch(...) { std::cerr<<"Log model: "<<state(app.page(),"tasks")<<" errors="<<state(app.page(),"errors")<<"\n"; throw; }
@@ -242,6 +301,66 @@ int wmain(int argc,wchar_t** argv) {
             }
             ui_widget_destroy(block);
             screenshot(app,L"whitelist-block-small.png");
+            // Dense views must remain usable with many folders/history items,
+            // including after the directory scrollbar becomes active.
+            std::string many_roots=utf8(dir.wstring())+"\n";
+            for(int i=0;i<72;++i) many_roots+=utf8((dir/(L"Archive folder "+std::to_wstring(i))).wstring())+"\n";
+            atomic_write(dir/"sunpack_watch_roots.txt",many_roots);
+            pump([&]{size_t count=0; for(auto& d:state(app.page(),"directories")) if(d["watch"]==true) ++count; return count==73;});
+            click(app,"tabTasks"); pump([&]{return state(app.page(),"tab")=="tasks";});
+            ui_window_relayout(app.window());
+            auto pane_rect=rect(app,"directoryPane"), list_rect=rect(app,"directoryListScroll");
+            assert(list_rect.bottom-list_rect.top>(pane_rect.bottom-pane_rect.top)*0.5f);
+            auto button_before=rect(app,"newRoot");
+            auto list=ui_widget_find_by_id(ui_page_root(app.page()),"directoryListScroll");
+            assert(ui_debug_scroll_set(list,100000)==0); ui_widget_destroy(list); ui_window_relayout(app.window());
+            auto button_after=rect(app,"newRoot");
+            assert(button_before.left==button_after.left && button_before.right==button_after.right && button_before.top==button_after.top);
+            auto button_info=rendered_widget(app,"newRoot");
+            assert(button_info["textWidth"].get<float>()<=button_info["availWidth"].get<float>());
+            click(app,"moreDirectories"); assert(state(app.page(),"shownDirectories").size()==73);
+            list=ui_widget_find_by_id(ui_page_root(app.page()),"directoryListScroll");
+            assert(ui_debug_scroll_set(list,0)==0); ui_widget_destroy(list); ui_window_relayout(app.window());
+            size_t visible=0;
+            for(auto& directory:state(app.page(),"shownDirectories")) {
+                auto bounds=rect(app,"directory-"+directory["id"].get<std::string>());
+                if(bounds.top>=list_rect.top && bounds.bottom<=list_rect.bottom) ++visible;
+            }
+            assert(visible>=5);
+            screenshot(app,L"directories-small.png");
+            auto first=state(app.page(),"shownDirectories")[1];
+            click(app,("directory-"+first["id"].get<std::string>()).c_str());
+            pump([&]{return state(app.page(),"tasks")["total"]==0;});
+            assert(state(app.page(),"chosenDirectory")["path"]==first["path"]);
+            click(app,"editSelectedRoot");
+            assert(state(app.page(),"rootInput")==first["path"]);
+            click(app,"closeRootEditor"); click(app,"allRoots");
+            click(app,"newRoot"); assert(state(app.page(),"rootEditor")==true);
+            click(app,"closeRootEditor");
+            ui_window_set_size(app.window(),1120,720); screenshot(app,L"directories.png");
+            auto history=read_json(dir/"builtin_passwords.json"); history["clipboard_history"]=Json::array();
+            for(int i=0;i<30;++i) history["clipboard_history"].push_back("candidate-"+std::to_string(i));
+            history["clipboard_history"][0]="  #history value  ";
+            atomic_write(dir/"builtin_passwords.json",history.dump());
+            click(app,"tabPasswords"); pump([&]{return state(app.page(),"tab")=="passwords";});
+            click(app,"clipboardHistory"); pump([&]{return state(app.page(),"passwords")["total"]==30;});
+            ui_window_set_size(app.window(),850,560); ui_window_relayout(app.window());
+            auto history_view=rect(app,"passwordListScroll"); visible=0;
+            auto history_rows=state(app.page(),"passwords")["rows"];
+            for(auto& entry:history_rows) {
+                auto bounds=rect(app,"password-"+entry["id"].get<std::string>());
+                assert(bounds.bottom-bounds.top<=44);
+                if(bounds.top>=history_view.top && bounds.bottom<=history_view.bottom) ++visible;
+            }
+            assert(visible>=6);
+            auto copy_info=rendered_widget(app,"copy-history-0");
+            assert(copy_info["textWidth"].get<float>()<=copy_info["availWidth"].get<float>());
+            screenshot(app,L"clipboard-history-small.png");
+            click(app,"copy-history-0");
+            assert(state(app.page(),"passwordValue")=="  #history value  ");
+            assert(state(app.page(),"passwordOriginal")=="");
+            assert(read_json(dir/"builtin_passwords.json")["clipboard_history"]==history["clipboard_history"]);
+            click(app,"discardAll");
             PostMessageW(static_cast<HWND>(ui_window_hwnd(app.window())),WM_CLOSE,0,0);
             pump([&]{return !IsWindow(static_cast<HWND>(ui_window_hwnd(app.window())));});
         }

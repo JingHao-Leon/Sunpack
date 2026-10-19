@@ -164,25 +164,48 @@ void validate_passwords(const Json& j) {
         for (auto& item : j["clipboard_history"]) check_text(item);
     }
 }
-void save_config_field(const fs::path& p, const std::string& pointer, const std::string& original,
-    const std::string& type, const std::string& text, bool boolean) {
-    FileMutex lock(p);
-    auto source=read_file(p); Json j=parse_json(source); JsonTokens tokens(source);
-    Json::json_pointer target(pointer);
-    if (!j.contains(target) || tokens.token(pointer) != original) throw std::runtime_error("该字段已被外部修改，请重新选择后保存");
-    Json replacement = type == "string" ? Json(text) : type == "boolean" ? Json(boolean) : parse_json(text);
-    if ((type == "number" && !replacement.is_number()) || (type == "array" && !replacement.is_array()) ||
-        (type == "object" && !replacement.is_object())) throw std::runtime_error("输入类型与字段类型不一致");
-    std::string module;
-    auto parent=pointer.substr(0,pointer.find_last_of('/'));
-    if(j.contains(Json::json_pointer(parent))) {
-        const auto& owner=j.at(Json::json_pointer(parent));
-        if(owner.is_object() && owner.contains("name") && owner["name"].is_string()) module=owner["name"].get<std::string>();
+namespace {
+struct ConfigEditError:std::runtime_error {
+    std::string pointer;
+    ConfigEditError(std::string pointer,const std::string& message):std::runtime_error(message),pointer(std::move(pointer)) {}
+};
+}
+static std::string patch_config(std::string source,const Json& edits) {
+    Json j=parse_json(source); JsonTokens tokens(source);
+    struct Change { size_t start,length; std::string value; };
+    std::vector<Change> changes;
+    for(auto& edit:edits) {
+        std::string pointer=edit.at("pointer"), original=edit.at("original"), type=edit.at("type"), text=edit.at("text");
+        bool boolean=edit.at("boolean");
+        try {
+        Json::json_pointer target(pointer);
+        if (!j.contains(target) || tokens.token(pointer) != original) throw std::runtime_error("该字段已被外部修改，请重新选择后保存");
+        Json replacement = type == "string" ? Json(text) : type == "boolean" ? Json(boolean) : parse_json(text);
+        if ((type == "number" && !replacement.is_number()) || (type == "array" && !replacement.is_array()) ||
+            (type == "object" && !replacement.is_object())) throw std::runtime_error("输入类型与字段类型不一致");
+        std::string module;
+        auto parent=pointer.substr(0,pointer.find_last_of('/'));
+        if(j.contains(Json::json_pointer(parent))) {
+            const auto& owner=j.at(Json::json_pointer(parent));
+            if(owner.is_object() && owner.contains("name") && owner["name"].is_string()) module=owner["name"].get<std::string>();
+        }
+        validate_setting(pointer,replacement,module);
+        auto range=tokens.ranges.at(pointer);
+        changes.push_back({range.first,range.second,type=="string" || type=="boolean"?replacement.dump():text});
+        } catch(const std::exception& error) { throw ConfigEditError(pointer,error.what()); }
     }
-    validate_setting(pointer,replacement,module);
-    auto range=tokens.ranges.at(pointer);
-    source.replace(range.first,range.second,type=="string" || type=="boolean"?replacement.dump():text);
-    atomic_write(p,source);
+    std::sort(changes.begin(),changes.end(),[](const Change& a,const Change& b){return a.start>b.start;});
+    size_t boundary=source.size();
+    for(auto& change:changes) {
+        if(change.start+change.length>boundary) throw std::runtime_error("validation");
+        source.replace(change.start,change.length,change.value); boundary=change.start;
+    }
+    return source;
+}
+void save_config_field(const fs::path& p,const std::string& pointer,const std::string& original,
+    const std::string& type,const std::string& text,bool boolean) {
+    FileMutex lock(p);
+    atomic_write(p,patch_config(read_file(p),Json::array({Json{{"pointer",pointer},{"original",original},{"type",type},{"text",text},{"boolean",boolean}}})));
 }
 void upgrade_config_file(const fs::path& path) {
     FileMutex lock(path);
@@ -222,10 +245,8 @@ void upgrade_config_file(const fs::path& path) {
     }
     if(changed) { parse_json(source); atomic_write(path,source); }
 }
-void edit_password(const fs::path& p, const std::string& op, const Json& original,
+static void patch_password(Json& j, const std::string& op, const Json& original,
     const Json& replacement, const std::string& scope) {
-    FileMutex lock(p);
-    Json j = read_json(p); validate_passwords(j);
     auto& records = j["passwords"];
     if (op == "add") records.push_back(replacement);
     else if(op=="addMany") {
@@ -253,7 +274,26 @@ void edit_password(const fs::path& p, const std::string& op, const Json& origina
         else throw std::runtime_error("未知密码操作");
     }
     validate_passwords(j);
-    atomic_write(p, j.dump(2) + "\n");
+}
+void edit_password(const fs::path& p,const std::string& op,const Json& original,const Json& replacement,const std::string& scope) {
+    FileMutex lock(p); auto document=read_json(p); validate_passwords(document);
+    patch_password(document,op,original,replacement,scope); atomic_write(p,document.dump(2)+"\n");
+}
+Json apply_password_changes(Json document,const Json& edits) {
+    validate_passwords(document);
+    for(auto& edit:edits) {
+        Json replacement={{"value",edit.value("value",std::string())}};
+        auto scopes=edit.value("scopes",Json::array()); if(!scopes.empty()) replacement["scopes"]=scopes;
+        auto op=edit.at("operation").get<std::string>();
+        if(op=="addMany") {
+            Json batch=Json::array();
+            for(auto& value:edit.at("values")) { auto record=replacement; record["value"]=value; batch.push_back(std::move(record)); }
+            replacement=std::move(batch);
+        }
+        auto original=edit.value("original",std::string());
+        patch_password(document,op,original.empty()?Json():parse_json(original),replacement,edit.value("scope",std::string()));
+    }
+    return document;
 }
 WatchRoots parse_roots(const std::string& raw, const fs::path& base) {
     WatchRoots result; std::unordered_map<std::wstring,size_t> positions;
@@ -285,30 +325,62 @@ WatchRoots read_roots(const fs::path& p) {
     if (!fs::exists(p)) return {};
     return parse_roots(read_file(p),p.parent_path());
 }
-void edit_root(const fs::path& p, const std::string& op, const std::string& original,
-    const std::string& input, const std::string& output, bool deep) {
-    FileMutex lock(p,L"SunPackWatchRoots");
-    auto roots = read_roots(p);
-    auto path = resolve_path(wide(input),p.parent_path());
-    if (input.empty() || input.find_first_of("|\r\n") != std::string::npos || output.find_first_of("|\r\n") != std::string::npos)
-        throw std::runtime_error("目录不能为空且不能包含分隔符或换行");
-    if (op!="delete" && !fs::is_directory(path)) throw std::runtime_error("监控目录必须是已存在的文件夹");
-    auto previous = original.empty()?std::wstring():path_key(wide(original));
-    auto it=std::find_if(roots.entries.begin(),roots.entries.end(),[&](auto& r){return path_key(r.input)==previous;});
-    if (!original.empty() && it==roots.entries.end()) throw std::runtime_error("监控目录已被外部删除");
-    if (op=="delete") { if(it!=roots.entries.end()) roots.entries.erase(it); }
-    else {
-        auto key=path_key(path);
-        auto duplicate=std::find_if(roots.entries.begin(),roots.entries.end(),[&](auto& r){return path_key(r.input)==key;});
-        if (duplicate!=roots.entries.end() && duplicate!=it) throw std::runtime_error("监控目录已存在");
-        WatchRoot replacement{path,trim(output),deep};
-        if(it==roots.entries.end()) roots.entries.push_back(replacement); else *it=replacement;
+WatchRoots apply_root_changes(WatchRoots roots,const fs::path& base,const Json& edits) {
+    for(auto& edit:edits) {
+        std::string op=edit.at("operation"), original=edit.value("original",std::string()), input=edit.at("input"), output=edit.at("output");
+        bool deep=edit.at("deep");
+        auto path = resolve_path(wide(input),base);
+        if (input.empty() || input.find_first_of("|\r\n") != std::string::npos || output.find_first_of("|\r\n") != std::string::npos)
+            throw std::runtime_error("目录不能为空且不能包含分隔符或换行");
+        if (op!="delete" && !fs::is_directory(path)) throw std::runtime_error("监控目录必须是已存在的文件夹");
+        auto previous = original.empty()?std::wstring():path_key(wide(original));
+        auto it=std::find_if(roots.entries.begin(),roots.entries.end(),[&](auto& r){return path_key(r.input)==previous;});
+        if (!original.empty() && it==roots.entries.end()) throw std::runtime_error("监控目录已被外部删除");
+        if(!original.empty() && edit.contains("expected") && !edit["expected"].is_null() &&
+            (it->output!=edit["expected"].value("output",std::string()) || it->deep!=edit["expected"].value("deep",false)))
+            throw std::runtime_error("rootConflict");
+        if (op=="delete") { if(it!=roots.entries.end()) roots.entries.erase(it); }
+        else {
+            auto key=path_key(path);
+            auto duplicate=std::find_if(roots.entries.begin(),roots.entries.end(),[&](auto& r){return path_key(r.input)==key;});
+            if (duplicate!=roots.entries.end() && duplicate!=it) throw std::runtime_error("监控目录已存在");
+            WatchRoot replacement{path,trim(output),deep};
+            if(it==roots.entries.end()) roots.entries.push_back(replacement); else *it=replacement;
+        }
     }
+    return roots;
+}
+static std::string roots_text(const WatchRoots& roots) {
     std::string content;
     for(auto& c:roots.comments) content+=c+"\n";
     for(auto& r:roots.entries) content+=utf8(r.input.wstring())+
         (r.deep?" | "+r.output+" | true":r.output.empty()?"":" | "+r.output)+"\n";
-    atomic_write(p,content);
+    return content;
+}
+void edit_root(const fs::path& p,const std::string& op,const std::string& original,const std::string& input,const std::string& output,bool deep) {
+    FileMutex lock(p,L"SunPackWatchRoots");
+    atomic_write(p,roots_text(apply_root_changes(read_roots(p),p.parent_path(),Json::array({Json{{"operation",op},{"original",original},{"input",input},{"output",output},{"deep",deep}}}))));
+}
+Json save_changes(const fs::path& dir,const Json& fields,const Json& passwords,const Json& roots) {
+    Json result={{"saved",Json::array()},{"error",""},{"section",""}};
+    struct Write { std::string section; fs::path path; std::string text; };
+    std::vector<Write> writes;
+    std::unique_ptr<FileMutex> config_lock,password_lock,roots_lock;
+    std::string section;
+    try {
+        // Fixed acquisition order; runtime writers acquire only their own file.
+        if(!fields.empty()) config_lock=std::make_unique<FileMutex>(dir/"sunpack_config.json");
+        if(!passwords.empty()) password_lock=std::make_unique<FileMutex>(dir/"builtin_passwords.json");
+        if(!roots.empty()) roots_lock=std::make_unique<FileMutex>(dir/"sunpack_watch_roots.txt",L"SunPackWatchRoots");
+        if(!fields.empty()) { section="config"; auto path=dir/"sunpack_config.json"; writes.push_back({section,path,patch_config(read_file(path),fields)}); }
+        if(!passwords.empty()) { section="passwords"; auto path=dir/"builtin_passwords.json"; writes.push_back({section,path,apply_password_changes(read_json(path),passwords).dump(2)+"\n"}); }
+        if(!roots.empty()) { section="roots"; auto path=dir/"sunpack_watch_roots.txt"; writes.push_back({section,path,roots_text(apply_root_changes(read_roots(path),dir,roots))}); }
+        for(auto& write:writes) {
+            section=write.section; atomic_write(write.path,write.text); result["saved"].push_back(section);
+        }
+    } catch(const ConfigEditError& error) { result["error"]=error.what(); result["section"]=section; result["field"]=error.pointer; }
+    catch(const std::exception& error) { result["error"]=error.what(); result["section"]=section; }
+    return result;
 }
 std::string root_for(const fs::path& path,const WatchRoots& roots) {
     return indexed_root(path_key(path),index_roots(roots));

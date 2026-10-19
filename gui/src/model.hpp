@@ -21,6 +21,11 @@ WatchRoots parse_roots(const std::string& text, const fs::path& base);
 WatchRoots read_roots(const fs::path& path);
 void edit_root(const fs::path& path, const std::string& operation, const std::string& original,
     const std::string& input, const std::string& output, bool deep);
+Json apply_password_changes(Json document, const Json& edits);
+WatchRoots apply_root_changes(WatchRoots roots, const fs::path& base, const Json& edits);
+// Preflight every file under the existing locks, then replace each file once.
+// A write failure reports completed sections so remaining drafts can be retried.
+Json save_changes(const fs::path& directory, const Json& fields, const Json& passwords, const Json& roots);
 std::string root_for(const fs::path& path, const WatchRoots& roots);
 struct Task {
     std::string path, status, time;

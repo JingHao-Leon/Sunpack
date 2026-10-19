@@ -151,6 +151,42 @@ void roots(Fixture& f) {
     auto rows=task_rows(log,all,view); assert(rows["total"]==501 && rows["rows"].size()==100 && rows["pages"]==6);
     assert(directory_rows(all,Json({{"passwords",Json::array()}}),Json::object()).size()==503);
 }
+void batch_editing(Fixture& fixture) {
+    auto dir=fixture.dir/"batch"; fs::create_directory(dir);
+    auto config=dir/"sunpack_config.json", passwords=dir/"builtin_passwords.json", roots=dir/"sunpack_watch_roots.txt";
+    atomic_write(config,R"({"watch":{"out_dir":".","toast_enabled":true,"max_folders":1},"large":123456789012345678901234567890})");
+    Json old={{"value","old"},{"scopes",{utf8(dir.wstring())}}};
+    atomic_write(passwords,Json{{"passwords",{old}},{"clipboard_history",{"latest background history"}}}.dump());
+    atomic_write(roots,"# retained\n"+utf8(dir.wstring())+"\n");
+    Json fields=Json::array({Json{{"pointer","/watch/out_dir"},{"original","\".\""},{"type","string"},{"text","output"},{"boolean",false}},
+        Json{{"pointer","/watch/toast_enabled"},{"original","true"},{"type","boolean"},{"text",""},{"boolean",false}}});
+    Json pwd=Json::array({Json{{"operation","replace"},{"original",old.dump()},{"value","changed"},{"scopes",{utf8(dir.wstring())}}}});
+    Json root=Json::array({Json{{"operation","save"},{"original",utf8(dir.wstring())},{"input",utf8(dir.wstring())},{"output","new"},{"deep",true},{"expected",{{"output",""},{"deep",false}}}}});
+    auto before_config=read_file(config), before_passwords=read_file(passwords), before_roots=read_file(roots);
+    auto invalid=fields; invalid.push_back({{"pointer","/watch/max_folders"},{"original","1"},{"type","number"},{"text","0"},{"boolean",false}});
+    auto rejected=save_changes(dir,invalid,pwd,root);
+    assert(rejected["saved"].empty() && rejected["error"]!="");
+    assert(read_file(config)==before_config && read_file(passwords)==before_passwords && read_file(roots)==before_roots);
+    atomic_write(roots,utf8(dir.wstring())+" | external\n");
+    rejected=save_changes(dir,fields,pwd,root); assert(rejected["saved"].empty() && rejected["error"]=="rootConflict");
+    assert(read_file(config)==before_config && read_file(passwords)==before_passwords);
+    atomic_write(roots,before_roots);
+    {
+        // Preflight can read this file, but Windows denies its replacement.
+        Handle held(CreateFileW(roots.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,0,nullptr));
+        assert(held.value!=INVALID_HANDLE_VALUE);
+        auto partial=save_changes(dir,fields,pwd,root);
+        assert(partial["saved"]==Json::array({"config","passwords"}) && partial["error"]!="");
+        assert(read_file(roots)==before_roots);
+    }
+    auto retry=save_changes(dir,Json::array(),Json::array(),root);
+    assert(retry["error"]=="" && retry["saved"]==Json::array({"roots"}));
+    assert(read_file(config).find("123456789012345678901234567890")!=std::string::npos);
+    assert(read_json(config)["watch"]["toast_enabled"]==false);
+    assert(read_json(passwords)["passwords"][0]["value"]=="changed");
+    assert(read_json(passwords)["clipboard_history"][0]=="latest background history");
+    assert(read_roots(roots).entries[0].deep && read_file(roots).find("# retained")!=std::string::npos);
+}
 void runtime_identity(Fixture& fixture) {
     struct Child {
         Handle process, thread;
@@ -179,7 +215,7 @@ int wmain(int argc,wchar_t** argv) {
     if(argc==3 && std::wstring(argv[1])==L"--mutex") { std::cout<<utf8(mutex_name(argv[2]))<<"\n"<<utf8(mutex_name(argv[2],L"SunPackWatchRoots"))<<"\n"; return 0; }
     if(argc>=2 && std::wstring(argv[1])==L"--echo") { Json args=Json::array(); for(int i=2;i<argc;++i) args.push_back(utf8(argv[i])); std::cout<<args.dump(); return 7; }
     if(argc==4 && std::wstring(argv[1])==L"--password-add") { edit_password(argv[2],"add",Json(),Json({{"value",utf8(argv[3])}})); return 0; }
-    try { Fixture f; projection(f); editing(f); roots(f); installer_upgrade(f); runtime_identity(f); std::cout<<"GUI file contracts passed\n"; }
+    try { Fixture f; projection(f); editing(f); roots(f); installer_upgrade(f); batch_editing(f); runtime_identity(f); std::cout<<"GUI file contracts passed\n"; }
     catch(const std::exception& e) { std::cerr<<e.what()<<"\n"; return 1; }
     CliCommand cli{executable_path(),fs::temp_directory_path(),{L"--echo"}};
     Handle stop(CreateEventW(nullptr,TRUE,FALSE,nullptr));

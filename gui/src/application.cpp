@@ -86,21 +86,32 @@ void Application::changed(unsigned flags) {
 void Application::publish(Json patch) {
     std::lock_guard<std::mutex> lock(mutex_);
     if(stopping_) return;
-    for(auto it=patch.begin();it!=patch.end();++it) {
-        if(it.key()=="savedEdits") {
-            if(!pending_.contains("savedEdits")) pending_["savedEdits"]=Json::object();
-            pending_["savedEdits"].update(it.value());
-        } else pending_[it.key()]=std::move(it.value());
-    }
+    for(auto it=patch.begin();it!=patch.end();++it) pending_[it.key()]=std::move(it.value());
     if(!notified_) { notified_=true; PostMessageW(hwnd_,Update,0,0); }
 }
 void Application::apply_pending() {
     Json patch;
     { std::lock_guard<std::mutex> lock(mutex_); patch=std::move(pending_); pending_=Json::object(); notified_=false; }
     VisualBatch visual(window_);
-    if(patch.contains("savedEdits")) {
+    if(patch.contains("stagedEdit")) {
+        const auto& staged=patch["stagedEdit"];
+        bool password=staged["kind"]=="passwords";
+        auto key=password?"passwordEdits":"rootEdits";
+        auto edits=page_value(page_,key); edits.push_back(staged["edit"]);
+        auto encoded=edits.dump(); ui_page_set_json(page_,key,encoded.c_str());
+        for(auto it=staged["nextState"].begin();it!=staged["nextState"].end();++it) {
+            auto value=it.value().dump(); ui_page_set_json(page_,it.key().c_str(),value.c_str());
+        }
+        if(password && page_value(page_,"passwordEditor")==false) {
+            for(auto name:{"passwordValue","passwordOriginal","scopeText","passwordBaseline"}) set_text(page_,name,"");
+        }
+        patch.erase("stagedEdit");
+    }
+    if(patch.contains("batchAck")) {
+        auto ack=patch["batchAck"], submitted=ack["payload"];
+        auto saved=[&](const char* section){return std::find(ack["saved"].begin(),ack["saved"].end(),section)!=ack["saved"].end();};
         auto drafts=page_value(page_,"drafts");
-        for(auto& edit:patch["savedEdits"]) {
+        if(saved("config")) for(auto& edit:submitted["fields"]) {
             auto id=edit["pointer"].get<std::string>();
             if(!drafts.contains(id)) continue;
             auto& draft=drafts[id];
@@ -110,10 +121,24 @@ void Application::apply_pending() {
                 // A user may keep typing while the write completes. Keep those
                 // edits, advancing only the token written by our own save.
                 draft["original"]=edit["type"]=="string"?Json(edit["text"]).dump():edit["type"]=="boolean"?Json(edit["boolean"]).dump():edit["text"].get<std::string>();
+                draft["baselineText"]=edit["draft"]["text"];
+                draft["baselineBoolean"]=edit["draft"]["boolean"];
             }
         }
         auto encoded=drafts.dump(); ui_page_set_json(page_,"drafts",encoded.c_str());
-        patch.erase("savedEdits");
+        for(auto section:{"passwords","roots"}) if(saved(section)) {
+            bool password=std::string(section)=="passwords";
+            auto key=password?"passwordEdits":"rootEdits";
+            auto current=page_value(page_,key); const auto& prefix=submitted[key];
+            if(current.size()>=prefix.size() && std::equal(prefix.begin(),prefix.end(),current.begin())) current.erase(current.begin(),current.begin()+prefix.size());
+            auto encoded=current.dump(); ui_page_set_json(page_,key,encoded.c_str());
+            if(!submitted[password?"passwordForm":"rootForm"].is_null()) {
+                ui_page_set_bool(page_,password?"passwordEditor":"rootEditor",false);
+                if(password) for(auto name:{"passwordValue","passwordOriginal","scopeText","passwordBaseline"}) set_text(page_,name,"");
+            }
+        }
+        ui_page_set_int(page_,"saveGeneration",page_value(page_,"saveGeneration").get<int>()+1);
+        patch.erase("batchAck");
     }
     if(patch.contains("fields")) bind_choices(patch["fields"]);
     for(auto it=patch.begin();it!=patch.end();++it) {
@@ -190,13 +215,13 @@ void Application::bind_choices(const Json& fields) {
                 try {
                     auto id=binding->field["id"].get<std::string>();
                     auto drafts=page_value(self->page_,"drafts");
-                    Json draft=drafts.contains(id)?drafts[id]:Json{{"original",binding->field["original"]},{"text",binding->field["text"]},{"boolean",binding->field["boolean"]},{"choice",binding->field["choice"]}};
+                    Json draft=drafts.contains(id)?drafts[id]:Json{{"original",binding->field["original"]},{"text",binding->field["text"]},{"boolean",binding->field["boolean"]},{"choice",binding->field["choice"]},{"baselineText",binding->field["text"]},{"baselineBoolean",binding->field["boolean"]}};
                     if(index<0 || size_t(index)>=binding->field["options"].size()) return;
                     auto value=binding->field["options"][index]["value"].get<std::string>();
                     draft["choice"]=index; draft["text"]=value=="#"?"1":value;
-                    drafts[id]=std::move(draft);
+                    if(draft["text"]==draft["baselineText"]) drafts.erase(id); else drafts[id]=std::move(draft);
                     auto encoded=drafts.dump(); ui_page_set_json(self->page_,"drafts",encoded.c_str());
-                    ui_page_set_json(self->page_,"settingError","{}"); set_text(self->page_,"savedField","");
+                    set_text(self->page_,"saveError","");
                 } catch(const std::exception& e) { set_text(self->page_,"actionError",translated_error(e.what(),page_value(self->page_,"language").get<std::string>())); }
             },binding);
             ui_widget_add_child(parent,combo); ui_widget_destroy(combo);
@@ -279,6 +304,12 @@ void Application::handle_command(Json command) {
 LRESULT CALLBACK Application::subclass(HWND hwnd,UINT message,WPARAM wparam,LPARAM lparam,UINT_PTR,DWORD_PTR data) {
     auto* self=reinterpret_cast<Application*>(data);
     try {
+        if(message==WM_CLOSE && !self->stopping_) {
+            auto language=page_value(self->page_,"language").get<std::string>();
+            if(page_value(self->page_,"saving")==true || page_value(self->page_,"staging")==true) return 0;
+            if(page_value(self->page_,"changeCount").get<int>()>0 && MessageBoxW(hwnd,wide(tr("closeUnsaved",language)).c_str(),
+                wide(tr("title",language)).c_str(),MB_OKCANCEL|MB_ICONQUESTION|MB_DEFBUTTON2)!=IDOK) return 0;
+        }
         if(message==Dispatch) { self->dispatch(); return 0; }
         if(message==Update) { self->apply_pending(); return 0; }
         if(message==WM_ACTIVATE && LOWORD(wparam)!=WA_INACTIVE) self->changed(Startup);
@@ -379,6 +410,8 @@ void Application::work() {
         Json config=Json::object(), passwords={{"passwords",Json::array()}};
         std::string language="en";
         WatchRoots roots; EventLog log; View view;
+        Json password_edits=Json::array(),root_edits=Json::array(),preview_passwords;
+        WatchRoots preview_roots;
         Json errors=Json::object();
         auto dir=options_.data_dir;
         auto on_data=[this,dir](const fs::path& path){
@@ -419,6 +452,7 @@ void Application::work() {
                 else if(retry.second.due<=Clock::now()) { flags|=retry.first; retry.second.due=Clock::time_point::max(); }
             }
             bool tasks_changed=false,passwords_changed=false,dirs_changed=false,config_changed=false;
+            Json edit_feedback=Json::object();
             if(!data_watcher || !data_watcher->alive() || (!data_watcher->direct() && fs::is_directory(dir))) {
                 try { data_watcher=std::make_unique<DirectoryWatcher>(dir,on_data); errors.erase("文件观察器"); }
                 catch(const std::exception& e) { errors["文件观察器"]=e.what(); }
@@ -433,21 +467,37 @@ void Application::work() {
                         view.password_query=p.value("query",std::string()); view.password_scope=p.value("scope",std::string("@global"));
                         if(view.password_scope.empty()) view.password_scope="@global";
                         view.password_page=p.value("page",size_t(0)); passwords_changed=true;
-                    } else if(op=="saveConfig") {
-                        save_config_field(dir/"sunpack_config.json",p.at("pointer"),p.at("original"),p.at("type"),p.at("text"),p.at("boolean")); flags|=Config;
-                    } else if(op=="password") {
-                        Json replacement={{"value",p.value("value",std::string())}};
-                        auto scopes=p.value("scopes",Json::array());
-                        if(!scopes.empty()) replacement["scopes"]=scopes;
-                        if(p.at("operation")=="addMany") {
-                            Json batch=Json::array();
-                            for(auto& value:p.at("values")) { auto record=replacement; record["value"]=value; batch.push_back(std::move(record)); }
-                            replacement=std::move(batch);
+                    } else if(op=="stagePassword" || op=="stageRoot") {
+                        bool password=op=="stagePassword";
+                        auto edit=p; edit.erase("nextState");
+                        auto edits=password?password_edits:root_edits; edits.push_back(edit);
+                        if(password) { preview_passwords=apply_password_changes(passwords,edits); password_edits=std::move(edits); passwords_changed=true; }
+                        else { preview_roots=apply_root_changes(roots,dir,edits); root_edits=std::move(edits); tasks_changed=true; }
+                        if(p.contains("nextState")) {
+                            if(p["nextState"].contains("passwordScope")) { view.password_scope=p["nextState"]["passwordScope"]; view.password_page=0; passwords_changed=true; }
+                            if(p["nextState"].contains("taskRoot")) { view.task_root=p["nextState"]["taskRoot"]; view.task_page=0; tasks_changed=true; }
                         }
-                        auto original=p.value("original",std::string());
-                        edit_password(dir/"builtin_passwords.json",p.at("operation"),original.empty()?Json():parse_json(original),replacement,p.value("scope",std::string())); flags|=Passwords;
-                    } else if(op=="root") {
-                        edit_root(dir/"sunpack_watch_roots.txt",p.at("operation"),p.value("original",std::string()),p.at("input"),p.at("output"),p.at("deep")); flags|=Roots;
+                        dirs_changed=true;
+                        edit_feedback.update(Json{{"stagedEdit",{{"kind",password?"passwords":"roots"},{"edit",std::move(edit)},{"nextState",p["nextState"]}}},{"staging",false},{"saveError",""}});
+                    } else if(op=="discard") {
+                        password_edits=Json::array(); root_edits=Json::array();
+                        passwords_changed=tasks_changed=dirs_changed=true;
+                    } else if(op=="saveAll") {
+                        auto password_changes=p.at("passwordEdits"),root_changes=p.at("rootEdits");
+                        if(!p["passwordForm"].is_null()) password_changes.push_back(p["passwordForm"]);
+                        if(!p["rootForm"].is_null()) root_changes.push_back(p["rootForm"]);
+                        auto result=save_changes(dir,p.at("fields"),password_changes,root_changes);
+                        for(auto& section:result["saved"]) {
+                            if(section=="config") flags|=Config;
+                            if(section=="passwords") { password_edits=Json::array(); flags|=Passwords; passwords_changed=dirs_changed=true; }
+                            if(section=="roots") { root_edits=Json::array(); flags|=Roots; tasks_changed=dirs_changed=true; }
+                        }
+                        auto message=translated_error(result["error"].get<std::string>(),language);
+                        if(result.contains("field")) for(auto& field:p["fields"]) if(field["pointer"]==result["field"]) {
+                            message=field.value("label",field["pointer"].get<std::string>())+": "+message; break;
+                        }
+                        if(!message.empty() && !result["saved"].empty()) message=tr("partialSave",language)+message;
+                        edit_feedback.update(Json{{"batchAck",{{"payload",p},{"saved",result["saved"]}}},{"saving",false},{"saveError",message}});
                     } else if(op=="cli") {
                         if(!options_.allow_cli) throw std::runtime_error("测试数据目录未绑定 CLI；请显式传入 --cli");
                         auto action=p.value("action",std::string());
@@ -464,12 +514,9 @@ void Application::work() {
                         }
                         publish(std::move(feedback)); flags|=Startup;
                     } else throw std::runtime_error("未知界面操作");
-                    if(op=="saveConfig") publish({{"savedField",p.at("pointer")},{"savedEdits",{{p.at("pointer").get<std::string>(),p}}},{"settingError",Json::object()}});
-                    if(op=="password") publish({{"passwordEditor",false},{"passwordValue",""},{"actionError",""}});
-                    if(op=="root") publish({{"rootEditor",false},{"actionError",""}});
                 } catch(const std::exception& e) {
                     auto message=translated_error(e.what(),language);
-                    if(op=="saveConfig") publish({{"settingError",{{"id",p.value("pointer",std::string())},{"message",message}}}});
+                    if(op=="saveAll" || op=="stagePassword" || op=="stageRoot") edit_feedback.update(Json{{"saving",false},{"staging",false},{"saveError",message}});
                     else publish({{"busy",false},{"actionError",message}});
                 }
             }
@@ -497,6 +544,14 @@ void Application::work() {
             if(flags&Roots) {
                 read(Roots,"sunpack_watch_roots.txt",last_roots,roots_read,[&](const std::string& text){roots=parse_roots(text,dir); tasks_changed=dirs_changed=true;});
             }
+            if(passwords_changed) {
+                try { preview_passwords=password_edits.empty()?Json():apply_password_changes(passwords,password_edits); }
+                catch(const std::exception& e) { publish({{"saveError",translated_error(e.what(),language)}}); }
+            }
+            if(tasks_changed) {
+                try { preview_roots=root_edits.empty()?WatchRoots{}:apply_root_changes(roots,dir,root_edits); }
+                catch(const std::exception& e) { publish({{"saveError",translated_error(e.what(),language)}}); }
+            }
             auto log_dir=log_directory(dir,config);
             if(log.path()!=log_dir/"events.jsonl" || !log_watcher || !log_watcher->alive() || (!log_watcher->direct() && fs::is_directory(log_dir))) {
                 log_watcher.reset();
@@ -515,14 +570,16 @@ void Application::work() {
                 catch(const std::exception& e){ errors["events.jsonl"]=e.what(); }
             }
             Json patch=Json::object();
+            const auto& shown_roots=root_edits.empty()?roots:preview_roots;
+            const auto& shown_passwords=password_edits.empty()?passwords:preview_passwords;
             auto next_language=gui_language(config);
             bool language_changed=language!=next_language || !previous_patch.contains("language");
             language=std::move(next_language);
             if(language_changed) { patch["language"]=language; patch["texts"]=interface_texts(language); }
-            if(tasks_changed || language_changed || !previous_patch.contains("tasks")) patch["tasks"]=task_rows(log,roots,view,language);
-            if(passwords_changed || language_changed || !previous_patch.contains("passwords")) patch["passwords"]=password_rows(passwords,view,language);
+            if(tasks_changed || language_changed || !previous_patch.contains("tasks")) patch["tasks"]=task_rows(log,shown_roots,view,language);
+            if(passwords_changed || language_changed || !previous_patch.contains("passwords")) patch["passwords"]=password_rows(shown_passwords,view,language);
             if(config_changed || language_changed || !previous_patch.contains("fields")) patch["fields"]=config_fields(config,last_config,language);
-            if(dirs_changed || !previous_patch.contains("directories")) patch["directories"]=directory_rows(roots,passwords,config);
+            if(dirs_changed || !previous_patch.contains("directories")) patch["directories"]=directory_rows(shown_roots,shown_passwords,config);
             if(flags&Startup || !previous_patch.contains("startup")) {
                 try { auto state=read_startup(); patch["startup"]={{"enabled",state.enabled},{"command",state.command}}; errors.erase("startup"); }
                 catch(const std::exception& e){errors["startup"]=e.what();}
@@ -534,6 +591,7 @@ void Application::work() {
             for(auto it=patch.begin();it!=patch.end();++it) if(!previous_patch.contains(it.key()) || previous_patch[it.key()]!=it.value()) {
                 previous_patch[it.key()]=it.value(); changed_patch[it.key()]=std::move(it.value());
             }
+            changed_patch.update(edit_feedback);
             if(!changed_patch.empty()) publish(std::move(changed_patch));
         }
     } catch(const std::exception& e) { publish({{"actionError",translated_error(e.what(),"en")},{"ready",true}}); }

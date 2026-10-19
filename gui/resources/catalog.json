@@ -60,6 +60,10 @@
       "zh": "编辑",
       "en": "Edit"
     },
+    "delete": {
+      "zh": "删除",
+      "en": "Delete"
+    },
     "open": {
       "zh": "打开",
       "en": "Open"

@@ -51,6 +51,11 @@ export default {
     selectScope(path) { if(this.recordSaving.passwords) return; if(this.passwordOriginal&&this.passwordDirty) { this.passwordAction('save',{passwordScope:path,passwordEditor:false}); return; } this.passwordScope=path; this.passwordEditor=false; this.filterPasswords(0); },
     rootState(d) { let input=d?d.path:'',output=d?d.output:'',deep=d?d.deep:false; return {rootSession:this.rootSession+1,rootOriginal:input,rootInput:input,rootOutput:output,rootDeep:deep,rootExpected:d?{output:output,deep:deep}:null,rootBaseline:JSON.stringify({input:input,output:output,deep:deep}),rootEditor:true}; },
     editRoot(d) { if(this.recordSaving.roots) return; let next=this.rootState(d); if(this.rootOriginal&&this.rootDirty) { this.rootAction('save',next); return; } Object.assign(this,next); this.send('revealForm',{kind:'root'}); },
+    deleteListedRoot(d) {
+      if(this.recordSaving.roots) return;
+      if(this.rootOriginal===d.path) { this.rootAction('delete'); return; }
+      this.send('saveRecord',{kind:'roots',key:'delete:'+d.id,edit:{operation:'delete',original:d.path,input:d.path,output:d.output,deep:d.deep,expected:{output:d.output,deep:d.deep}}});
+    },
     rootEdit(operation) {
       let edit={operation:operation,original:this.rootOriginal,input:this.rootInput,output:this.rootOutput,deep:this.rootDeep,expected:this.rootExpected};
       if(operation==='save'&&!this.rootOriginal) { edit.operation='addMany'; edit.inputs=this.rootInput.split(/\r?\n/).map(s=>s.trim()).filter(s=>s.length>0); if(!edit.inputs.length) throw new Error(this.texts.rootsEmpty); }
@@ -83,6 +88,11 @@ export default {
     },
     passwordState(p) { let original=p?p.original:'',value=p?p.value:'',scopes=p?p.scopes:''; return {passwordSession:this.passwordSession+1,passwordOriginal:original,passwordValue:value,scopeText:scopes,passwordBaseline:JSON.stringify({value:value,scopes:scopes}),passwordEditor:true}; },
     editPassword(p) { if(this.recordSaving.passwords) return; let next=this.passwordState(p); if(!next.passwordOriginal) next.passwordScope='@all'; if(this.passwordOriginal&&this.passwordDirty) { this.passwordAction('save',next); return; } let changed=next.passwordScope && this.passwordScope!==next.passwordScope; Object.assign(this,next); if(changed) this.filterPasswords(0); this.send('revealForm',{kind:'password'}); },
+    deleteListedPassword(p) {
+      if(this.recordSaving.passwords) return;
+      if(this.passwordOriginal===p.original) { this.passwordAction('delete'); return; }
+      this.send('saveRecord',{kind:'passwords',key:'delete:'+p.id,edit:{operation:'delete',original:p.original}});
+    },
     passwordEdit(operation) {
       let scopes=this.scopeText.split(/\r?\n/).map(s=>s.trim()).filter(s=>s.length>0);
       if(operation==='save'&&this.passwordOriginal&&JSON.parse(this.passwordOriginal).scopes&&scopes.length===0) throw new Error(this.texts.scopeGuard);
@@ -267,13 +277,14 @@ export default {
           </button>
           <button id="moreDirectories" v-show="directoryLimit &lt; directoryCount" @click="directoryLimit=directoryLimit+50">{{ texts.moreDirectories }}</button>
         </div></ScrollView>
-        <div v-show="tab==='tasks' &amp;&amp; chosenDirectory.path" class="row directory-actions"><button id="editSelectedRoot" @click="editRoot(chosenDirectory)">{{ texts.edit }}</button><button @click="send('openPath',{path:chosenDirectory.path})">{{ texts.open }}</button></div>
+        <div v-show="tab==='tasks' &amp;&amp; chosenDirectory.path" class="row directory-actions"><button id="editSelectedRoot" @click="editRoot(chosenDirectory)">{{ texts.edit }}</button><button @click="send('openPath',{path:chosenDirectory.path})">{{ texts.open }}</button><button id="deleteSelectedRoot" :enabled="!recordSaving.roots" @click="deleteListedRoot(chosenDirectory)">{{ texts.delete }}</button></div>
       </div>
       <div class="workspace">
       <div id="page-tasks" v-show="tab==='tasks'" class="content">
         <div class="page-header"><label class="heading">{{ texts.tasks }}</label><div class="spacer"/><div id="runtimeStatus" class="runtime-badge"><div :class="runtime.known &amp;&amp; runtime.running?'runtime-dot running':'runtime-dot'"/><label class="muted">{{ !runtime.known?texts.runtimeUnknown:runtime.running?texts.runtimeRunning:texts.runtimeStopped }}</label></div></div>
         <div class="row"><button id="watchStart" :enabled="cliAllowed" @click="send('cli',{action:'start'})">{{ texts.startWatch }}</button><button id="watchStop" :enabled="cliAllowed" @click="send('cli',{action:'stop'})">{{ texts.stopWatch }}</button></div>
         <label v-show="actionError" class="error">{{ actionError }}</label>
+        <label v-show="!rootEditor &amp;&amp; saveErrors['@roots']" class="error">{{ saveErrors['@roots'] }}</label>
         <div v-show="chosenDirectory.path &amp;&amp; !rootEditor" class="selected-directory"><label>{{ chosenDirectory.path }}</label><label>{{ texts.output }}{{ chosenDirectory.effectiveOutput }}</label></div>
         <div v-show="!rootEditor" class="column"><label class="muted">{{ texts.taskSearch }}</label><div class="row task-filters"><input id="taskSearch" class="fill" :value="taskQuery" @input="searchTasks"/>
           <div id="taskStatusHost" style="width:180px;height:32px"/>
@@ -333,6 +344,7 @@ export default {
       <div id="page-passwords" v-show="tab==='passwords'" class="content">
         <div class="page-header"><label class="heading">{{ texts.passwords }}</label></div>
         <label v-show="actionError" class="error">{{ actionError }}</label>
+        <label v-show="!passwordEditor &amp;&amp; saveErrors['@passwords']" class="error">{{ saveErrors['@passwords'] }}</label>
         <div class="password-tabs"><button id="newPassword" :class="passwordEditor &amp;&amp; !passwordOriginal?'on':''" @click="editPassword(null)">{{ texts.addPasswords }}</button><button id="savedPasswords" :class="passwordScope==='@all' &amp;&amp; !passwordEditor?'on':''" @click="selectScope('@all')">{{ texts.savedPasswords }}</button><button id="clipboardHistory" :class="passwordScope==='@history' &amp;&amp; !passwordEditor?'on':''" @click="selectScope('@history')">{{ texts.history }}</button><label class="muted">{{ texts.passwordSearch }}</label><input id="passwordSearch" :value="passwordQuery" @input="searchPasswords"/></div>
         <ScrollView id="passwordListScroll"><div id="passwordBody" class="column">
           <div id="passwordForm" v-show="passwordEditor" class="card inline-form" :enabled="!!passwordOriginal||!recordSaving.passwords">
@@ -343,7 +355,7 @@ export default {
           </div>
           <div :class="'history-list '+appearance"><label v-show="passwords.total===0" class="muted">{{ texts.noPasswords }}</label>
             <div v-for="p in passwords.rows" :key="p.id" :id="'password-'+p.id" class="history-entry">
-              <div class="row history-row" :class="'row history-row '+(passwordScope==='@all'?'password-row':'')"><div class="password-copy"><label>{{ p.value }}</label><label v-show="passwordScope==='@all'" class="muted scope-value">{{ texts.scopeLabel }} · {{ p.scopes||texts.allFolders }}</label></div><button v-show="passwordScope==='@history'" class="history-copy" :id="'copy-history-'+p.id" @click="editPassword(p)">{{ texts.copyPassword }}</button><button v-show="passwordScope==='@all'" :id="'edit-password-'+p.id" @click="editPassword(p)">{{ texts.edit }}</button></div>
+              <div class="row history-row" :class="'row history-row '+(passwordScope==='@all'?'password-row':'')"><div class="password-copy"><label>{{ p.value }}</label><label v-show="passwordScope==='@all'" class="muted scope-value">{{ texts.scopeLabel }} · {{ p.scopes||texts.allFolders }}</label></div><button v-show="passwordScope==='@history'" class="history-copy" :id="'copy-history-'+p.id" @click="editPassword(p)">{{ texts.copyPassword }}</button><button v-show="passwordScope==='@all'" :id="'edit-password-'+p.id" @click="editPassword(p)">{{ texts.edit }}</button><button v-show="passwordScope==='@all'" :id="'delete-password-'+p.id" :enabled="!recordSaving.passwords" @click="deleteListedPassword(p)">{{ texts.delete }}</button></div>
               <div class="history-divider"/>
             </div>
           </div>

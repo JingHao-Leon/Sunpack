@@ -177,6 +177,11 @@ void Application::acknowledge_save(const Json& ack) {
         bool password=kind=="passwords";
         auto session=password?"passwordSession":"rootSession";
         const auto& edit=job.at("edit");
+        if(!password && edit["operation"]=="delete" && page_value(page_,"taskRoot")==edit["original"]) {
+            set_text(page_,"taskRoot","");
+            auto statuses=page_value(page_,"statusNames"); auto index=page_value(page_,"taskStatus").get<size_t>();
+            handle_command(Json{{"op","filterTasks"},{"payload",{{"query",page_value(page_,"taskQuery")},{"root",""},{"status",statuses.at(index)},{"page",0}}}});
+        }
         const bool replace=password?edit["operation"]=="replace":edit["operation"]=="save";
         Json baseline, expected; std::string original;
         if(replace && password) {

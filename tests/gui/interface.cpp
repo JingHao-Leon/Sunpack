@@ -624,6 +624,8 @@ int wmain(int argc,wchar_t** argv) {
                 auto id=entry["id"].get<std::string>();
                 auto row=rect(app,"password-"+id), edit=rect(app,"edit-password-"+id);
                 assert(std::abs((row.top+row.bottom-1)/2-(edit.top+edit.bottom)/2)<=1);
+                auto remove=rect(app,"delete-password-"+id);
+                assert(edit.top==remove.top && edit.bottom==remove.bottom && edit.right<remove.left);
             }
             screenshot(app,L"passwords-unified.png");
             // Existing records auto-save on blur and retain their editor. A
@@ -644,10 +646,26 @@ int wmain(int argc,wchar_t** argv) {
             assert(state(app.page(),"passwordEditor")==true);
             assert(parse_json(state(app.page(),"passwordOriginal").get<std::string>())["value"]=="edited password latest");
             assert(read_json(dir/"builtin_passwords.json")["passwords"][0]["value"]=="edited password latest");
-            click(app,"deletePassword"); finish_input(app);
+            auto other=state(app.page(),"passwords")["rows"][1];
+            auto history_before_delete=read_json(dir/"builtin_passwords.json")["clipboard_history"];
+            click(app,("delete-password-"+other["id"].get<std::string>()).c_str()); finish_input(app);
             assert(read_json(dir/"builtin_passwords.json")["passwords"].size()==4);
+            assert(state(app.page(),"passwordEditor")==true);
+            assert(state(app.page(),"passwordValue")=="edited password latest");
+            assert(read_json(dir/"builtin_passwords.json")["clipboard_history"]==history_before_delete);
+            record=state(app.page(),"passwords")["rows"][0];
+            click(app,("delete-password-"+record["id"].get<std::string>()).c_str()); finish_input(app);
+            assert(read_json(dir/"builtin_passwords.json")["passwords"].size()==3);
             assert(state(app.page(),"passwordEditor")==false);
             click(app,"tabTasks"); pump([&]{return state(app.page(),"tab")=="tasks";});
+            click(app,("directory-"+utf8(path_key(pending_second))).c_str());
+            auto edit_root_bounds=rect(app,"editSelectedRoot"), delete_root_bounds=rect(app,"deleteSelectedRoot");
+            assert(edit_root_bounds.top==delete_root_bounds.top && edit_root_bounds.bottom==delete_root_bounds.bottom);
+            button_texts(app);
+            click(app,"deleteSelectedRoot"); finish_input(app);
+            assert(state(app.page(),"taskRoot")=="");
+            assert(read_roots(dir/"sunpack_watch_roots.txt").entries.size()==2);
+            assert(fs::is_directory(pending_second));
             click(app,("directory-"+utf8(path_key(pending_root))).c_str());
             pump([&]{return state(app.page(),"taskRoot")==utf8(pending_root.wstring());});
             click(app,"editSelectedRoot"); ui_debug_pump();
@@ -663,7 +681,10 @@ int wmain(int argc,wchar_t** argv) {
             for(auto& entry:root_snapshot.entries)
                 if(path_key(entry.input)==path_key(pending_root)) { updated=entry.output=="automatic-output" && entry.deep; }
             assert(updated);
-            click(app,"closeRootEditor"); click(app,"allRoots");
+            click(app,"deleteSelectedRoot"); finish_input(app);
+            assert(state(app.page(),"rootEditor")==false);
+            assert(read_roots(dir/"sunpack_watch_roots.txt").entries.size()==1);
+            assert(fs::is_directory(pending_root));
             pump([&]{return state(app.page(),"taskRoot")=="";});
 
             atomic_write(dir/".sunpack_watch"/"events.jsonl",Json({{"event","failed_password"},{"path",utf8((dir/"carrier.001").wstring())}}).dump()+"\n");

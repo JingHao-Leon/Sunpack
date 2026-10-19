@@ -3020,7 +3020,8 @@ UI_API int ui_debug_scroll_set(UiWidget w, float y) {
     /* build 285: SetScrollY 自己走纯偏移路径把内容归位了, 不必再补一次
      * DoLayout()。留着的话调试通道量到的是"滚动 + 全量重布局", 跟真实鼠标
      * 滚动不是同一条路 —— 性能对比会失真, 而且掩盖住本次优化的效果。 */
-    sv->SetScrollY(y);
+    if(auto* window=ui::GetContext().FindWindowByWidget(sv)) window->ScrollWithMeasureContext(sv,y);
+    else sv->SetScrollY(y);
     return 0;
 }
 

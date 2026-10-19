@@ -409,6 +409,7 @@ std::string root_for(const fs::path& path,const WatchRoots& roots) {
 void EventLog::set_path(const fs::path& p) {
     if (path_==p) return;
     path_=p; offset_=identity_=sequence_=volume_=0; prefix_.clear(); anchor_.clear(); pending_.clear(); tasks.clear(); malformed=0;
+    changed_keys.clear(); rebuilt=true; changed_overflow=false;
 }
 void EventLog::accept(const Json& j) {
     if (!j.is_object() || !j.contains("event") || !j["event"].is_string() || !j.contains("path") || !j["path"].is_string()) return;
@@ -424,14 +425,15 @@ void EventLog::accept(const Json& j) {
         if(auto parsed=iso_timestamp(j["time"].get<std::string>())) { t.timestamp=*parsed; t.has_timestamp=true; }
     }
     tasks[key]=std::move(t);
+    if(changed_keys.size()<32) changed_keys.insert(key); else changed_overflow=true;
 }
 bool EventLog::refresh(bool missing_is_final) {
-    retry_required=false;
+    retry_required=false; changed_keys.clear(); changed_overflow=false; rebuilt=false;
     Handle f(CreateFileW(path_.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,FILE_FLAG_SEQUENTIAL_SCAN,nullptr));
     if(f.value==INVALID_HANDLE_VALUE) {
         if(GetLastError()==ERROR_FILE_NOT_FOUND || GetLastError()==ERROR_PATH_NOT_FOUND) {
             if(!missing_is_final) { SetLastError(ERROR_FILE_NOT_FOUND); win_error("Read event log"); }
-            bool changed=!tasks.empty(); offset_=identity_=volume_=0; prefix_.clear(); anchor_.clear(); pending_.clear(); tasks.clear(); malformed=0; return changed;
+            bool changed=!tasks.empty(); rebuilt=changed; offset_=identity_=volume_=0; prefix_.clear(); anchor_.clear(); pending_.clear(); tasks.clear(); malformed=0; return changed;
         }
         win_error("Read event log");
     }
@@ -442,7 +444,7 @@ bool EventLog::refresh(bool missing_is_final) {
     bool reset=id!=identity_ || info.dwVolumeSerialNumber!=volume_ || size<offset_;
     if(!reset && !prefix_.empty()) reset=text_at(f,0,prefix_.size())!=prefix_;
     if(!reset && !anchor_.empty()) reset=text_at(f,offset_-anchor_.size(),anchor_.size())!=anchor_;
-    bool changed=reset;
+    bool changed=reset; rebuilt=reset;
     if(reset) { offset_=sequence_=0; prefix_.clear(); anchor_.clear(); pending_.clear(); tasks.clear(); malformed=0; }
     identity_=id; volume_=info.dwVolumeSerialNumber;
     // Parse bounded chunks, retaining only the unfinished final record and one state per path.
@@ -474,31 +476,45 @@ bool EventLog::refresh(bool missing_is_final) {
     }
     return changed;
 }
+namespace {
+// Both snapshot and incremental updates project a task identically.
+Json project_task(const Task& t,const RootIndex& roots,const std::string& language) {
+    const fs::path path=wide(t.path);
+    auto key=path_key(path);
+    const char* tone=t.status=="成功"?"success":t.status=="失败"?"failure":
+        (t.status.rfind("等待",0)==0 || t.status.rfind("挂起",0)==0 || t.status=="准备处理")?"waiting":"info";
+    return {{"id",utf8(key)},{"name",utf8(path.filename().wstring())},{"directory",utf8(path.parent_path().wstring())},
+        {"path",t.path},{"root",indexed_root(key,roots)},{"status",t.status},{"statusText",tr(t.status,language)},{"time",task_time(t)},
+        {"statusTone",tone},{"outputs",t.outputs},{"sortTimestamp",t.timestamp},{"sortSequence",t.sequence}};
+}
+bool task_matches(const Task& t,const std::wstring& key,const RootIndex& roots,const View& v) {
+    return contains(t.path,v.task_query) && (v.task_status.empty() || t.status==v.task_status) &&
+        (v.task_root.empty() || indexed_root(key,roots)==v.task_root);
+}
+}
 Json task_rows(const EventLog& log,const WatchRoots& roots,const View& v,const std::string& language) {
     const auto root_index=index_roots(roots);
     std::vector<const Task*> rows;
-    for(auto& pair:log.tasks) {
-        auto& t=pair.second;
-        if(!contains(t.path,v.task_query) || (!v.task_status.empty() && t.status!=v.task_status)) continue;
-        if(!v.task_root.empty() && indexed_root(pair.first,root_index)!=v.task_root) continue;
-        rows.push_back(&t);
-    }
+    for(auto& pair:log.tasks) if(task_matches(pair.second,pair.first,root_index,v)) rows.push_back(&pair.second);
     std::sort(rows.begin(),rows.end(),[](auto a,auto b){
         if(a->timestamp!=b->timestamp) return a->timestamp>b->timestamp;
         return a->sequence>b->sequence;
     });
     Json result={{"rows",Json::array()},{"total",rows.size()},{"malformed",log.malformed}};
-    for(size_t i=0;i<rows.size();++i) {
-        auto& t=*rows[i];
-        const fs::path path=wide(t.path);
-        auto key=path_key(path);
-        const char* tone=t.status=="成功"?"success":t.status=="失败"?"failure":
-            (t.status.rfind("等待",0)==0 || t.status.rfind("挂起",0)==0 || t.status=="准备处理")?"waiting":"info";
-        result["rows"].push_back({{"id",utf8(key)},{"name",utf8(path.filename().wstring())},{"directory",utf8(path.parent_path().wstring())},
-            {"path",t.path},{"root",indexed_root(key,root_index)},{"status",t.status},{"statusText",tr(t.status,language)},{"time",task_time(t)},
-            {"statusTone",tone},{"outputs",t.outputs}});
-    }
+    for(auto* task:rows) result["rows"].push_back(project_task(*task,root_index,language));
     return result;
+}
+Json task_delta(const EventLog& log,const WatchRoots& roots,const View& v,const std::string& language) {
+    const auto root_index=index_roots(roots);
+    Json changes=Json::array();
+    for(const auto& key:log.changed_keys) {
+        Json change={{"id",utf8(key)}};
+        auto it=log.tasks.find(key);
+        if(it!=log.tasks.end() && task_matches(it->second,key,root_index,v))
+            change["row"]=project_task(it->second,root_index,language);
+        changes.push_back(std::move(change));
+    }
+    return {{"changes",std::move(changes)},{"malformed",log.malformed}};
 }
 fs::path task_directory(const Json& row) {
     auto root=row.value("root",std::string());

@@ -2,6 +2,7 @@
 #include "platform.hpp"
 #include <nlohmann/json.hpp>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace spg {
 using Json = nlohmann::ordered_json;
@@ -44,6 +45,9 @@ public:
     size_t malformed = 0;
     uint64_t bytes_parsed = 0; // Diagnostic counter, never persisted.
     bool retry_required = false;
+    // Changes from the latest refresh, bounded for an inexpensive UI delta.
+    std::unordered_set<std::wstring> changed_keys;
+    bool rebuilt = false, changed_overflow = false;
     void set_path(const fs::path& path);
     bool refresh(bool missing_is_final = false);
     void accept(const Json& event);
@@ -53,6 +57,7 @@ struct View {
     std::string task_query, task_root, task_status, password_query, password_scope = "@all";
 };
 Json task_rows(const EventLog& log, const WatchRoots& roots, const View& view, const std::string& language = "zh");
+Json task_delta(const EventLog& log, const WatchRoots& roots, const View& view, const std::string& language = "zh");
 // Resolve only on activation so removed/moved output directories fall back then.
 fs::path task_directory(const Json& row);
 Json password_rows(const Json& passwords, const View& view, const std::string& language = "zh");

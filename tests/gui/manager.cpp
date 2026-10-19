@@ -194,6 +194,16 @@ void roots(Fixture& f) {
     }
     auto rows=task_rows(log,all,view); assert(rows["total"]==501 && rows["rows"].size()==501 && !rows.contains("pages"));
     assert(directory_rows(all,Json::object()).size()==503);
+    log.changed_keys.clear();
+    auto changed_path=utf8((f.dir/L"0"/L"file").wstring());
+    log.accept(Json{{"event","failed_terminal"},{"path",changed_path},{"ts",99999}});
+    auto delta=task_delta(log,all,view);
+    auto latest=task_rows(log,all,view);
+    assert(delta["changes"].size()==1 && latest["rows"][0]["status"]=="失败");
+    assert(delta["changes"][0]["row"]==latest["rows"][0]);
+    view.task_status="成功";
+    auto removal=task_delta(log,all,view);
+    assert(removal["changes"].size()==1 && !removal["changes"][0].contains("row"));
 }
 void batch_editing(Fixture& fixture) {
     auto dir=fixture.dir/"batch"; fs::create_directory(dir);

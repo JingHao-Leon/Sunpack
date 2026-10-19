@@ -160,7 +160,7 @@ DirectoryWatcher::DirectoryWatcher(const fs::path& directory, std::function<void
                 CharLowerBuffW(name.data(),DWORD(name.size()));
                 // Missing target directories are observed through their existing ancestor.
                 if (subtree || name == L"sunpack_config.json" || name == L"builtin_passwords.json" ||
-                    name == L"sunpack_watch_roots.txt" || name == L"events.jsonl") changed(path);
+                    name == L"sunpack_watch_roots.txt" || name == L"events.jsonl" || is_runtime_state_name(name)) changed(path);
                 if (!item->NextEntryOffset) break;
                 offset += item->NextEntryOffset;
             }
@@ -211,6 +211,9 @@ std::wstring quote_arg(const std::wstring& arg) {
     out.append(slash * 2, L'\\'); out += L'"'; return out;
 }
 fs::path executable_path() { std::wstring s(32768, 0); auto n = GetModuleFileNameW(nullptr, s.data(), DWORD(s.size())); s.resize(n); return s; }
+bool is_runtime_state_name(const std::wstring& name) {
+    return name.size()>14 && name.compare(0,8,L"runtime-")==0 && name.compare(name.size()-6,6,L".state")==0;
+}
 RuntimeMonitor::RuntimeMonitor(const fs::path& executable):expected_(path_key(executable)) {}
 bool RuntimeMonitor::running() {
     if(process_.value!=INVALID_HANDLE_VALUE) {

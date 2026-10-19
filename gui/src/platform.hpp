@@ -59,6 +59,8 @@ struct CliCommand { fs::path executable, cwd; std::vector<std::wstring> prefix; 
 struct CliResult { DWORD code; std::string output; };
 CliResult run_cli(const CliCommand& cli, const std::vector<std::wstring>& args, HANDLE stop);
 fs::path executable_path();
+// Name is lowercased by the directory notification consumer.
+bool is_runtime_state_name(const std::wstring& name);
 // Cache only a verified live process handle; an exited PID is never reused.
 class RuntimeMonitor {
     std::wstring expected_;
@@ -66,5 +68,6 @@ class RuntimeMonitor {
 public:
     explicit RuntimeMonitor(const fs::path& executable);
     bool running();
+    HANDLE process_handle() const { return process_.value==INVALID_HANDLE_VALUE?nullptr:process_.value; }
 };
 }

@@ -261,9 +261,41 @@ void runtime_identity(Fixture& fixture) {
     fs::copy_file(executable_path(),installed); fs::copy_file(executable_path(),other);
     RuntimeMonitor monitor(installed);
     assert(!monitor.running());
-    Child unrelated(other); assert(!monitor.running()); // Same name, different installation.
-    { Child current(installed); assert(monitor.running()); current.exit(); assert(!monitor.running()); }
-    { Child restarted(installed); assert(monitor.running()); restarted.exit(); assert(!monitor.running()); }
+    auto data=fixture.dir/"runtime-data", state=data/"runtime-v2-fixture.state";
+    fs::create_directory(data);
+    Handle changed(CreateEventW(nullptr,FALSE,FALSE,nullptr)); assert(changed.value);
+    DirectoryWatcher watcher(data,[&](const fs::path& path){
+        auto name=path.filename().wstring(); CharLowerBuffW(name.data(),DWORD(name.size()));
+        if(path.empty() || is_runtime_state_name(name)) SetEvent(changed);
+    });
+    Child unrelated(other);
+    atomic_write(state,"stale state is only a discovery hint");
+    assert(WaitForSingleObject(changed,10000)==WAIT_OBJECT_0);
+    assert(!monitor.running()); // Same name, different installation, despite a state file.
+    {
+        Child current(installed);
+        atomic_write(state,"replacement state");
+        assert(WaitForSingleObject(changed,10000)==WAIT_OBJECT_0);
+        assert(monitor.running());
+        fs::remove(state); // Metadata can disappear while the process is still alive.
+        assert(WaitForSingleObject(changed,10000)==WAIT_OBJECT_0);
+        assert(monitor.running());
+        current.exit();
+        assert(WaitForSingleObject(monitor.process_handle(),10000)==WAIT_OBJECT_0);
+        assert(!monitor.running());
+    }
+    {
+        Child restarted(installed);
+        atomic_write(state,"left behind on crash");
+        assert(WaitForSingleObject(changed,10000)==WAIT_OBJECT_0);
+        assert(monitor.running());
+        // The cached object itself signals exit, without asking the monitor to
+        // rescan. It stays valid until the observer consumes that transition.
+        auto process=monitor.process_handle(); assert(process);
+        assert(WaitForSingleObject(process,0)==WAIT_TIMEOUT);
+        restarted.exit(); assert(WaitForSingleObject(process,10000)==WAIT_OBJECT_0);
+        assert(!monitor.running() && !monitor.process_handle());
+    }
     unrelated.exit();
 }
 }

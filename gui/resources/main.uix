@@ -2,7 +2,7 @@
 <script>
 export default {
   data() { return {
-    tab:'tasks',theme:'system',themeChoice:0,appearance:'light',pageOpacity:1,language:'en',texts:{},dispatch:false,requests:[],ready:false,busy:false,
+    tab:'tasks',theme:'system',themeChoice:0,appearance:'light',language:'en',texts:{},dispatch:false,requests:[],ready:false,busy:false,
     actionError:'',lastCommand:{},errors:{},logPath:'',cliAllowed:false,runtime:{known:false,running:false},
     tasks:{rows:[],total:0,page:0,pages:1,malformed:0},passwords:{rows:[],total:0,page:0,pages:1},fields:[],directories:[],
     startup:{enabled:false,command:''},directoryQuery:'',directoryLimit:50,
@@ -42,6 +42,7 @@ export default {
       this.requests=requests.concat([{op:op,payload:payload||{}}]); this.dispatch=true;
     },
     go(tab) { this.send('navigate',{tab:tab}); },
+    selectCategory(category) { if(this.configCategory===category) return; this.configCategory=category; this.configPage=0; this.send('animateView',{id:'configBlocks'}); },
     searchDirectory(value) { this.directoryQuery=value; this.directoryLimit=50; },
     searchConfig(value) { this.configQuery=value; this.configPage=0; },
     searchTasks(value) { this.taskQuery=value; this.filterTasks(0); },
@@ -71,7 +72,7 @@ export default {
       this.drafts=next; this.saveError='';
     },
     passwordState(p) { let original=p?p.original:'',value=p?p.value:'',scopes=p?p.scopes:''; return {passwordOriginal:original,passwordValue:value,scopeText:scopes,passwordBaseline:JSON.stringify({value:value,scopes:scopes}),passwordEditor:true}; },
-    editPassword(p) { if(this.saving||this.staging) return; let next=this.passwordState(p); if(this.passwordDirty) { this.passwordAction('save',next); return; } Object.assign(this,next); this.send('revealForm',{kind:'password'}); },
+    editPassword(p) { if(this.saving||this.staging) return; let next=this.passwordState(p); if(!next.passwordOriginal) next.passwordScope='@all'; if(this.passwordDirty) { this.passwordAction('save',next); return; } let changed=next.passwordScope && this.passwordScope!==next.passwordScope; Object.assign(this,next); if(changed) this.filterPasswords(0); this.send('revealForm',{kind:'password'}); },
     passwordEdit(operation) {
       let scopes=this.scopeText.split(/\r?\n/).map(s=>s.trim()).filter(s=>s.length>0);
       if(operation==='save'&&this.passwordOriginal&&JSON.parse(this.passwordOriginal).scopes&&scopes.length===0) throw new Error(this.texts.scopeGuard);
@@ -125,7 +126,8 @@ export default {
   .dark .on { background:#363636; color:var(--fg); }
   .nav-icon { width:18px; height:18px; color:var(--fg); }
   .nav-mark { width:3px; height:16px; }
-  .nav-indicator { width:3px; height:16px; border-radius:2px; background:var(--accent-text); }
+  .nav-items { gap:4px; }
+  .nav-indicator { position:absolute; left:4px; top:12px; width:3px; height:16px; border-radius:2px; background:var(--accent-text); }
   .light .nav-indicator { background:#0067c0; }
   .dark .nav-indicator { background:#60cdff; }
   .spacer { flex:1; }
@@ -147,8 +149,6 @@ export default {
   .small { font-size:12px; }
   .directory-pane { width:224px; flex-shrink:0; padding:24px 10px 24px 0px; gap:10px; }
   .directory-pane > input, .directory-pane > button { width:100%; flex-shrink:0; }
-  .directory-filters { flex-direction:row; gap:6px; }
-  .directory-filters button { flex:1; padding:6px 8px; font-size:12px; }
   .directory-list { gap:2px; }
   .directory-list > button { width:100%; flex-shrink:0; }
   .directory-item { min-height:50px; padding:6px 8px; flex-shrink:0; }
@@ -213,6 +213,7 @@ export default {
   .history-list.light { background:#fbfbfb; }
   .history-list.dark { background:#2b2b2b; }
   .history-entry { gap:0px; }
+  .scope-value { padding:2px 0px 12px; }
   .history-row { flex-direction:row; align-items:center; gap:12px; padding:4px 0px; min-height:40px; }
   .history-copy { width:132px; }
   .history-divider { height:1px; background:var(--card-border); }
@@ -228,22 +229,25 @@ export default {
           <svg class="app-icon" viewBox="0 0 24 24" fill="none"><path d="M3 7 12 3 21 7 12 11 3 7ZM3 7v10l9 4 9-4V7M12 11v10M7.5 5 16.5 9" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
           <div class="column" style="gap:3px"><label class="brand">SunPack</label><label class="muted">{{ texts.manager }}</label></div>
         </div>
+      <div class="nav-items">
         <button id="tabTasks" :class="tab==='tasks'?'nav-item on':'nav-item'" @click="go('tasks')">
-          <div class="nav-mark"><div :opacity="tab==='tasks'?1:0" transition="opacity 140ms ease-out" class="nav-indicator"/></div>
+          <div class="nav-mark"/>
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none"><path d="m3 6 1.5 1.5L7 5M10 6h11M3 12l1.5 1.5L7 11M10 12h11M3 18l1.5 1.5L7 17M10 18h11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg><label>{{ texts.tasks }}</label>
         </button>
         <button id="tabConfig" :class="tab==='config'?'nav-item on':'nav-item'" @click="go('config')">
-          <div class="nav-mark"><div :opacity="tab==='config'?1:0" transition="opacity 140ms ease-out" class="nav-indicator"/></div>
+          <div class="nav-mark"/>
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none"><path d="M4 7h16M4 17h16M8 4v6M16 14v6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg><label>{{ texts.config }}</label>
         </button>
         <button id="tabPasswords" :class="tab==='passwords'?'nav-item on':'nav-item'" @click="go('passwords')">
-          <div class="nav-mark"><div :opacity="tab==='passwords'?1:0" transition="opacity 140ms ease-out" class="nav-indicator"/></div>
+          <div class="nav-mark"/>
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none"><path d="M14 5a5 5 0 1 1-2 8l-7 7H2v-3l7-7a5 5 0 0 1 5-5Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg><label>{{ texts.passwords }}</label>
         </button>
+        <div id="navIndicator" class="nav-indicator"/>
+      </div>
       <div v-show="tab==='config'" class="sidebar">
         <label class="sidebar-heading">{{ texts.categories }}</label>
-        <button :class="!configCategory?'context-item on':'context-item'" @click="configCategory='',configPage=0"><label>{{ texts.allSettings }}</label></button>
-        <ScrollView id="categoryScroll"><div class="column"><button v-for="c in categories" :key="c.id" :id="'category-'+c.id" :class="configCategory===c.id?'context-item on':'context-item'" @click="configCategory=c.id,configPage=0"><label>{{ c.label }}</label></button></div></ScrollView>
+        <button :class="!configCategory?'context-item on':'context-item'" @click="selectCategory('')"><label>{{ texts.allSettings }}</label></button>
+        <ScrollView id="categoryScroll"><div class="column"><button v-for="c in categories" :key="c.id" :id="'category-'+c.id" :class="configCategory===c.id?'context-item on':'context-item'" @click="selectCategory(c.id)"><label>{{ c.label }}</label></button></div></ScrollView>
       </div>
       <div v-show="tab!=='config'" class="spacer"/>
       <div class="save-panel">
@@ -256,11 +260,8 @@ export default {
       <div id="directoryPane" v-show="tab==='tasks'" class="directory-pane">
         <div class="row"><label class="subheading fill">{{ texts.roots }}</label><label class="muted">{{ directoryCount }}</label></div>
         <button id="newRoot" @click="editRoot(null)">{{ texts.addRoot }}</button>
-        <div class="directory-filters">
-          <button id="allRoots" :class="!taskRoot?'on':''" @click="selectRoot('')">{{ texts.allDirectories }}</button>
-          <button :class="taskRoot==='@other'?'on':''" @click="selectRoot('@other')">{{ texts.otherTasks }}</button>
-        </div>
         <label class="muted">{{ texts.searchDirectory }}</label><input id="directorySearch" :value="directoryQuery" @input="searchDirectory"/>
+        <button id="allRoots" :class="!taskRoot?'context-item on':'context-item'" @click="selectRoot('')"><label>{{ texts.allDirectories }}</label></button>
         <ScrollView id="directoryListScroll"><div class="directory-list">
           <button v-for="d in shownDirectories" :key="d.id" :id="'directory-'+d.id" class="context-item directory-item" :class="taskRoot===d.path?'on':''" @click="selectRoot(d.path)">
             <div class="column fill"><label class="directory-name">{{ d.name||d.path }}</label><label class="muted directory-path">{{ d.path }}</label></div>
@@ -270,7 +271,7 @@ export default {
         <div v-show="tab==='tasks' &amp;&amp; chosenDirectory.path" class="row directory-actions"><button id="editSelectedRoot" @click="editRoot(chosenDirectory)">{{ texts.edit }}</button><button @click="send('openPath',{path:chosenDirectory.path})">{{ texts.open }}</button></div>
       </div>
       <div class="workspace">
-      <div id="page-tasks" v-show="tab==='tasks'" class="content" :opacity="pageOpacity" transition="opacity 180ms ease-out">
+      <div id="page-tasks" v-show="tab==='tasks'" class="content">
         <div class="page-header"><label class="heading">{{ texts.tasks }}</label><div class="spacer"/><div id="runtimeStatus" class="runtime-badge"><div :class="runtime.known &amp;&amp; runtime.running?'runtime-dot running':'runtime-dot'"/><label class="muted">{{ !runtime.known?texts.runtimeUnknown:runtime.running?texts.runtimeRunning:texts.runtimeStopped }}</label></div></div>
         <div class="row"><button id="watchStart" :enabled="cliAllowed" @click="send('cli',{action:'start'})">{{ texts.startWatch }}</button><button id="watchStop" :enabled="cliAllowed" @click="send('cli',{action:'stop'})">{{ texts.stopWatch }}</button></div>
         <label v-show="actionError" class="error">{{ actionError }}</label>
@@ -278,9 +279,9 @@ export default {
         <div v-show="!rootEditor" class="column"><label class="muted">{{ texts.taskSearch }}</label><div class="row task-filters"><input id="taskSearch" class="fill" :value="taskQuery" @input="searchTasks"/>
           <div id="taskStatusHost" style="width:180px;height:32px"/>
         </div></div>
-        <ScrollView id="taskListScroll"><div class="column">
+        <ScrollView id="taskListScroll"><div id="taskBody" class="column">
         <div id="rootForm" v-show="rootEditor" class="card inline-form" :enabled="!saving &amp;&amp; !staging">
-          <div class="row"><label class="subheading">{{ rootOriginal?texts.editRoot:texts.addRoot }}</label><div class="spacer"/><button id="closeRootEditor" @click="rootAction('save')">{{ texts.collapse }}</button></div>
+          <div class="row"><label class="subheading">{{ rootOriginal?texts.editRoot:texts.addRoot }}</label><div class="spacer"/><button id="closeRootEditor" @click="rootAction('save')">{{ texts.back }}</button></div>
           <label class="muted">{{ rootOriginal?texts.inputDirectory:texts.rootBatchHint }}</label><textarea id="rootInput" v-model="rootInput" style="height:84px"/><button id="browseRoot" @click="send('browse',{target:'rootInput'})">{{ texts.chooseDirectory }}</button>
           <label class="muted">{{ texts.rootOutput }}</label><div class="input-row"><input id="rootOutput" class="fill" v-model="rootOutput"/><button id="browseOutput" @click="send('browse',{target:'rootOutput'})">{{ texts.chooseOutput }}</button></div>
           <div class="action-row"><toggle id="rootDeepToggle" v-model="rootDeep"/><label>{{ texts.deep }}</label><button id="finishRoot" @click="rootAction('save')">{{ rootOriginal?texts.finishEditing:texts.addToList }}</button><button v-show="rootOriginal" @click="rootAction('delete')">{{ texts.deleteRoot }}</button></div>
@@ -296,11 +297,11 @@ export default {
           <div class="action-row"><button v-for="output in chosenTask.outputs" :key="output" @click="send('openPath',{path:output})">{{ texts.openOutput }}</button></div><textarea id="taskDetails" :value="chosenTask.details" style="height:130px"/></div>
         <label v-show="tasks.malformed" class="error">{{ tasks.malformed }} {{ texts.invalidLogs }}</label>
       </div>
-      <div id="page-config" v-show="tab==='config'" class="content" :opacity="pageOpacity" transition="opacity 180ms ease-out">
+      <div id="page-config" v-show="tab==='config'" class="content">
         <div class="page-header"><label class="heading">{{ texts.config }}</label><div class="spacer"/><button id="watchReload" :enabled="cliAllowed" @click="send('cli',{action:'reload'})">{{ texts.reload }}</button></div>
         <label v-show="actionError" class="error">{{ actionError }}</label>
         <label class="muted">{{ texts.settingSearch }}</label><input id="configSearch" :value="configQuery" @input="searchConfig"/>
-        <ScrollView id="configListScroll"><div class="column">
+        <ScrollView id="configListScroll"><div id="configBlocks" class="column">
           <div v-show="!configCategory &amp;&amp; !configQuery &amp;&amp; configPage===0" class="card settings-row">
             <div class="setting-copy"><label class="setting-title">{{ texts.startup }}</label><label class="muted">{{ texts.startupDescription }}</label></div>
             <button id="startupToggle" :enabled="cliAllowed" @click="send('cli',{action:startup.enabled?'startupDisable':'startupEnable'})">{{ startup.enabled?texts.startupOff:texts.startupOn }}</button>
@@ -331,13 +332,13 @@ export default {
         </div></ScrollView>
         <div v-show="configPages>1" class="pager"><button :enabled="configPage>0" @click="configPage=configPage-1">{{ texts.previous }}</button><label>{{ configPage+1 }} / {{ configPages }}</label><button :enabled="configPage+1 &lt; configPages" @click="configPage=configPage+1">{{ texts.next }}</button></div>
       </div>
-      <div id="page-passwords" v-show="tab==='passwords'" class="content" :opacity="pageOpacity" transition="opacity 180ms ease-out">
-        <div class="page-header"><label class="heading">{{ texts.passwords }}</label><div class="spacer"/><button v-show="!passwordEditor" id="newPassword" type="primary" @click="editPassword(null)">{{ texts.addPasswords }}</button></div>
+      <div id="page-passwords" v-show="tab==='passwords'" class="content">
+        <div class="page-header"><label class="heading">{{ texts.passwords }}</label></div>
         <label v-show="actionError" class="error">{{ actionError }}</label>
-        <div class="password-tabs"><button id="savedPasswords" :class="passwordScope==='@all'?'on':''" @click="selectScope('@all')">{{ texts.savedPasswords }}</button><button id="clipboardHistory" :class="passwordScope==='@history'?'on':''" @click="selectScope('@history')">{{ texts.history }}</button><label class="muted">{{ texts.passwordSearch }}</label><input id="passwordSearch" :value="passwordQuery" @input="searchPasswords"/></div>
-        <ScrollView id="passwordListScroll"><div class="column">
+        <div class="password-tabs"><button id="newPassword" :class="passwordEditor &amp;&amp; !passwordOriginal?'on':''" @click="editPassword(null)">{{ texts.addPasswords }}</button><button id="savedPasswords" :class="passwordScope==='@all' &amp;&amp; !passwordEditor?'on':''" @click="selectScope('@all')">{{ texts.savedPasswords }}</button><button id="clipboardHistory" :class="passwordScope==='@history' &amp;&amp; !passwordEditor?'on':''" @click="selectScope('@history')">{{ texts.history }}</button><label class="muted">{{ texts.passwordSearch }}</label><input id="passwordSearch" :value="passwordQuery" @input="searchPasswords"/></div>
+        <ScrollView id="passwordListScroll"><div id="passwordBody" class="column">
           <div id="passwordForm" v-show="passwordEditor" class="card inline-form" :enabled="!saving &amp;&amp; !staging">
-            <div class="row"><label class="subheading">{{ passwordOriginal?texts.editPassword:texts.addPasswords }}</label><div class="spacer"/><button id="closePasswordEditor" @click="passwordAction('save')">{{ texts.collapse }}</button></div>
+            <div class="row"><label class="subheading">{{ passwordOriginal?texts.editPassword:texts.addPasswords }}</label><div class="spacer"/><button id="closePasswordEditor" @click="passwordAction('save')">{{ texts.back }}</button></div>
               <div class="composer-fields"><div class="composer-field"><label class="subheading">{{ texts.passwordText }}</label><label v-show="!passwordOriginal" class="muted">{{ texts.batchHint }}</label><textarea id="passwordValue" v-model="passwordValue" class="password-input"/></div>
               <div class="composer-field"><label class="subheading">{{ texts.scopeLabel }}</label><label class="muted">{{ texts.scopeDescription }}</label><textarea id="passwordScopes" v-model="scopeText" class="password-input"/></div></div>
               <div class="action-row"><button id="browseScope" @click="send('browse',{target:'scopeText'})">{{ texts.chooseScope }}</button><button v-show="passwordOriginal &amp;&amp; scopeText" @click="passwordAction('global')">{{ texts.makeGlobal }}</button><button id="finishPassword" @click="passwordAction('save')">{{ passwordOriginal?texts.finishEditing:texts.addToList }}</button><button v-show="passwordOriginal" @click="passwordAction('delete')">{{ texts.deletePassword }}</button></div>

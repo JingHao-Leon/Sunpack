@@ -32,10 +32,6 @@
       "zh": "全部目录",
       "en": "All folders"
     },
-    "otherTasks": {
-      "zh": "其他任务",
-      "en": "Other tasks"
-    },
     "addRoot": {
       "zh": "添加监控目录",
       "en": "Add monitored folder"
@@ -123,6 +119,10 @@
     "collapse": {
       "zh": "收起",
       "en": "Close"
+    },
+    "back": {
+      "zh": "返回",
+      "en": "Back"
     },
     "inputDirectory": {
       "zh": "输入目录",

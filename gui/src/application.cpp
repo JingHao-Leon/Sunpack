@@ -1,4 +1,5 @@
 #include "application.hpp"
+#include "motion.hpp"
 #include "presentation.hpp"
 #include "main_uix.h"
 #include <commctrl.h>
@@ -92,6 +93,7 @@ void Application::publish(Json patch) {
 void Application::apply_pending() {
     Json patch;
     { std::lock_guard<std::mutex> lock(mutex_); patch=std::move(pending_); pending_=Json::object(); notified_=false; }
+    auto transition=patch.value("viewTransition",Json::object()); patch.erase("viewTransition");
     VisualBatch visual(window_);
     if(patch.contains("stagedEdit")) {
         const auto& staged=patch["stagedEdit"];
@@ -168,6 +170,10 @@ void Application::apply_pending() {
         }
     }
     if(patch.contains("fields") || patch.contains("saving")) sync_toggles();
+    if(!transition.empty()) {
+        ui_window_relayout(window_);
+        motion::enter(window_,transition.at("id").get<std::string>().c_str(),transition.value("x",0.0f),transition.value("y",0.0f));
+    }
     if(patch.contains("language")) {
         auto language=patch["language"].get<std::string>();
         ui_window_set_title(window_,wide(tr("title",language)).c_str());
@@ -178,18 +184,12 @@ void Application::navigate(const std::string& tab) {
     if(tab!="tasks" && tab!="config" && tab!="passwords") return;
     if(page_value(page_,"tab")==tab) return;
     VisualBatch visual(window_);
-    BOOL animations=TRUE;
-    SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION,0,&animations,0);
-    if(animations) {
-        // Start from a readable incoming view, never from a blank/transparent
-        // frame. Core UI owns the finite transition timer and stops it at rest.
-        auto incoming=ui_widget_find_by_id(ui_page_root(page_),("page-"+tab).c_str());
-        if(incoming) { ui_widget_set_opacity(incoming,0.82f); ui_widget_destroy(incoming); }
-        ui_page_set_float(page_,"pageOpacity",0.82f);
-    }
+    motion::finish(window_,("page-"+page_value(page_,"tab").get<std::string>()).c_str());
     set_text(page_,"tab",tab);
-    ui_page_set_float(page_,"pageOpacity",1.0f);
     set_text(page_,"actionError","");
+    ui_window_relayout(window_);
+    motion::enter(window_,("page-"+tab).c_str());
+    motion::select(window_,"navIndicator",tab=="tasks"?"tabTasks":tab=="config"?"tabConfig":"tabPasswords");
 }
 void Application::sync_toggles() {
     auto drafts=page_value(page_,"toggleDrafts");
@@ -208,6 +208,7 @@ void Application::reveal_form(bool password) {
     if(scroll) { ui_debug_scroll_set(scroll,0); ui_widget_destroy(scroll); }
     auto input=ui_widget_find_by_id(ui_page_root(page_),password?"passwordValue":"rootInput");
     if(input) { ui_window_focus_widget(window_,input); ui_widget_destroy(input); }
+    motion::enter(window_,password?"passwordForm":"rootForm",0,12);
 }
 void Application::bind_controls(const Json& fields) {
     for(auto& field:fields) {
@@ -321,6 +322,11 @@ void Application::handle_command(Json command) {
     auto op=command.value("op",std::string());
     auto p=command.value("payload",Json::object());
     if(op=="navigate") { navigate(p.value("tab",std::string())); return; }
+    if(op=="animateView") {
+        auto id=p.value("id",std::string());
+        if(id=="configBlocks") { VisualBatch visual(window_); ui_window_relayout(window_); motion::enter(window_,id.c_str(),0,12); }
+        return;
+    }
     if(op=="revealForm") { reveal_form(p.value("kind",std::string())=="password"); return; }
     if(op=="browse") {
         auto selected=choose_directory(hwnd_);
@@ -513,9 +519,13 @@ void Application::work() {
                 auto op=command.value("op",std::string()); auto p=command.value("payload",Json::object());
                 try {
                     if(op=="filterTasks") {
+                        bool switch_root=view.task_root!=p.value("root",std::string());
                         view.task_query=p.value("query",std::string()); view.task_root=p.value("root",std::string());
                         view.task_status=p.value("status",std::string()); view.task_page=p.value("page",size_t(0)); tasks_changed=true;
+                        if(switch_root) edit_feedback["viewTransition"]={{"id","taskBody"},{"y",12}};
                     } else if(op=="filterPasswords") {
+                        auto scope=p.value("scope",std::string("@all"));
+                        if(view.password_scope!=scope) edit_feedback["viewTransition"]={{"id","passwordBody"},{"x",scope=="@history"?20:-20}};
                         view.password_query=p.value("query",std::string()); view.password_scope=p.value("scope",std::string("@all"));
                         view.password_page=p.value("page",size_t(0)); passwords_changed=true;
                     } else if(op=="stagePassword" || op=="stageRoot") {

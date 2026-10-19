@@ -4,23 +4,36 @@
 #include <iostream>
 #include <dwmapi.h>
 #include <cstring>
+#include <ui/ui_context.h>
+#include <ui/ui_window.h>
+#include <ui/controls.h>
 using namespace spg;
 namespace {
 struct AnimationFrames {
-    bool finished=false, layout=false;
+    bool finished=false, layout=false, stopped=false;
     unsigned frames=0;
+    std::vector<double> intervals;
     AnimationFrames() {
         ui_trace_set_sink([](const UiTraceEvent* event,void* data){
+            auto& self=*static_cast<AnimationFrames*>(data);
+            if(!std::strcmp(event->name,"motion_stopped")) self.stopped=true;
             if(std::strcmp(event->name,"animation_frame")) return;
-            auto& self=*static_cast<AnimationFrames*>(data); ++self.frames;
+            ++self.frames;
             for(uint32_t i=0;i<event->field_count;++i) {
                 const auto& f=event->fields[i];
                 if(!std::strcmp(f.key,"remaining_count") && f.i64==0) self.finished=true;
-                if(!std::strcmp(f.key,"needs_layout") && f.i64!=0) self.layout=true;
+                if(!std::strcmp(f.key,"needs_layout") && (f.boolean || f.i64)) self.layout=true;
+                if(!std::strcmp(f.key,"frame_interval_ms") && f.f64>0) self.intervals.push_back(f.f64);
             }
         },this);
     }
-    ~AnimationFrames() { ui_trace_set_sink(nullptr,nullptr); }
+    ~AnimationFrames() {
+        ui_trace_set_sink(nullptr,nullptr);
+        if(GetEnvironmentVariableW(L"SUNPACK_GUI_MOTION_DIAGNOSTICS",nullptr,0)) {
+            std::sort(intervals.begin(),intervals.end());
+            if(!intervals.empty()) std::cerr<<"Motion: frames="<<frames<<"; interval median="<<intervals[intervals.size()/2]<<"ms; max="<<intervals.back()<<"ms; layout="<<layout<<"; stopped="<<stopped<<'\n';
+        }
+    }
 };
 Json state(UiPage page,const char* key) { char* text=ui_page_get_json(page,key); if(!text) throw std::runtime_error(std::string("UI state unavailable: ")+key); auto j=parse_json(text); ui_page_free(text); return j; }
 UiRect rect(Application& app,const std::string& id) {
@@ -37,7 +50,7 @@ Json rendered_widget(Application& app,const std::string& id) {
     };
     auto* found=find(tree); assert(found); return *found;
 }
-void pump(const std::function<bool()>& condition) {
+void pump(const std::function<bool()>& condition, const char* phase="UI event") {
     auto deadline=GetTickCount64()+10000;
     for(;;) {
         try { if(condition()) return; }
@@ -47,11 +60,30 @@ void pump(const std::function<bool()>& condition) {
             if(error.code!=ERROR_FILE_NOT_FOUND && error.code!=ERROR_PATH_NOT_FOUND && error.code!=ERROR_SHARING_VIOLATION) throw;
         }
         DWORD left=DWORD(deadline>GetTickCount64()?deadline-GetTickCount64():0);
-        if(!left) throw std::runtime_error("UI event timed out");
+        if(!left) throw std::runtime_error(std::string(phase)+" timed out");
         MsgWaitForMultipleObjectsEx(0,nullptr,left,QS_ALLINPUT,MWMO_INPUTAVAILABLE);
         MSG message;
         while(PeekMessageW(&message,nullptr,0,0,PM_REMOVE)) { if(message.message==WM_QUIT) continue; TranslateMessage(&message); DispatchMessageW(&message); }
     }
+}
+void settle_motion(Application& app) {
+    Json pending;
+    try { pump([&] {
+        pending=Json::array();
+        auto root=ui::GetContext().GetWindow(app.window())->Root();
+        std::function<bool(ui::Widget*)> settled=[&](ui::Widget* widget) {
+            if(!widget->visible) return true;
+            if(widget->opacity<0.999f || std::abs(widget->animationX)>0.01f) { pending.push_back({widget->id,widget->opacity,widget->animationX}); return false; }
+            if(widget->id=="navIndicator") {
+                auto tab=state(app.page(),"tab").get<std::string>();
+                auto* target=root->FindById(tab=="tasks"?"tabTasks":tab=="config"?"tabConfig":"tabPasswords");
+                if(std::abs(widget->rect.top+widget->animationY+(widget->rect.bottom-widget->rect.top)/2-(target->rect.top+target->rect.bottom)/2)>0.01f) { pending.push_back({widget->id,widget->rect.top,widget->animationY,target->rect.top,target->rect.bottom}); return false; }
+            } else if(std::abs(widget->animationY)>0.01f) { pending.push_back({widget->id,widget->animationY}); return false; }
+            for(auto& child:widget->Children()) if(!settled(child.get())) return false;
+            return true;
+        };
+        return settled(root.get());
+    }); } catch(...) { std::cerr<<"Unfinished motion: "<<pending<<'\n'; throw; }
 }
 void click(Application& app,const char* id) {
     ui_window_relayout(app.window());
@@ -110,7 +142,7 @@ void screenshot(Application& app,const wchar_t* name) {
     wchar_t path[32768];
     auto n=GetEnvironmentVariableW(L"SUNPACK_GUI_SCREENSHOTS",path,32768);
     if(!n || n>=32768) return;
-    fs::create_directories(path); ui_debug_pump(); ui_window_relayout(app.window());
+    fs::create_directories(path); settle_motion(app); ui_debug_pump(); ui_window_relayout(app.window());
     char* tree=ui_debug_dump_tree(app.window());
     if(tree) { atomic_write(fs::path(path)/(std::wstring(name)+L".json"),tree); ui_debug_free(tree); }
     assert(ui_debug_screenshot(app.window(),(fs::path(path)/name).c_str())==0);
@@ -141,6 +173,8 @@ int wmain(int argc,wchar_t** argv) {
             if(SUCCEEDED(DwmGetWindowAttribute(static_cast<HWND>(ui_window_hwnd(app.window())),DWMWA_TRANSITIONS_FORCEDISABLED,&disabled,sizeof(disabled)))) assert(!disabled);
             std::cerr<<"Initial files loaded\n";
             assert(state(app.page(),"tasks")["total"]==1);
+            assert(!state(app.page(),"texts").contains("otherTasks"));
+            assert(rect(app,"allRoots").top>=rect(app,"directorySearch").bottom);
             click(app,"taskSearch"); ui_debug_type_text(app.window(),L"missing");
             try { pump([&]{return state(app.page(),"tasks")["total"]==0;}); }
             catch(...) { std::cerr<<"Search tasks: "<<state(app.page(),"taskQuery")<<" requests="<<state(app.page(),"requests")<<" error="<<ui_page_last_error(app.page())<<"\n"; screenshot(app,L"search-failed.png"); throw; }
@@ -193,6 +227,16 @@ int wmain(int argc,wchar_t** argv) {
             auto content=ui_widget_find_by_id(ui_page_root(app.page()),"page-config");
             assert(content && ui_widget_get_opacity(content)>0); // No blank incoming frame.
             pump([&]{return ui_widget_get_opacity(content)>=0.999f;}); ui_widget_destroy(content);
+            {
+                // Navigation must finish at the latest selection even when
+                // interrupted; the indicator travels rather than blinking.
+                AnimationFrames animation;
+                click(app,"tabPasswords"); click(app,"tabTasks"); click(app,"tabConfig");
+                pump([&]{return state(app.page(),"tab")=="config";});
+                settle_motion(app); pump([&]{return animation.stopped;});
+                auto* indicator=ui::GetContext().GetWindow(app.window())->Root()->FindById("navIndicator");
+                assert(indicator->animationY>0);
+            }
             stable_commands("watchReload","reload",Json::array({"watch","reload"}));
             auto startup_enabled=state(app.page(),"startup")["enabled"].get<bool>();
             stable_commands("startupToggle",startup_enabled?"startupDisable":"startupEnable",Json::array({"watch","startup",startup_enabled?"disable":"enable"}));
@@ -238,8 +282,26 @@ int wmain(int argc,wchar_t** argv) {
             {
             AnimationFrames animation;
             assert(ui_debug_toggle_set(app.window(),toast,0)==0);
-            pump([&]{return animation.finished;});
+            pump([&]{return animation.finished && animation.stopped;},"Toggle motion");
             assert(animation.frames>1 && !animation.layout);
+            }
+            {
+                AnimationFrames animation;
+                auto bounds=ui_widget_get_rect(toast);
+                float x=(bounds.left+bounds.right)/2,y=(bounds.top+bounds.bottom)/2;
+                assert(ui_debug_mouse_move(app.window(),x,y)==0);
+                pump([&]{return animation.finished && animation.stopped;},"Toggle hover");
+                animation.finished=animation.stopped=false;
+                assert(ui_debug_mouse_down(app.window(),x,y)==0);
+                pump([&]{return animation.finished && animation.stopped;},"Toggle press");
+                assert(ui_debug_mouse_up(app.window(),x,y)==0);
+                assert(state(app.page(),"changeCount")==0);
+                assert(ui_debug_key(app.window(),VK_SPACE)==0);
+                assert(state(app.page(),"changeCount")==1);
+                animation.finished=animation.stopped=false;
+                assert(ui_debug_mouse_move(app.window(),0,0)==0);
+                pump([&]{return animation.finished && animation.stopped;},"Toggle release");
+                assert(!animation.layout);
             }
             ui_widget_destroy(toast);
             click(app,"saveAll");
@@ -300,6 +362,9 @@ int wmain(int argc,wchar_t** argv) {
             assert(state(app.page(),"passwords")["rows"][0]["value"]=="  #中文  ");
             assert(state(app.page(),"passwordScope")=="@all");
             assert(!ui_widget_find_by_id(ui_page_root(app.page()),"globalPasswords"));
+            auto add_bounds=rect(app,"newPassword"), saved_bounds=rect(app,"savedPasswords");
+            assert(add_bounds.left<saved_bounds.left && add_bounds.top==saved_bounds.top);
+            assert(state(app.page(),"texts")["back"]=="返回");
             click(app,"newPassword"); assert(state(app.page(),"passwordEditor")==true);
             click(app,"passwordValue"); ui_debug_type_text(app.window(),L"添加的密码\n  #批量  \n\n添加的密码");
             assert(state(app.page(),"passwordValue")=="添加的密码\n  #批量  \n\n添加的密码");

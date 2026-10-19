@@ -1,0 +1,34 @@
+# Core UI in SunPack
+
+Upstream: https://github.com/ghboke/core-ui
+
+Imported commit: `126330eefdefe724ec96eb543681f715bd6be252`.
+The tracked upstream source files, including its bundled LunaSVG and PlutoVG,
+are vendored here. Git metadata, downloaded dependencies and build outputs are
+excluded. SunPack builds this directory directly; it does not fetch Core UI or
+apply a patch at configure time. Core UI's own upstream version metadata is
+preserved.
+
+Local changes:
+
+- Sample finite animations with a monotonic high precision clock and continue
+  interrupted animations from their current visual position.
+- Pace visible motion on the existing render thread with vertical sync. Request
+  the next animation frame after presentation, carrying window identity rather
+  than widget pointers across threads. Stop on completion, hide or destruction.
+- Add paint-only translation and Windows Fluent entrance/point-to-point easing.
+- Give ToggleSwitch separate movement, color and hover/pressed shape animations,
+  keyboard handling, dark-theme thumb contrast and system animation preference.
+- Keep layout geometry stable while drawing translated subtrees.
+
+The framework is MIT licensed; see [LICENSE](LICENSE). The original license and
+copyright notices are preserved, including [LunaSVG](third_party/lunasvg/LICENSE),
+[PlutoVG](third_party/lunasvg/plutovg/LICENSE), and the additional notices in their
+source files (including FreeType and stb). Built distributions include the
+framework, LunaSVG, PlutoVG, QuickJS and JSON library licenses.
+
+Motion references:
+
+- https://learn.microsoft.com/en-us/windows/apps/design/motion/
+- https://learn.microsoft.com/en-us/windows/apps/design/motion/page-transitions
+- https://github.com/microsoft/microsoft-ui-xaml/blob/main/controls/dev/CommonStyles/ToggleSwitch_themeresources.xaml

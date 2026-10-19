@@ -2845,26 +2845,18 @@ void UiWindowImpl::OnMouseDown(float x, float y) {
         }
     }
 
-    // Check ScrollView scrollbar clicks (overlay scrollbar area)
-    {
-        bool handledByScrollbar = false;
-        ForEachWidget(root_.get(), [&](Widget* w) {
-            if (handledByScrollbar) return;
-            auto* sv = dynamic_cast<ScrollViewWidget*>(w);
-            if (!sv || !sv->visible || !sv->NeedsScrollbar()) return;
-            if (!sv->Contains(dx, dy)) return;
-            // Only intercept clicks in the scrollbar track region
-            if (dx < sv->rect.right - 10) return;
-
-            MouseEvent e{dx, dy, 0, true};
-            if (sv->OnMouseDown(e)) {
-                handledByScrollbar = true;
-                pressedWidget_ = sv;
-                SetCapture(hwnd_);
-            }
-        });
-
-        if (handledByScrollbar) {
+    // Route overlay scrollbars through the actual hit ancestry, innermost first.
+    // A hidden page's ScrollView can still be locally visible with stale bounds;
+    // sweeping the entire tree lets that scrollbar steal the visible page's drag.
+    // HitTest already enforces ancestor visibility, clipping and stacking order.
+    auto* hit = root_->HitTest(dx, dy);
+    for (Widget* w = hit; w; w = w->Parent()) {
+        auto* sv = dynamic_cast<ScrollViewWidget*>(w);
+        if (!sv) continue;
+        MouseEvent e{dx, dy, 0, true};
+        if (sv->OnMouseDown(e)) {
+            pressedWidget_ = sv;
+            SetCapture(hwnd_);
             UpdateCaretBlinkTimer();
             InvalidateNow();
             return;
@@ -2872,7 +2864,6 @@ void UiWindowImpl::OnMouseDown(float x, float y) {
     }
 
     // Hit test and dispatch
-    auto* hit = root_->HitTest(dx, dy);
 
     // Check if a Splitter bar was clicked (Splitter intercepts before children)
     {

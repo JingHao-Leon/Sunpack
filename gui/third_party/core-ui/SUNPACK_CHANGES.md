@@ -24,6 +24,9 @@ Local changes:
   motion, on the same finite paint-only animation host. Respect system settings.
 - Remove the redundant ScrollView layout during wheel dispatch: scrolling already
   shifts arranged rectangles, and the extra layout lost the text measure context.
+- Route scrollbar presses through the actual hit widget's ancestor chain instead
+  of sweeping all ScrollViews. Hidden pages with stale bounds cannot capture a
+  visible scrollbar's drag; nested scrollbars respect clipping and stacking.
 - Cache intrinsic text widths across layout passes/resizes, keyed by exact text
   and DWrite format. Keep at most 1024 scalar results and 65536 UTF-16 characters;
   clear on font/fallback changes, factory reinitialization and target release.

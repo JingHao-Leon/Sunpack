@@ -250,6 +250,50 @@ void resize_tasks(Application& app) {
     assert(ui_debug_combo_select(app.window(),theme,choice)==0);
     // Application owns the selector handle, as with the existing theme checks.
 }
+void drag_after_wheel(Application& app) {
+    // Keep a full task list mounted behind the configuration page. Its stale
+    // scrollbar overlaps the visible page, but must never receive pointer input.
+    ui_window_set_size(app.window(),850,560);
+    click(app,"tabConfig");
+    pump([&]{return state(app.page(),"tab")=="config";});
+    settle_motion(app);
+    auto root=ui::GetContext().GetWindow(app.window())->Root();
+    auto* active=dynamic_cast<ui::ScrollViewWidget*>(root->FindById("configListScroll"));
+    auto* hidden=dynamic_cast<ui::ScrollViewWidget*>(root->FindById("taskListScroll"));
+    assert(active && hidden && active->NeedsScrollbar() && hidden->NeedsScrollbar());
+    auto scroll=ui_widget_find_by_id(ui_page_root(app.page()),"configListScroll"); assert(scroll);
+    const float hidden_y=hidden->ScrollY();
+    for(int delta:{-120,120,-120,120}) {
+        const float before_wheel=active->ScrollY();
+        assert(ui_debug_wheel(app.window(),scroll,delta)==0);
+        assert(std::abs(active->ScrollY()-before_wheel)>0.1f);
+        // No relayout between wheel and press: that can hide routing failures.
+        const auto bounds=active->rect;
+        float height=bounds.bottom-bounds.top;
+        const auto content=active->Children().front()->rect;
+        float extent=content.bottom-content.top;
+        float thumb=std::max(20.0f,height*height/extent);
+        float x=bounds.right-4;
+        float y=bounds.top+active->ScrollY()/(extent-height)*(height-thumb)+thumb/2;
+        float from=active->ScrollY(),dy=delta<0?12.0f:-12.0f;
+        assert(ui_debug_mouse_move(app.window(),x,y)==0);
+        assert(ui_debug_mouse_down(app.window(),x,y)==0);
+        assert(GetCapture()==static_cast<HWND>(ui_window_hwnd(app.window())));
+        assert(std::abs(active->ScrollY()-from)<0.1f);
+        assert(ui_debug_mouse_move(app.window(),x,y+dy)==0);
+        assert(ui_debug_mouse_up(app.window(),x,y+dy)==0);
+        if((active->ScrollY()-from)*dy<=0 || hidden->ScrollY()!=hidden_y)
+            throw std::runtime_error("Scrollbar drag after wheel was lost or sent to the hidden task page");
+        assert(GetCapture()!=static_cast<HWND>(ui_window_hwnd(app.window())));
+        float released=active->ScrollY();
+        assert(ui_debug_mouse_move(app.window(),x,y+dy*2)==0);
+        assert(active->ScrollY()==released && hidden->ScrollY()==hidden_y);
+    }
+    ui_widget_destroy(scroll);
+    click(app,"tabTasks"); pump([&]{return state(app.page(),"tab")=="tasks";});
+    settle_motion(app);
+    ui_window_set_size(app.window(),1120,720);
+}
 }
 int wmain(int argc,wchar_t** argv) {
     if(argc>1 && std::wstring(argv[1])==L"--fake-cli") {
@@ -312,6 +356,7 @@ int wmain(int argc,wchar_t** argv) {
                 ui_page_set_json(app.page(),"requests","[]");
                 ui_debug_pump();
             }
+            drag_after_wheel(app);
             atomic_write(dir/".sunpack_watch"/"events.jsonl",Json({{"event","done"},{"path",utf8((dir/"carrier.001").wstring())}}).dump()+"\n");
             pump([&]{return state(app.page(),"tasks")["total"]==1;});
             assert(!state(app.page(),"texts").contains("otherTasks"));

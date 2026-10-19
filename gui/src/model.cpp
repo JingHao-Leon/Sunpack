@@ -487,9 +487,8 @@ Json task_rows(const EventLog& log,const WatchRoots& roots,const View& v,const s
         if(a->timestamp!=b->timestamp) return a->timestamp>b->timestamp;
         return a->sequence>b->sequence;
     });
-    size_t pages=std::max<size_t>(1,(rows.size()+99)/100), page=std::min(v.task_page,pages-1);
-    Json result={{"rows",Json::array()},{"total",rows.size()},{"page",page},{"pages",pages},{"malformed",log.malformed}};
-    for(size_t i=page*100;i<std::min(rows.size(),(page+1)*100);++i) {
+    Json result={{"rows",Json::array()},{"total",rows.size()},{"malformed",log.malformed}};
+    for(size_t i=0;i<rows.size();++i) {
         auto& t=*rows[i];
         const fs::path path=wide(t.path);
         auto key=path_key(path);
@@ -530,10 +529,8 @@ Json password_rows(const Json& passwords,const View& v,const std::string& langua
             rows.push_back({{"id",p.dump()+"#"+std::to_string(rows.size())},{"value",p["value"]},{"original",p.dump()},{"scopes",scopes}});
         }
     }
-    size_t pages=std::max<size_t>(1,(rows.size()+99)/100), page=std::min(v.password_page,pages-1);
-    Json subset=Json::array();
-    for(size_t i=page*100;i<std::min(rows.size(),(page+1)*100);++i) subset.push_back(std::move(rows[i]));
-    return {{"rows",subset},{"total",rows.size()},{"page",page},{"pages",pages}};
+    const auto total=rows.size();
+    return {{"rows",std::move(rows)},{"total",total}};
 }
 Json config_fields(const Json& config,const std::string& source,const std::string& language) {
     Json rows=Json::array();

@@ -4,19 +4,19 @@ export default {
   data() { return {
     tab:'tasks',theme:'system',themeChoice:0,appearance:'light',language:'en',texts:{},dispatch:false,requests:[],ready:false,busy:false,
     actionError:'',lastCommand:{},errors:{},logPath:'',cliAllowed:false,runtime:{known:false,running:false},
-    tasks:{rows:[],total:0,page:0,pages:1,malformed:0},passwords:{rows:[],total:0,page:0,pages:1},fields:[],directories:[],
-    startup:{enabled:false,command:''},directoryQuery:'',directoryLimit:50,
+    tasks:{rows:[],total:0,malformed:0},passwords:{rows:[],total:0},fields:[],directories:[],
+    startup:{enabled:false,command:''},directoryQuery:'',
     taskQuery:'',taskRoot:'',taskStatus:0,
     statusNames:['','等待处理','等待文件释放','准备处理','正在处理','成功','失败','挂起：等待密码','挂起：等待分卷','等待重试','跳过','已合并'],
     rootEditor:false,rootOriginal:'',rootInput:'',rootOutput:'',rootDeep:false,
-    configCategory:'',configQuery:'',configPage:0,drafts:{},toggleDrafts:{},saving:false,saveErrors:{},closeError:'',pendingFields:[],recordSaving:{passwords:false,roots:false},rootSession:0,passwordSession:0,rootBaseline:'',rootExpected:null,passwordBaseline:'',
+    configCategory:'',configQuery:'',drafts:{},toggleDrafts:{},saving:false,saveErrors:{},closeError:'',pendingFields:[],recordSaving:{passwords:false,roots:false},rootSession:0,passwordSession:0,rootBaseline:'',rootExpected:null,passwordBaseline:'',
     passwordScope:'@all',passwordQuery:'',passwordOriginal:'',passwordValue:'',scopeText:'',passwordEditor:false
   }; },
   computed: {
     rootDirty() { return this.rootEditor&&JSON.stringify({input:this.rootInput,output:this.rootOutput,deep:this.rootDeep})!==this.rootBaseline; },
     passwordDirty() { return this.passwordEditor&&(this.passwordOriginal?JSON.stringify({value:this.passwordValue,scopes:this.scopeText})!==this.passwordBaseline:this.passwordValue.length>0); },
     errorList() { return Object.keys(this.errors).map(k=>k+': '+this.errors[k]); },
-    shownDirectories() { let q=this.directoryQuery.toLowerCase(); return this.directories.filter(d=>d.watch&&d.path.toLowerCase().indexOf(q)>=0).slice(0,this.directoryLimit); },
+    shownDirectories() { let q=this.directoryQuery.toLowerCase(); return this.directories.filter(d=>d.watch&&d.path.toLowerCase().indexOf(q)>=0); },
     directoryCount() { return this.directories.filter(d=>d.watch).length; },
     chosenDirectory() { return this.directories.find(d=>d.watch&&d.path===this.taskRoot)||{path:'',effectiveOutput:''}; },
     categories() { let seen={}; return this.fields.filter(f=>{ if(seen[f.category]) return false; seen[f.category]=true; return true; }).map(f=>({id:f.category,label:f.categoryLabel})); },
@@ -30,8 +30,6 @@ export default {
       return groups;
     },
     matchingBlocks() { let q=this.configQuery.toLowerCase(); return this.configBlocks.filter(g=>(!this.configCategory||g.category===this.configCategory)&&(!q||(g.label+' '+g.module+' '+g.fields.map(f=>f.label+' '+f.description+' '+f.id).join(' ')).toLowerCase().indexOf(q)>=0)); },
-    shownBlocks() { return this.matchingBlocks.slice(this.configPage*8,(this.configPage+1)*8); },
-    configPages() { return Math.max(1,Math.ceil(this.matchingBlocks.length/8)); }
   },
   methods: {
     send(op,payload) {
@@ -40,15 +38,15 @@ export default {
       this.requests=requests.concat([{op:op,payload:payload||{}}]); this.dispatch=true;
     },
     go(tab) { this.send('navigate',{tab:tab}); },
-    selectCategory(category) { if(this.configCategory===category) return; this.configCategory=category; this.configPage=0; this.send('animateView',{id:'configBlocks'}); },
-    searchDirectory(value) { this.directoryQuery=value; this.directoryLimit=50; },
-    searchConfig(value) { this.configQuery=value; this.configPage=0; },
-    searchTasks(value) { this.taskQuery=value; this.filterTasks(0); },
-    searchPasswords(value) { this.passwordQuery=value; this.filterPasswords(0); },
-    filterTasks(page) { this.send('filterTasks',{query:this.taskQuery,root:this.taskRoot,status:this.statusNames[this.taskStatus]||'',page:Math.max(0,page||0)}); },
-    selectRoot(path) { if(this.rootOriginal&&this.rootDirty) { this.rootAction('save',{taskRoot:path,rootEditor:false}); return; } this.taskRoot=path; this.filterTasks(0); },
-    filterPasswords(page) { this.send('filterPasswords',{query:this.passwordQuery,scope:this.passwordScope,page:Math.max(0,page||0)}); },
-    selectScope(path) { if(this.recordSaving.passwords) return; if(this.passwordOriginal&&this.passwordDirty) { this.passwordAction('save',{passwordScope:path,passwordEditor:false}); return; } this.passwordScope=path; this.passwordEditor=false; this.filterPasswords(0); },
+    selectCategory(category) { if(this.configCategory===category) return; this.configCategory=category; this.send('animateView',{id:'configBlocks'}); },
+    searchDirectory(value) { this.directoryQuery=value; this.send('scrollTop',{id:'directoryItems'}); },
+    searchConfig(value) { this.configQuery=value; this.send('scrollTop',{id:'configBlocks'}); },
+    searchTasks(value) { this.taskQuery=value; this.filterTasks(); },
+    searchPasswords(value) { this.passwordQuery=value; this.filterPasswords(); },
+    filterTasks() { this.send('filterTasks',{query:this.taskQuery,root:this.taskRoot,status:this.statusNames[this.taskStatus]||''}); },
+    selectRoot(path) { if(this.rootOriginal&&this.rootDirty) { this.rootAction('save',{taskRoot:path,rootEditor:false}); return; } this.taskRoot=path; this.filterTasks(); },
+    filterPasswords() { this.send('filterPasswords',{query:this.passwordQuery,scope:this.passwordScope}); },
+    selectScope(path) { if(this.recordSaving.passwords) return; if(this.passwordOriginal&&this.passwordDirty) { this.passwordAction('save',{passwordScope:path,passwordEditor:false}); return; } this.passwordScope=path; this.passwordEditor=false; this.filterPasswords(); },
     rootState(d) { let input=d?d.path:'',output=d?d.output:'',deep=d?d.deep:false; return {rootSession:this.rootSession+1,rootOriginal:input,rootInput:input,rootOutput:output,rootDeep:deep,rootExpected:d?{output:output,deep:deep}:null,rootBaseline:JSON.stringify({input:input,output:output,deep:deep}),rootEditor:true}; },
     editRoot(d) { if(this.recordSaving.roots) return; let next=this.rootState(d); if(this.rootOriginal&&this.rootDirty) { this.rootAction('save',next); return; } Object.assign(this,next); this.send('revealForm',{kind:'root'}); },
     deleteListedRoot(d) {
@@ -87,7 +85,7 @@ export default {
       this.drafts=next; this.setSaveError(f.id,'');
     },
     passwordState(p) { let original=p?p.original:'',value=p?p.value:'',scopes=p?p.scopes:''; return {passwordSession:this.passwordSession+1,passwordOriginal:original,passwordValue:value,scopeText:scopes,passwordBaseline:JSON.stringify({value:value,scopes:scopes}),passwordEditor:true}; },
-    editPassword(p) { if(this.recordSaving.passwords) return; let next=this.passwordState(p); if(!next.passwordOriginal) next.passwordScope='@all'; if(this.passwordOriginal&&this.passwordDirty) { this.passwordAction('save',next); return; } let changed=next.passwordScope && this.passwordScope!==next.passwordScope; Object.assign(this,next); if(changed) this.filterPasswords(0); this.send('revealForm',{kind:'password'}); },
+    editPassword(p) { if(this.recordSaving.passwords) return; let next=this.passwordState(p); if(!next.passwordOriginal) next.passwordScope='@all'; if(this.passwordOriginal&&this.passwordDirty) { this.passwordAction('save',next); return; } let changed=next.passwordScope && this.passwordScope!==next.passwordScope; Object.assign(this,next); if(changed) this.filterPasswords(); this.send('revealForm',{kind:'password'}); },
     deleteListedPassword(p) {
       if(this.recordSaving.passwords) return;
       if(this.passwordOriginal===p.original) { this.passwordAction('delete'); return; }
@@ -194,8 +192,6 @@ export default {
   .error { color:#d15b48; font-size:12px; }
   .light .card, .task.light, .card.light { background:#fbfbfb; border:1px solid #e5e5e5; }
   .dark .card, .task.dark, .card.dark { background:#2b2b2b; border:1px solid #303030; }
-  .pager { flex-direction:row; align-items:center; gap:12px; }
-  .pager label { font-size:12px; color:var(--fg-2); }
   /* Actions keep their intrinsic text width even when a scrollbar appears.
      Flexible text/inputs yield space; action rows wrap instead of shrinking. */
   button { padding:6px 12px; border-radius:4px; min-height:32px; flex-shrink:0; cursor:pointer; }
@@ -284,12 +280,11 @@ export default {
         <div class="row"><label class="muted">{{ texts.searchDirectory }}</label><input id="directorySearch" class="fill" :value="directoryQuery" @input="searchDirectory"/></div>
         <button id="allRoots" :class="!taskRoot?'context-item on':'context-item'" @click="selectRoot('')"><label>{{ texts.allDirectories }}</label></button>
         </div>
-        <ScrollView id="directoryListScroll"><div class="directory-list">
+        <ScrollView id="directoryListScroll"><VirtualList id="directoryItems" class="directory-list" estimated-height="60px">
           <button v-for="d in shownDirectories" :key="d.id" :id="'directory-'+d.id" class="context-item directory-item" :class="taskRoot===d.path?'on':''" @click="selectRoot(d.path)">
             <div class="column fill"><label class="directory-name">{{ d.name||d.path }}</label><label class="muted directory-path">{{ d.path }}</label></div>
           </button>
-          <button id="moreDirectories" v-show="directoryLimit &lt; directoryCount" @click="directoryLimit=directoryLimit+50">{{ texts.moreDirectories }}</button>
-        </div></ScrollView>
+        </VirtualList></ScrollView>
         <div v-show="tab==='tasks' &amp;&amp; chosenDirectory.path" class="row directory-actions"><button id="editSelectedRoot" @click="editRoot(chosenDirectory)">{{ texts.edit }}</button><button @click="send('openPath',{path:chosenDirectory.path})">{{ texts.open }}</button><button id="deleteSelectedRoot" :enabled="!recordSaving.roots" @click="deleteListedRoot(chosenDirectory)">{{ texts.delete }}</button></div>
       </div>
       <div v-show="tab==='passwords'" class="spacer"/>
@@ -310,24 +305,24 @@ export default {
           <label v-show="saveErrors['@roots']" class="error">{{ saveErrors['@roots'] }}</label><div class="action-row"><toggle id="rootDeepToggle" :checked="rootDeep" @change="v=>{rootDeep=v;commitRoot();}"/><label>{{ texts.deep }}</label><button id="finishRoot" v-show="!rootOriginal" @click="rootAction('save')">{{ texts.addToList }}</button><button v-show="rootOriginal" @click="rootAction('delete')">{{ texts.deleteRoot }}</button></div>
         </div>
           <label v-show="tasks.total===0" class="muted">{{ texts.noTasks }}</label>
-          <div v-for="t in tasks.rows" :key="t.id" :id="'task-'+t.id" :class="'task '+appearance">
+          <VirtualList id="taskItems" class="column" estimated-height="68px"><div v-for="t in tasks.rows" :key="t.id" :id="'task-'+t.id" :class="'task '+appearance">
             <div class="row"><button :id="'taskName-'+t.id" class="taskname" @click="send('openTask',{id:t.id})">{{ t.name }}</button><div class="spacer"/><label class="status" :class="'status-'+t.statusTone">{{ t.statusText }}</label></div>
             <div class="row task-meta"><label :id="'taskRoot-'+t.id" class="muted fill">{{ texts.taskFolder }}{{ t.directory }}</label><label class="time">{{ t.time }}</label></div>
           </div>
+          </VirtualList>
         </div></ScrollView>
-        <div v-show="!rootEditor" class="pager"><button :enabled="tasks.page>0" @click="filterTasks(tasks.page-1)">{{ texts.previous }}</button><label>{{ tasks.page+1 }} / {{ tasks.pages }} · {{ tasks.total }} {{ texts.taskCount }}</label><button :enabled="tasks.page+1 &lt; tasks.pages" @click="filterTasks(tasks.page+1)">{{ texts.next }}</button></div>
         <label v-show="tasks.malformed" class="error">{{ tasks.malformed }} {{ texts.invalidLogs }}</label>
       </div>
       <div id="page-config" v-show="tab==='config'" class="content">
         <div class="page-header"><label class="heading">{{ texts.config }}</label></div>
         <label class="muted">{{ texts.settingSearch }}</label><input id="configSearch" :value="configQuery" @input="searchConfig"/>
         <ScrollView id="configListScroll"><div id="configBlocks" class="column">
-          <div v-show="!configCategory &amp;&amp; !configQuery &amp;&amp; configPage===0" class="card settings-row">
+          <div v-show="!configCategory &amp;&amp; !configQuery" class="card settings-row">
             <div class="setting-copy"><label class="setting-title">{{ texts.startup }}</label><label class="muted">{{ texts.startupDescription }}</label></div>
             <button id="startupToggle" :enabled="cliAllowed" @click="send('cli',{action:startup.enabled?'startupDisable':'startupEnable'})">{{ startup.enabled?texts.startupOff:texts.startupOn }}</button>
           </div>
-          <div v-show="!configCategory &amp;&amp; !configQuery &amp;&amp; configPage===0" class="card settings-row"><div class="setting-copy"><label class="setting-title">{{ texts.theme }}</label><label class="muted">{{ texts.themeDescription }}</label></div><div id="themeHost" style="width:180px;height:32px"/></div>
-          <div v-for="g in shownBlocks" :key="g.key" :id="'block-'+g.id" :class="'setting-card '+appearance">
+          <div v-show="!configCategory &amp;&amp; !configQuery" class="card settings-row"><div class="setting-copy"><label class="setting-title">{{ texts.theme }}</label><label class="muted">{{ texts.themeDescription }}</label></div><div id="themeHost" style="width:180px;height:32px"/></div>
+          <VirtualList id="configItems" class="column" estimated-height="140px"><div v-for="g in matchingBlocks" :key="g.key" :id="'block-'+g.id" :class="'setting-card '+appearance">
             <label v-show="(g.fields.length>1||g.module) &amp;&amp; !g.primary" class="block-heading">{{ g.label }}</label>
             <!-- This Core UI version binds inner loops through a conditional
                  scope. Groups are always nonempty; visibility uses v-show. -->
@@ -349,9 +344,9 @@ export default {
             </div>
             </div>
           </div>
+          </VirtualList>
           <label v-show="matchingBlocks.length===0" class="muted">{{ texts.noSettings }}</label>
         </div></ScrollView>
-        <div v-show="configPages>1" class="pager"><button :enabled="configPage>0" @click="configPage=configPage-1">{{ texts.previous }}</button><label>{{ configPage+1 }} / {{ configPages }}</label><button :enabled="configPage+1 &lt; configPages" @click="configPage=configPage+1">{{ texts.next }}</button></div>
       </div>
       <div id="page-passwords" v-show="tab==='passwords'" class="content">
         <div class="page-header"><label class="heading">{{ texts.passwords }}</label></div>
@@ -365,13 +360,13 @@ export default {
               <label v-show="saveErrors['@passwords']" class="error">{{ saveErrors['@passwords'] }}</label><div class="action-row"><button id="browseScope" @click="send('browse',{target:'scopeText'})">{{ texts.chooseScope }}</button><button v-show="passwordOriginal &amp;&amp; scopeText" @click="passwordAction('global',{})">{{ texts.makeGlobal }}</button><button id="finishPassword" v-show="!passwordOriginal" @click="passwordAction('save')">{{ texts.addToList }}</button><button id="deletePassword" v-show="passwordOriginal" @click="passwordAction('delete')">{{ texts.deletePassword }}</button></div>
           </div>
           <div :class="'history-list '+appearance"><label v-show="passwords.total===0" class="muted">{{ texts.noPasswords }}</label>
-            <div v-for="p in passwords.rows" :key="p.id" :id="'password-'+p.id" class="history-entry">
+            <VirtualList id="passwordItems" style="gap:0px" estimated-height="64px"><div v-for="p in passwords.rows" :key="p.id" :id="'password-'+p.id" class="history-entry">
               <div class="row history-row" :class="'row history-row '+(passwordScope==='@all'?'password-row':'')"><div class="password-copy"><label>{{ p.value }}</label><label v-show="passwordScope==='@all'" class="muted scope-value">{{ texts.scopeLabel }} · {{ p.scopes||texts.allFolders }}</label></div><button v-show="passwordScope==='@history'" class="history-copy" :id="'copy-history-'+p.id" @click="editPassword(p)">{{ texts.copyPassword }}</button><button v-show="passwordScope==='@all'" :id="'edit-password-'+p.id" @click="editPassword(p)">{{ texts.edit }}</button><button v-show="passwordScope==='@all'" :id="'delete-password-'+p.id" :enabled="!recordSaving.passwords" @click="deleteListedPassword(p)">{{ texts.delete }}</button></div>
               <div class="history-divider"/>
             </div>
+            </VirtualList>
           </div>
         </div></ScrollView>
-        <div class="pager"><button :enabled="passwords.page>0" @click="filterPasswords(passwords.page-1)">{{ texts.previous }}</button><label>{{ passwords.page+1 }} / {{ passwords.pages }} · {{ passwords.total }} {{ texts.entries }}</label><button :enabled="passwords.page+1 &lt; passwords.pages" @click="filterPasswords(passwords.page+1)">{{ texts.next }}</button></div>
       </div>
       </div>
     </div>

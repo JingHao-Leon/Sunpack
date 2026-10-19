@@ -180,7 +180,7 @@ void Application::acknowledge_save(const Json& ack) {
         if(!password && edit["operation"]=="delete" && page_value(page_,"taskRoot")==edit["original"]) {
             set_text(page_,"taskRoot","");
             auto statuses=page_value(page_,"statusNames"); auto index=page_value(page_,"taskStatus").get<size_t>();
-            handle_command(Json{{"op","filterTasks"},{"payload",{{"query",page_value(page_,"taskQuery")},{"root",""},{"status",statuses.at(index)},{"page",0}}}});
+            handle_command(Json{{"op","filterTasks"},{"payload",{{"query",page_value(page_,"taskQuery")},{"root",""},{"status",statuses.at(index)}}}});
         }
         const bool replace=password?edit["operation"]=="replace":edit["operation"]=="save";
         Json baseline, expected; std::string original;
@@ -221,10 +221,10 @@ void Application::acknowledge_save(const Json& ack) {
                     if(password) for(auto name:{"passwordOriginal","passwordValue","scopeText","passwordBaseline"}) set_text(page_,name,"");
                     else for(auto name:{"rootOriginal","rootInput","rootOutput","rootBaseline"}) set_text(page_,name,"");
                 }
-                if(job["nextState"].contains("passwordScope")) handle_command(Json{{"op","filterPasswords"},{"payload",{{"query",page_value(page_,"passwordQuery")},{"scope",page_value(page_,"passwordScope")},{"page",0}}}});
+                if(job["nextState"].contains("passwordScope")) handle_command(Json{{"op","filterPasswords"},{"payload",{{"query",page_value(page_,"passwordQuery")},{"scope",page_value(page_,"passwordScope")}}}});
                 if(job["nextState"].contains("taskRoot")) {
                     auto statuses=page_value(page_,"statusNames"); auto index=page_value(page_,"taskStatus").get<size_t>();
-                    handle_command(Json{{"op","filterTasks"},{"payload",{{"query",page_value(page_,"taskQuery")},{"root",page_value(page_,"taskRoot")},{"status",statuses.at(index)},{"page",0}}}});
+                    handle_command(Json{{"op","filterTasks"},{"payload",{{"query",page_value(page_,"taskQuery")},{"root",page_value(page_,"taskRoot")},{"status",statuses.at(index)}}}});
                 }
             }
         }
@@ -235,6 +235,7 @@ void Application::apply_pending() {
     Json patch;
     { std::lock_guard<std::mutex> lock(mutex_); patch=std::move(pending_); pending_=Json::object(); notified_=false; }
     auto transition=patch.value("viewTransition",Json::object()); patch.erase("viewTransition");
+    auto reset_scroll=patch.value("resetScroll",Json::array()); patch.erase("resetScroll");
     VisualBatch visual(window_);
     auto ack=patch.value("saveAck",Json()); patch.erase("saveAck");
     if(patch.contains("fields")) bind_controls(patch["fields"]);
@@ -263,6 +264,10 @@ void Application::apply_pending() {
     }
     if(!ack.is_null()) acknowledge_save(ack);
     if(patch.contains("fields") || !ack.is_null()) sync_toggles();
+    for(auto& id:reset_scroll) {
+        auto widget=ui_widget_find_by_id(ui_page_root(page_),id.get<std::string>().c_str());
+        if(widget) { ui_debug_scroll_set(widget,0); ui_widget_destroy(widget); }
+    }
     start_save();
     if(closing_ && active_save_.is_null() && saves_.empty()) PostMessageW(hwnd_,WM_CLOSE,0,0);
     if(!transition.empty()) {
@@ -403,7 +408,7 @@ void Application::rebuild_theme(const std::string& language) {
         auto* self=static_cast<Application*>(context);
         ui_page_set_int(self->page_,"taskStatus",index);
         auto statuses=page_value(self->page_,"statusNames");
-        self->handle_command(Json{{"op","filterTasks"},{"payload",{{"query",page_value(self->page_,"taskQuery")},{"root",page_value(self->page_,"taskRoot")},{"status",index>=0 && size_t(index)<statuses.size()?statuses[index]:Json("")},{"page",0}}}});
+        self->handle_command(Json{{"op","filterTasks"},{"payload",{{"query",page_value(self->page_,"taskQuery")},{"root",page_value(self->page_,"taskRoot")},{"status",index>=0 && size_t(index)<statuses.size()?statuses[index]:Json("")}}}});
     },this);
     ui_widget_add_child(host,status_widget_); ui_widget_destroy(host);
 }
@@ -422,6 +427,15 @@ void Application::handle_command(Json command) {
     auto op=command.value("op",std::string());
     auto p=command.value("payload",Json::object());
     if(op=="navigate") { navigate(p.value("tab",std::string())); return; }
+    if(op=="scrollTop" || op=="animateView") {
+        const auto id=p.value("id",std::string());
+        const char* scroll=id=="configBlocks"?"configListScroll":id=="directoryItems"?"directoryListScroll":nullptr;
+        if(scroll) {
+            auto widget=ui_widget_find_by_id(ui_page_root(page_),scroll);
+            if(widget) { ui_debug_scroll_set(widget,0); ui_widget_destroy(widget); }
+        }
+        if(op=="scrollTop") return;
+    }
     if(op=="animateView") {
         auto id=p.value("id",std::string());
         if(id=="configBlocks") { VisualBatch visual(window_); ui_window_relayout(window_); motion::enter(window_,id.c_str(),0,12); }
@@ -665,15 +679,19 @@ void Application::work() {
                 auto op=command.value("op",std::string()); auto p=command.value("payload",Json::object());
                 try {
                     if(op=="filterTasks") {
+                        if(!edit_feedback.contains("resetScroll")) edit_feedback["resetScroll"]=Json::array();
+                        edit_feedback["resetScroll"].push_back("taskListScroll");
                         bool switch_root=view.task_root!=p.value("root",std::string());
                         view.task_query=p.value("query",std::string()); view.task_root=p.value("root",std::string());
-                        view.task_status=p.value("status",std::string()); view.task_page=p.value("page",size_t(0)); tasks_changed=true;
+                        view.task_status=p.value("status",std::string()); tasks_changed=true;
                         if(switch_root) edit_feedback["viewTransition"]={{"id","taskBody"},{"y",12}};
                     } else if(op=="filterPasswords") {
+                        if(!edit_feedback.contains("resetScroll")) edit_feedback["resetScroll"]=Json::array();
+                        edit_feedback["resetScroll"].push_back("passwordListScroll");
                         auto scope=p.value("scope",std::string("@all"));
                         if(view.password_scope!=scope) edit_feedback["viewTransition"]={{"id","passwordBody"},{"x",scope=="@history"?20:-20}};
                         view.password_query=p.value("query",std::string()); view.password_scope=p.value("scope",std::string("@all"));
-                        view.password_page=p.value("page",size_t(0)); passwords_changed=true;
+                        passwords_changed=true;
                     } else if(op=="commit") {
                         auto kind=p.at("kind").get<std::string>();
                         auto result=save_changes(dir,p.value("fields",Json::array()),
@@ -769,8 +787,12 @@ void Application::work() {
             for(auto it=errors.begin();it!=errors.end();++it) displayed_errors[tr(it.key(),language)]=translated_error(it.value().get<std::string>(),language);
             patch["errors"]=std::move(displayed_errors); patch["logPath"]=utf8(log.path().wstring()); patch["ready"]=true;
             Json changed_patch=Json::object();
-            for(auto it=patch.begin();it!=patch.end();++it) if(!previous_patch.contains(it.key()) || previous_patch[it.key()]!=it.value()) {
-                previous_patch[it.key()]=it.value(); changed_patch[it.key()]=std::move(it.value());
+            for(auto it=patch.begin();it!=patch.end();++it) if(!previous_patch.contains(it.key()) || it.key()=="tasks" || it.key()=="passwords" || previous_patch[it.key()]!=it.value()) {
+                // These projections are generated only after source/filter
+                // changes. Keep an initialization marker, not a second full
+                // resident copy of the task/password list.
+                previous_patch[it.key()]=(it.key()=="tasks" || it.key()=="passwords")?Json():it.value();
+                changed_patch[it.key()]=std::move(it.value());
             }
             changed_patch.update(edit_feedback);
             if(!changed_patch.empty()) publish(std::move(changed_patch));

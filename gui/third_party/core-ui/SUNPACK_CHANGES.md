@@ -11,6 +11,13 @@ preserved.
 
 Local changes:
 
+- Add `VirtualList` for one keyed `v-for` inside a ScrollView: viewport-only
+  mounting, small overscan, focused-editor retention, variable measured row
+  heights, Fenwick position lookup and scroll-anchor correction. Viewport
+  updates reuse cached list data and existing iteration bindings; unmount
+  disposes callbacks, effects and closures. Wheel input supplies the text
+  measurer for newly mounted rows.
+
 - Honor `text-align` on text buttons, retaining centered text by default;
   task filename links use left alignment with the directory text below them.
 - Wire focus, blur and submit handlers inside keyed loop scopes as well as

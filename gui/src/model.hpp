@@ -51,7 +51,6 @@ public:
 };
 struct View {
     std::string task_query, task_root, task_status, password_query, password_scope = "@all";
-    size_t task_page = 0, password_page = 0;
 };
 Json task_rows(const EventLog& log, const WatchRoots& roots, const View& view, const std::string& language = "zh");
 // Resolve only on activation so removed/moved output directories fall back then.

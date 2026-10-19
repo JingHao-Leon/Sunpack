@@ -3045,6 +3045,8 @@ void UiWindowImpl::OnMouseUp(float x, float y) {
 }
 
 void UiWindowImpl::OnMouseWheel(float x, float y, int delta) {
+    // Virtual rows may mount and measure during this input event.
+    ActiveMeasureContextScope measureScope(measureContext_, renderer_);
     float dx = x / dpiScale_, dy = y / dpiScale_;
 
     if (root_) {

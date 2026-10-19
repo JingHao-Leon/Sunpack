@@ -192,7 +192,7 @@ void roots(Fixture& f) {
         all.entries.push_back({f.dir/std::to_wstring(i),"",false});
         log.accept(Json({{"event","done"},{"path",utf8((f.dir/std::to_wstring(i)/"file").wstring())},{"ts",i}}));
     }
-    auto rows=task_rows(log,all,view); assert(rows["total"]==501 && rows["rows"].size()==100 && rows["pages"]==6);
+    auto rows=task_rows(log,all,view); assert(rows["total"]==501 && rows["rows"].size()==501 && !rows.contains("pages"));
     assert(directory_rows(all,Json::object()).size()==503);
 }
 void batch_editing(Fixture& fixture) {

@@ -997,6 +997,12 @@ WidgetPtr ConstructByTag(const std::string& tag, const std::string& text,
     if (tag == "ScrollView" || tag == "scroll-view") {
         return std::make_shared<ScrollViewWidget>();
     }
+    if (tag == "VirtualList") {
+        auto list = std::make_shared<VirtualListWidget>();
+        for (const auto& a : node.attrs)
+            if (a.name == "estimated-height") list->estimatedHeight = std::max(1.0f, ResolvePx(a.rawValue));
+        return list;
+    }
     if (tag == "gh_img_view" || tag == "gh-img-view" ||
         tag == "gh_img" || tag == "gh-img") {
         return std::make_shared<GhImgViewWidget>();

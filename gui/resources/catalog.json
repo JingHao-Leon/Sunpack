@@ -88,10 +88,6 @@
       "zh": "密码适用目录",
       "en": "Password folder"
     },
-    "moreDirectories": {
-      "zh": "加载更多目录",
-      "en": "More folders"
-    },
     "watchHint": {
       "zh": "监控目录中的直接文件。",
       "en": "Monitors files directly inside each folder."
@@ -155,14 +151,6 @@
     "noTasks": {
       "zh": "没有符合筛选条件的任务。",
       "en": "No matching tasks."
-    },
-    "previous": {
-      "zh": "上一页",
-      "en": "Previous"
-    },
-    "next": {
-      "zh": "下一页",
-      "en": "Next"
     },
     "taskCount": {
       "zh": "个任务",

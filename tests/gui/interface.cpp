@@ -224,6 +224,30 @@ void popup_motion(Application& app,const char* id,bool upward=false) {
     assert(combo->SelectedIndex()==selected);
     assert(combo->rect.left==bounds.left && combo->rect.right==bounds.right);
 }
+// All records must be reachable without retaining widgets for previously
+// visited rows. The same check covers variable config blocks, dense passwords,
+// and task/directory lists; no wall-clock performance threshold.
+void virtual_tail(Application& app,const char* list_id,const char* scroll_id,size_t total) {
+    ui_window_focus_widget(app.window(),0);
+    ui_window_relayout(app.window());
+    auto* list=dynamic_cast<ui::VirtualListWidget*>(ui::GetContext().GetWindow(app.window())->Root()->FindById(list_id));
+    assert(list && total>0 && list->Children().size()<40);
+    auto* scroll=dynamic_cast<ui::ScrollViewWidget*>(ui::GetContext().GetWindow(app.window())->Root()->FindById(scroll_id)); assert(scroll);
+    for(int visit=0;visit<3;++visit) {
+        // Estimated heights settle when the last variable-height rows mount.
+        for(int pass=0;pass<3;++pass) { scroll->SetScrollY(1e9f); ui_window_relayout(app.window()); }
+        assert(!list->Indices().empty() && list->Indices().back()==total-1);
+        assert(list->Children().size()<40);
+        const auto& last=list->Children().back()->rect;
+        auto viewport=scroll->rect;
+        assert(last.top<viewport.bottom && last.bottom<=viewport.bottom+2);
+        scroll->SetScrollY(0); ui_window_relayout(app.window());
+        if(list->Indices().empty() || list->Indices().front()!=0 || list->Children().size()>=40) {
+            std::cerr<<"Virtual top "<<list_id<<" indices="; for(auto index:list->Indices()) std::cerr<<index<<","; std::cerr<<" rect="<<list->rect.top<<","<<list->rect.bottom<<" scroll="<<rendered_widget(app,scroll_id)<<"\n";
+        }
+        assert(!list->Indices().empty() && list->Indices().front()==0 && list->Children().size()<40);
+    }
+}
 void resize_tasks(Application& app) {
     settle_motion(app);
     std::vector<double> layouts;
@@ -238,7 +262,7 @@ void resize_tasks(Application& app) {
     ui_trace_set_sink(nullptr,nullptr);
     if(!layouts.empty()) {
         std::sort(layouts.begin(),layouts.end());
-        std::cerr<<"100-task resize layout: median="<<layouts[layouts.size()/2]<<"ms; max="<<layouts.back()<<"ms\n";
+        std::cerr<<"Virtual task resize layout: median="<<layouts[layouts.size()/2]<<"ms; max="<<layouts.back()<<"ms\n";
     }
     button_texts(app);
     screenshot(app,L"tasks-many.png");
@@ -342,9 +366,10 @@ int wmain(int argc,wchar_t** argv) {
             assert(state(app.page(),"tasks")["total"]==1);
             std::string many;
             const char* phases[]={"processing_started","failed_terminal","candidate_busy","done"};
-            for(int i=0;i<100;++i) many+=Json({{"event",phases[i%4]},{"path",utf8((dir/"history"/("task-"+std::to_string(i)+".001")).wstring())},{"time","2026-10-19T09:15:42.731112+00:00"},{"output_dirs",{utf8(dir.wstring())}}}).dump()+"\n";
+            for(int i=0;i<512;++i) many+=Json({{"event",phases[i%4]},{"path",utf8((dir/"history"/("task-"+std::to_string(i)+".001")).wstring())},{"time","2026-10-19T09:15:42.731112+00:00"},{"output_dirs",{utf8(dir.wstring())}}}).dump()+"\n";
             atomic_write(dir/".sunpack_watch"/"events.jsonl",many);
-            pump([&]{return state(app.page(),"tasks")["total"]==100;});
+            pump([&]{return state(app.page(),"tasks")["total"]==512;});
+            virtual_tail(app,"taskItems","taskListScroll",512);
             auto task=state(app.page(),"tasks")["rows"][0];
             assert(task["time"].get<std::string>().size()==19);
             resize_tasks(app);
@@ -733,7 +758,8 @@ int wmain(int argc,wchar_t** argv) {
             button_texts(app);
             auto startup_before=rect(app,"startupToggle");
             auto config_scroll=ui_widget_find_by_id(ui_page_root(app.page()),"configListScroll"); assert(config_scroll);
-            ui_debug_scroll_set(config_scroll,100000); ui_window_relayout(app.window()); button_texts(app);
+            virtual_tail(app,"configItems","configListScroll",state(app.page(),"matchingBlocks").size());
+            ui_window_relayout(app.window()); button_texts(app);
             auto startup_after=rect(app,"startupToggle");
             assert(startup_before.right-startup_before.left==startup_after.right-startup_after.left);
             ui_debug_scroll_set(config_scroll,0);
@@ -746,7 +772,7 @@ int wmain(int argc,wchar_t** argv) {
             button_texts(app,false);
             ui_debug_wheel(app.window(),config_scroll,120);
             button_texts(app,false);
-            auto scroll_bounds=rect(app,"configListScroll");
+            auto scroll_bounds=ui_widget_get_rect(config_scroll);
             float bar_x=scroll_bounds.right-4,bar_y=scroll_bounds.top+8;
             ui_debug_mouse_down(app.window(),bar_x,bar_y);
             ui_debug_mouse_move(app.window(),bar_x,bar_y+12);
@@ -764,7 +790,7 @@ int wmain(int argc,wchar_t** argv) {
             }
             screenshot(app,L"advanced-settings-small.png");
             ui_page_set_text(app.page(),"configQuery",L"白名单");
-            auto blocks=state(app.page(),"shownBlocks");
+            auto blocks=state(app.page(),"matchingBlocks");
             if(blocks.size()!=1 || blocks[0]["fields"].size()!=5) std::cerr<<"Whitelist groups: "<<blocks<<"\n";
             assert(blocks.size()==1 && blocks[0]["fields"].size()==5);
             assert(blocks[0]["primary"]==true && blocks[0]["fields"][0]["label"]=="白名单");
@@ -792,12 +818,15 @@ int wmain(int argc,wchar_t** argv) {
             assert(button_before.left==button_after.left && button_before.right==button_after.right && button_before.top==button_after.top);
             auto button_info=rendered_widget(app,"newRoot");
             assert(button_info["textWidth"].get<float>()<=button_info["availWidth"].get<float>());
-            click(app,"moreDirectories"); assert(state(app.page(),"shownDirectories").size()==73);
+            virtual_tail(app,"directoryItems","directoryListScroll",73);
+            assert(!ui_widget_find_by_id(ui_page_root(app.page()),"moreDirectories"));
             list=ui_widget_find_by_id(ui_page_root(app.page()),"directoryListScroll");
             assert(ui_debug_scroll_set(list,0)==0); ui_widget_destroy(list); ui_window_relayout(app.window());
             size_t visible=0;
             for(auto& directory:state(app.page(),"shownDirectories")) {
-                auto bounds=rect(app,"directory-"+directory["id"].get<std::string>());
+                auto handle=ui_widget_find_by_id(ui_page_root(app.page()),("directory-"+directory["id"].get<std::string>()).c_str());
+                if(!handle) continue;
+                auto bounds=ui_widget_get_rect(handle); ui_widget_destroy(handle);
                 if(bounds.top>=list_rect.top && bounds.bottom<=list_rect.bottom) ++visible;
             }
             assert(visible>=3);
@@ -813,16 +842,23 @@ int wmain(int argc,wchar_t** argv) {
             click(app,"closeRootEditor");
             ui_window_set_size(app.window(),1120,720); screenshot(app,L"directories.png");
             auto history=read_json(dir/"builtin_passwords.json"); history["clipboard_history"]=Json::array();
-            for(int i=0;i<30;++i) history["clipboard_history"].push_back("candidate-"+std::to_string(i));
+            for(int i=0;i<320;++i) history["clipboard_history"].push_back("candidate-"+std::to_string(i));
             history["clipboard_history"][0]="  #history value  ";
+            for(int i=0;i<240;++i) history["passwords"].push_back({{"value","virtual-password-"+std::to_string(i)},
+                {"scopes",Json::array({utf8(dir.wstring()),utf8((dir/"nested").wstring())})}});
             atomic_write(dir/"builtin_passwords.json",history.dump());
             click(app,"tabPasswords"); pump([&]{return state(app.page(),"tab")=="passwords";});
-            click(app,"clipboardHistory"); pump([&]{return state(app.page(),"passwords")["total"]==30;});
+            click(app,"savedPasswords"); pump([&]{return state(app.page(),"passwords")["total"]==history["passwords"].size();});
+            virtual_tail(app,"passwordItems","passwordListScroll",history["passwords"].size());
+            click(app,"clipboardHistory"); pump([&]{return state(app.page(),"passwords")["total"]==320;});
             ui_window_set_size(app.window(),850,560); ui_window_relayout(app.window());
+            virtual_tail(app,"passwordItems","passwordListScroll",320);
             auto history_view=rect(app,"passwordListScroll"); visible=0;
             auto history_rows=state(app.page(),"passwords")["rows"];
             for(auto& entry:history_rows) {
-                auto bounds=rect(app,"password-"+entry["id"].get<std::string>());
+                auto handle=ui_widget_find_by_id(ui_page_root(app.page()),("password-"+entry["id"].get<std::string>()).c_str());
+                if(!handle) continue;
+                auto bounds=ui_widget_get_rect(handle); ui_widget_destroy(handle);
                 if(bounds.bottom-bounds.top>44) std::cerr<<"History row: "<<rendered_widget(app,"password-"+entry["id"].get<std::string>())<<'\n';
                 assert(bounds.bottom-bounds.top<=44);
                 if(bounds.top>=history_view.top && bounds.bottom<=history_view.bottom) ++visible;

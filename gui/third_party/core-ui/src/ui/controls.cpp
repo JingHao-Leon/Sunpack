@@ -2388,6 +2388,119 @@ D2D1_SIZE_F TabControlWidget::SizeHint() const {
     return {fixedW > 0 ? fixedW : 400.0f, fixedH > 0 ? fixedH : 300.0f};
 }
 
+// ---- VirtualList ----
+float VirtualListWidget::Sum(size_t count) const {
+    float total = 0;
+    for (; count; count -= count & -count) total += sums_[count];
+    return total;
+}
+
+size_t VirtualListWidget::RowAt(float y) const {
+    size_t index = 0, step = 1;
+    while (step <= heights_.size() / 2) step <<= 1;
+    for (; step; step >>= 1) {
+        size_t next = index + step;
+        if (next <= heights_.size() && sums_[next] <= y) {
+            y -= sums_[next]; index = next;
+        }
+    }
+    return std::min(index, heights_.size());
+}
+
+void VirtualListWidget::MeasureRow(size_t index, float height) {
+    float delta = height - heights_[index];
+    heights_[index] = height;
+    for (size_t i = index + 1; i < sums_.size(); i += i & -i) sums_[i] += delta;
+}
+
+void VirtualListWidget::SetCount(size_t count) {
+    if (heights_.size() != count) {
+        heights_.resize(count, std::max(1.0f, estimatedHeight + gap_));
+        sums_.assign(count + 1, 0);
+        // Linear construction; no per-item widgets, closures, or event hooks.
+        for (size_t i = 1; i <= count; ++i) {
+            sums_[i] += heights_[i - 1];
+            size_t parent = i + (i & -i);
+            if (parent <= count) sums_[parent] += sums_[i];
+        }
+        ui::RequestLayout();
+    }
+    RefreshViewport();
+}
+
+D2D1_SIZE_F VirtualListWidget::SizeHint() const {
+    return {fixedW, padT + padB + std::max(0.0f, Sum(heights_.size()) - (heights_.empty() ? 0 : gap_))};
+}
+
+void VirtualListWidget::RefreshViewport() {
+    if (refreshing_) return;
+    refreshing_ = true;
+    auto* ancestor = Parent();
+    while (ancestor && !dynamic_cast<ScrollViewWidget*>(ancestor)) ancestor = ancestor->Parent();
+    float top = ancestor ? std::max(0.0f, ancestor->rect.top - rect.top - padT) : 0;
+    float bottom = top + (ancestor ? std::max(0.0f, ancestor->rect.bottom - ancestor->rect.top) : 600);
+    size_t first = RowAt(std::max(0.0f, top - 160));
+    size_t last = std::min(heights_.size(), RowAt(bottom + 160) + 1);
+    std::vector<size_t> next;
+    for (size_t i = first; i < last; ++i) next.push_back(i);
+    // Keep a focused text editor alive when it scrolls out of view, so blur
+    // autosave and IME composition never depend on widget destruction.
+    std::function<bool(Widget*)> focused = [&](Widget* w) {
+        if (w->IsFocused()) return true;
+        for (auto& c : w->Children()) if (focused(c.get())) return true;
+        return false;
+    };
+    for (size_t i = 0; i < std::min(children_.size(), indices_.size()); ++i)
+        if (indices_[i] < heights_.size() && focused(children_[i].get())) next.push_back(indices_[i]);
+    std::sort(next.begin(), next.end());
+    next.erase(std::unique(next.begin(), next.end()), next.end());
+    if (next != indices_) {
+        indices_ = std::move(next);
+        if (onRangeChanged) onRangeChanged();
+        ui::RequestLayout();
+    }
+    refreshing_ = false;
+}
+
+void VirtualListWidget::DoLayout() {
+    RefreshViewport();
+    auto* ancestor = Parent();
+    while (ancestor && !dynamic_cast<ScrollViewWidget*>(ancestor)) ancestor = ancestor->Parent();
+    auto* scroll = dynamic_cast<ScrollViewWidget*>(ancestor);
+    size_t anchor = scroll ? RowAt(std::max(0.0f, scroll->rect.top - rect.top - padT)) : 0;
+    float anchorBefore = Sum(anchor);
+    bool changed = false;
+    for (size_t i = 0; i < std::min(children_.size(), indices_.size()); ++i) {
+        auto& child = children_[i];
+        // A subtree's intrinsic height may change after wrapping at this width.
+        // Two local passes settle that row, never the offscreen list.
+        for (int pass = 0; pass < 2; ++pass) {
+            float h = std::max(1.0f, child->SizeHint().height);
+            float y = rect.top + padT + Sum(indices_[i]);
+            child->rect = {rect.left + padL, y, rect.right - padR, y + h};
+            child->DoLayout();
+        }
+        float h = std::max(1.0f, child->SizeHint().height) + gap_;
+        if (std::abs(h - heights_[indices_[i]]) > 0.5f) {
+            MeasureRow(indices_[i], h); changed = true;
+        }
+    }
+    if (changed) {
+        if (scroll) scroll->CorrectVirtualAnchor(Sum(anchor) - anchorBefore);
+        ui::RequestLayout();
+    }
+}
+
+namespace {
+void RefreshVirtualLists(Widget* w) {
+    if (!w->visible) return;
+    if (auto* list = dynamic_cast<VirtualListWidget*>(w)) {
+        list->DoLayout(); return;
+    }
+    for (auto& child : w->Children()) RefreshVirtualLists(child.get());
+}
+}
+
 // ---- ScrollView ----
 
 void ScrollViewWidget::SetContent(WidgetPtr content) {
@@ -2436,23 +2549,27 @@ void ScrollViewWidget::DoLayout() {
     // First pass: layout content at full height to measure actual needed height
     // Give it a tall rect so VBox can place all children without compression
     float estimatedH = std::max(content_->SizeHint().height, visH);
-    content_->rect = {rect.left + padL, rect.top + padT,
+    content_->rect = {rect.left + padL, rect.top + padT - scrollY_,
                         rect.left + padL + visW,
-                        rect.top + padT + estimatedH};
+                        rect.top + padT - scrollY_ + estimatedH};
     content_->DoLayout();
 
     // Measure actual content height from children bounds (EXCLUDING content_ itself)
-    float maxBottom = rect.top + padT;
+    float maxBottom = content_->rect.top;
     std::function<void(Widget*)> measure = [&](Widget* w) {
         if (!w->visible) return;
         if (w->rect.bottom > maxBottom) maxBottom = w->rect.bottom;
+        if (auto* list = dynamic_cast<VirtualListWidget*>(w)) {
+            maxBottom = std::max(maxBottom, w->rect.top + list->SizeHint().height);
+            return;
+        }
         for (auto& c : w->Children()) measure(c.get());
     };
     // 只 measure 子元素的 bounds，不包含 content_ 自己的 rect.bottom（那是 estimatedH，非真实内容）
     for (auto& c : content_->Children()) measure(c.get());
     /* contentHeight_ 含 padT 但不含 padB — 内容 + 上 padding 是滚动可视范围,
      * 下 padding 通过 visH 已经扣过 (caller 想要的"末尾留白"自然出现). */
-    contentHeight_ = std::max(maxBottom - rect.top, visH);
+    contentHeight_ = std::max(maxBottom - content_->rect.top + padT, visH);
 
 
     // Scrollbar overlays content (absolute positioning, no space reserved)
@@ -2471,6 +2588,14 @@ void ScrollViewWidget::ApplyScrollDelta_(float oldScrollY) {
     const float dy = -(scrollY_ - oldScrollY);   /* 内容反向移动 */
     if (dy == 0.0f) return;
     ShiftSubtreeRects(content_.get(), 0.0f, dy);
+    RefreshVirtualLists(content_.get());
+}
+
+void ScrollViewWidget::CorrectVirtualAnchor(float delta) {
+    if (std::abs(delta) < 0.5f || !content_) return;
+    scrollY_ += delta;
+    if (draggingThumb_) dragStartScroll_ += delta;
+    ShiftSubtreeRects(content_.get(), 0, -delta);
 }
 
 void ScrollViewWidget::OnDraw(Renderer& r) {

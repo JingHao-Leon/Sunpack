@@ -134,7 +134,7 @@ private:
     struct JsLoopIteration;
     struct JsLoopRuntime;
     std::vector<std::unique_ptr<JsLoopRuntime>> jsLoopRuntimes_;
-    void RebuildJsLoop(JsLoopRuntime& rt);
+    void RebuildJsLoop(JsLoopRuntime& rt, bool viewportOnly = false);
     void TearDownJsIterations(JsLoopRuntime& rt);
     void TearDownJsLoopRuntime(JsLoopRuntime& rt);
     void DestroyJsIteration(JsLoopRuntime& rt, JsLoopIteration& iter);

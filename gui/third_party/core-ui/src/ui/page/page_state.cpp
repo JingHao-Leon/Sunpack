@@ -1573,6 +1573,8 @@ struct PageState::JsLoopRuntime {
     JSValue   keyFn    = JS_UNDEFINED;     // optional — fallback is positional "#i"
     uint64_t  watcherId = 0;
     std::vector<std::unique_ptr<JsLoopIteration>> iterations;
+    JSValue virtualItems = JS_UNDEFINED;
+    bool rebuilding = false;
 
     // ---- Nested-loop scope (v-for inside v-if inside v-for) ----------------
     // When this loop is built inside a CondInIter that itself lives inside a
@@ -1986,6 +1988,11 @@ PageState::BuildJsLoopRuntimeInScope(const CompiledLoop* spec,
     }
 
     JsLoopRuntime* rtRaw = rt.get();
+    if (auto* list = dynamic_cast<VirtualListWidget*>(spec->parentWidget)) {
+        list->onRangeChanged = [this, rtRaw]() {
+            if (!rtRaw->rebuilding) RebuildJsLoop(*rtRaw, true);
+        };
+    }
     rt->watcherId = jsRt_->WatchEffect([this, rtRaw]() {
         RebuildJsLoop(*rtRaw);
     });
@@ -2004,6 +2011,9 @@ void PageState::WireQuickJSLoops() {
 void PageState::TearDownJsLoopRuntime(JsLoopRuntime& rt) {
     if (!jsRt_) return;
     JSContext* ctx = jsRt_->ctx();
+    if (rt.spec) if (auto* list = dynamic_cast<VirtualListWidget*>(rt.spec->parentWidget)) list->onRangeChanged = {};
+    JS_FreeValue(ctx, rt.virtualItems);
+    rt.virtualItems = JS_UNDEFINED;
     TearDownJsIterations(rt);
     if (rt.watcherId) jsRt_->DisposeEffect(rt.watcherId);
     if (!JS_IsUndefined(rt.listFn)) JS_FreeValue(ctx, rt.listFn);
@@ -2173,7 +2183,7 @@ void PageState::RewireIterationBindings(JsLoopRuntime& rt, JsLoopIteration& iter
     rewireConds(iter.conditionals);
 }
 
-void PageState::RebuildJsLoop(JsLoopRuntime& rt) {
+void PageState::RebuildJsLoop(JsLoopRuntime& rt, bool viewportOnly) {
 
     /* 整个重建过程合成一批: 中途每条绑定各自 InvalidateAllWindows +
      * UpdateAnimTimers 是 O(n^2) 的来源 (见 ui_context.h BeginBatch 注释)。
@@ -2182,7 +2192,14 @@ void PageState::RebuildJsLoop(JsLoopRuntime& rt) {
 
     if (!rt.spec || !rt.spec->parentWidget || !rt.spec->templateNode) return;
     if (!jsRt_ || JS_IsUndefined(rt.listFn)) return;
+    if (rt.rebuilding) return;
+    struct Rebuilding {
+        bool& flag;
+        explicit Rebuilding(bool& f) : flag(f) { flag = true; }
+        ~Rebuilding() { flag = false; }
+    } rebuilding(rt.rebuilding);
     JSContext* ctx = jsRt_->ctx();
+    auto* virtualList = dynamic_cast<VirtualListWidget*>(rt.spec->parentWidget);
 
     // Build outer args (for nested v-for inside v-if inside v-for).
     JSValue outerArgs[2];
@@ -2191,7 +2208,7 @@ void PageState::RebuildJsLoop(JsLoopRuntime& rt) {
         outerArgs[outerArgc++] = rt.outerIter->itemValue;
         if (rt.outerHasIdx) outerArgs[outerArgc++] = rt.outerIter->idxValue;
     }
-    JSValue list = JS_Call(ctx, rt.listFn, jsState_, outerArgc, outerArgs);
+    JSValue list = viewportOnly ? JS_DupValue(ctx, rt.virtualItems) : JS_Call(ctx, rt.listFn, jsState_, outerArgc, outerArgs);
     if (JS_IsException(list)) {
         JSValue exc = JS_GetException(ctx);
         const char* msg = JS_ToCString(ctx, exc);
@@ -2205,6 +2222,10 @@ void PageState::RebuildJsLoop(JsLoopRuntime& rt) {
     }
 
     if (!JS_IsArray(list)) {
+        if (virtualList) {
+            JS_FreeValue(ctx, rt.virtualItems); rt.virtualItems = JS_UNDEFINED;
+            virtualList->SetCount(0);
+        }
         TearDownJsIterations(rt);
         JS_FreeValue(ctx, list);
         return;
@@ -2214,6 +2235,15 @@ void PageState::RebuildJsLoop(JsLoopRuntime& rt) {
     uint32_t len = 0;
     JS_ToUint32(ctx, &len, lenV);
     JS_FreeValue(ctx, lenV);
+    if (virtualList) {
+        if (!viewportOnly) {
+            JS_FreeValue(ctx, rt.virtualItems);
+            rt.virtualItems = JS_DupValue(ctx, list);
+        }
+        virtualList->SetCount(len);
+    }
+    const auto* indices = virtualList ? &virtualList->Indices() : nullptr;
+    size_t mountedCount = indices ? indices->size() : len;
 
     // Index existing iterations by key — duplicates collapse to last seen
     // (matches Vue's "last duplicate wins" though duplicates are a user bug).
@@ -2229,8 +2259,9 @@ void PageState::RebuildJsLoop(JsLoopRuntime& rt) {
     // Walk new list. For each item: compute its key, reuse if matched, else
     // build fresh.
     std::vector<std::unique_ptr<JsLoopIteration>> newIters;
-    newIters.reserve(len);
-    for (uint32_t i = 0; i < len; ++i) {
+    newIters.reserve(mountedCount);
+    for (size_t position = 0; position < mountedCount; ++position) {
+        uint32_t i = indices ? static_cast<uint32_t>((*indices)[position]) : static_cast<uint32_t>(position);
         JSValue itemVal = JS_GetPropertyUint32(ctx, list, i);
         JSValue idxVal  = JS_NewInt32(ctx, static_cast<int>(i));
         std::string key = ComputeIterationKey(rt, itemVal, idxVal, i);
@@ -2241,11 +2272,15 @@ void PageState::RebuildJsLoop(JsLoopRuntime& rt) {
             // (item, idx) JSValues + re-collect dep set for bindings.
             auto iter = std::move(found->second);
             oldByKey.erase(found);
-            JS_FreeValue(ctx, iter->itemValue);
-            JS_FreeValue(ctx, iter->idxValue);
-            iter->itemValue = itemVal;     // takes ownership
-            iter->idxValue  = idxVal;
-            RewireIterationBindings(rt, *iter);
+            if (viewportOnly) {
+                JS_FreeValue(ctx, itemVal); JS_FreeValue(ctx, idxVal);
+            } else {
+                JS_FreeValue(ctx, iter->itemValue);
+                JS_FreeValue(ctx, iter->idxValue);
+                iter->itemValue = itemVal;     // takes ownership
+                iter->idxValue  = idxVal;
+                RewireIterationBindings(rt, *iter);
+            }
             newIters.push_back(std::move(iter));
         } else {
             // New: full build (compiles per-iteration template + closures).

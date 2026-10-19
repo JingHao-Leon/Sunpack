@@ -591,6 +591,27 @@ private:
     int TabHitTest(float x, float y) const;
 };
 
+// One v-for child inside a ScrollView. Only viewport rows (plus overscan and
+// the focused editor) exist. A Fenwick tree stores measured variable heights;
+// lookup and height corrections are logarithmic, independent of list length.
+class UI_API VirtualListWidget : public VBoxWidget {
+public:
+    float estimatedHeight = 80;
+    std::function<void()> onRangeChanged;
+    void SetCount(size_t count);
+    const std::vector<size_t>& Indices() const { return indices_; }
+    void RefreshViewport();
+    void DoLayout() override;
+    D2D1_SIZE_F SizeHint() const override;
+private:
+    std::vector<float> heights_, sums_;
+    std::vector<size_t> indices_;
+    bool refreshing_ = false;
+    float Sum(size_t count) const;
+    size_t RowAt(float y) const;
+    void MeasureRow(size_t index, float height);
+};
+
 // ---- ScrollView ----
 class UI_API ScrollViewWidget : public Widget {
 public:
@@ -615,6 +636,8 @@ public:
     void DoLayout() override;
 
     bool NeedsScrollbar() const;
+    // Preserve the first visible row when estimated heights become measured.
+    void CorrectVirtualAnchor(float delta);
 
 private:
     WidgetPtr content_;

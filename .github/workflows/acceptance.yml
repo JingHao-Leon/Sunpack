@@ -50,7 +50,7 @@ jobs:
           arch: x64
           profile: ci
           python-version: "3.11"
-          source-key: ${{ hashFiles('native/**', 'scripts/**', 'sunpack.manifest') }}
+          source-key: ${{ hashFiles('native/**', 'gui/**', 'tests/gui/**', 'scripts/**', 'sunpack.manifest') }}
 
       - name: Cache acceptance fixture generators
         uses: actions/cache@v4
@@ -67,3 +67,8 @@ jobs:
         shell: pwsh
         run: |
           .\run_acceptance_tests.ps1 -NoWait -SkipEnvironmentRefresh -BuildProfile ci -ParallelWorkers 2 -StepTimeoutSeconds 900
+
+      - name: Build and verify Core UI manager
+        shell: pwsh
+        run: |
+          .\scripts\build_gui.ps1 -Arch x64 -Jobs 4

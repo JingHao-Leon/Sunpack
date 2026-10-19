@@ -33,6 +33,7 @@ WizardStyle=modern
 ChangesEnvironment=yes
 ChangesAssociations=yes
 CloseApplications=yes
+CloseApplicationsFilter=*.exe,*.dll,*.pyd
 RestartApplications=no
 UsePreviousAppDir=yes
 UsePreviousTasks=yes
@@ -131,6 +132,7 @@ Type: filesandordirs; Name: "{commonappdata}\SunPack"
 Type: files; Name: "{commonprograms}\SunPack\Uninstall SunPack.lnk"
 
 [Icons]
+Name: "{autoprograms}\SunPack\SunPack GUI"; Filename: "{app}\SunPackGUI.exe"; WorkingDir: "{commonappdata}\SunPack"; IconFilename: "{app}\sunpack.ico"
 Name: "{autoprograms}\SunPack\Uninstall SunPack"; Filename: "{uninstallexe}"
 
 [UninstallRun]
@@ -582,6 +584,7 @@ var
   PowerShellPath: string;
   CliAppPath: string;
   RuntimeAppPath: string;
+  GuiAppPath: string;
   Command: string;
   Parameters: string;
   ResultCode: Integer;
@@ -589,11 +592,14 @@ begin
   Result := True;
   CliAppPath := ExistingLauncherPath;
   RuntimeAppPath := ExpandConstant('{app}\sunpack-runtime.exe');
-  if (not FileExists(CliAppPath)) and (not FileExists(RuntimeAppPath)) then
+  GuiAppPath := ExpandConstant('{app}\SunPackGUI.exe');
+  if (not FileExists(CliAppPath)) and (not FileExists(RuntimeAppPath)) and (not FileExists(GuiAppPath)) then
     Exit;
   PowerShellPath := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
   Command :=
-    '$targets = @(' + PowerShellSingleQuotedString(CliAppPath) + ', ' + PowerShellSingleQuotedString(RuntimeAppPath) + '); ' +
+    '$gui = ' + PowerShellSingleQuotedString(GuiAppPath) + '; ' +
+    'Get-Process SunPackGUI -ErrorAction SilentlyContinue | Where-Object { try { $_.Path.Equals($gui, [System.StringComparison]::OrdinalIgnoreCase) } catch { $false } } | ForEach-Object { [void]$_.CloseMainWindow() }; ' +
+    '$targets = @(' + PowerShellSingleQuotedString(CliAppPath) + ', ' + PowerShellSingleQuotedString(RuntimeAppPath) + ', $gui); ' +
     '$deadline = (Get-Date).AddSeconds(20); ' +
     'do { ' +
     '  $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { ' +

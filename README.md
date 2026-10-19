@@ -84,9 +84,11 @@ $r = Invoke-RestMethod 'https://api.github.com/repos/Qinjingxue/Sunpack/releases
 
 ### 密码管理
 
+点击 Watch 托盘或选择“打开管理面板”，可在原生 GUI 中查看日志任务、编辑监控目录、配置及密码；配置页也提供 Watch 开机自启开关。管理面板通过文件和现有 CLI 命令工作，关闭后退出。GUI 的开发构建和验证见 [GUI 说明](gui/README.md)。
+
 Sunpack为达到最大方便性，在使用时会尝试从各处获取密码，高速尝试所有候选密码，在上千候选密码下几乎无感速度，自动找到正确密码并使用，使用的密码来源有：
 
-- JSON 密码文件：安装版位于 `%ProgramData%\SunPack\builtin_passwords.json`，可通过 Watch 托盘菜单编辑。`passwords` 中的记录使用 `value` 保存密码，可用 `scopes` 指定多个绝对目录；省略即全局生效。Watch 自动维护独立的 `clipboard_history`，默认最多 30 条。
+- JSON 密码文件：安装版位于 `%ProgramData%\SunPack\builtin_passwords.json`，可在管理面板的“密码管理”页面编辑。`passwords` 中的记录使用 `value` 保存密码，可用 `scopes` 指定多个绝对目录；省略即全局生效。Watch 自动维护独立的 `clipboard_history`，默认最多 30 条。
 - 用户输入：右键菜单，CLI调出的交互输入密码模式的输入
 - 剪贴板：解压前自动读取剪贴板文本作为密码
 

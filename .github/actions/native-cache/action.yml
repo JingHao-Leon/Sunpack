@@ -60,6 +60,7 @@ runs:
           ~/.cargo/registry
           ~/.cargo/git
           .cache/rust-target/${{ inputs.arch }}
+          .cache/gui-${{ inputs.arch }}
           .cache/native-source-times-${{ inputs.arch }}-${{ inputs.profile }}.json
           native/sevenzip_bridge/build-${{ inputs.arch }}${{ inputs.profile == 'ci' && '-ci' || '' }}
           native/toast_host/build-${{ inputs.arch }}${{ inputs.profile == 'ci' && '-ci' || '' }}

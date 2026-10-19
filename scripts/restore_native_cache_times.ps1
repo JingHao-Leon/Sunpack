@@ -18,7 +18,7 @@ if (Test-Path -LiteralPath $statePath) {
 # The workflow fingerprint covers these inputs. Restore times only when their
 # contents match; changed-source fallback caches retain checkout timestamps so
 # Cargo and MSBuild invalidate stale objects. Operate on Git-tracked paths only.
-$tracked = @(& git -C $repoRoot -c core.quotepath=false ls-files -- native scripts sunpack.manifest)
+$tracked = @(& git -C $repoRoot -c core.quotepath=false ls-files -- native gui tests/gui scripts sunpack.manifest)
 if ($LASTEXITCODE -ne 0) { throw "Cannot enumerate native build inputs" }
 $times = @{}
 $restored = 0

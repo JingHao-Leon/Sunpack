@@ -160,7 +160,7 @@ jobs:
           arch: ${{ matrix.arch }}
           profile: release
           python-version: ${{ matrix.python_version }}
-          source-key: ${{ hashFiles('native/**', 'scripts/**', 'sunpack.manifest') }}
+          source-key: ${{ hashFiles('native/**', 'gui/**', 'tests/gui/**', 'scripts/**', 'sunpack.manifest') }}
 
       - name: Restore Nuitka compiler cache
         uses: actions/cache@v4
@@ -237,6 +237,11 @@ jobs:
             $buildArgs.Version = $version
           }
           .\scripts\build_windows.ps1 @buildArgs
+
+      - name: Build and verify Core UI manager
+        shell: pwsh
+        run: |
+          .\scripts\build_gui.ps1 -Arch ${{ matrix.arch }} -Jobs 4
 
       - name: Validate release package
         shell: pwsh

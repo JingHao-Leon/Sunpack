@@ -491,10 +491,12 @@ Json task_rows(const EventLog& log,const WatchRoots& roots,const View& v,const s
     Json result={{"rows",Json::array()},{"total",rows.size()},{"page",page},{"pages",pages},{"malformed",log.malformed}};
     for(size_t i=page*100;i<std::min(rows.size(),(page+1)*100);++i) {
         auto& t=*rows[i];
+        const fs::path path=wide(t.path);
+        auto key=path_key(path);
         const char* tone=t.status=="成功"?"success":t.status=="失败"?"failure":
             (t.status.rfind("等待",0)==0 || t.status.rfind("挂起",0)==0 || t.status=="准备处理")?"waiting":"info";
-        result["rows"].push_back({{"id",utf8(path_key(wide(t.path)))},{"name",utf8(fs::path(wide(t.path)).filename().wstring())},
-            {"path",t.path},{"root",indexed_root(path_key(wide(t.path)),root_index)},{"status",t.status},{"statusText",tr(t.status,language)},{"time",task_time(t)},
+        result["rows"].push_back({{"id",utf8(key)},{"name",utf8(path.filename().wstring())},{"directory",utf8(path.parent_path().wstring())},
+            {"path",t.path},{"root",indexed_root(key,root_index)},{"status",t.status},{"statusText",tr(t.status,language)},{"time",task_time(t)},
             {"statusTone",tone},{"outputs",t.outputs}});
     }
     return result;

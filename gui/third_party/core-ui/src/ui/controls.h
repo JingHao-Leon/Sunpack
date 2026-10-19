@@ -100,6 +100,7 @@ public:
 
     void SetText(const std::wstring& t) { text_ = t; ui::RequestLayout(); }
     void SetIcon(const std::wstring& icon) { icon_ = icon; ui::RequestLayout(); }
+    WidgetPtr Align(int a) override { textAlign_ = static_cast<DWRITE_TEXT_ALIGNMENT>(a); return shared_from_this(); }
     const std::wstring& Text() const { return text_; }
     void SetType(ButtonType t) { type_ = t; }
     ButtonType Type() const { return type_; }
@@ -118,6 +119,7 @@ private:
     std::wstring icon_;
     float fontSize_ = theme::kFontSizeNormal;
     ButtonType type_ = ButtonType::Default;
+    DWRITE_TEXT_ALIGNMENT textAlign_ = DWRITE_TEXT_ALIGNMENT_CENTER;
     D2D1_COLOR_F customTextColor_ = {};
     D2D1_COLOR_F customBgColor_ = {};
     bool hasCustomTextColor_ = false;

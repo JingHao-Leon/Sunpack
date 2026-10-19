@@ -723,15 +723,14 @@ void ApplyCommonStyle(Widget& w, const ui::css::ComputedStyle& s) {
             }
         }
     }
-    // text-align — applies to LabelWidget. ButtonWidget hardcodes CENTER in
-    // its OnDraw, so this is a no-op on buttons.
+    // Labels and text buttons share the Widget::Align API.
     if (s.Has("text-align")) {
-        if (auto* lbl = dynamic_cast<LabelWidget*>(&w)) {
+        if (dynamic_cast<LabelWidget*>(&w) || dynamic_cast<ButtonWidget*>(&w)) {
             const std::string& v = s.Get("text-align");
-            if      (v == "center")              lbl->Align(DWRITE_TEXT_ALIGNMENT_CENTER);
-            else if (v == "right" || v == "end") lbl->Align(DWRITE_TEXT_ALIGNMENT_TRAILING);
-            else if (v == "justify")             lbl->Align(DWRITE_TEXT_ALIGNMENT_JUSTIFIED);
-            else                                 lbl->Align(DWRITE_TEXT_ALIGNMENT_LEADING);
+            if      (v == "center")              w.Align(DWRITE_TEXT_ALIGNMENT_CENTER);
+            else if (v == "right" || v == "end") w.Align(DWRITE_TEXT_ALIGNMENT_TRAILING);
+            else if (v == "justify")             w.Align(DWRITE_TEXT_ALIGNMENT_JUSTIFIED);
+            else                                 w.Align(DWRITE_TEXT_ALIGNMENT_LEADING);
         }
     }
     // align-self — per-child override of container's align-items (cross-axis).

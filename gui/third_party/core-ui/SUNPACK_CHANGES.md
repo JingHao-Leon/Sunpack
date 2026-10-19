@@ -11,6 +11,8 @@ preserved.
 
 Local changes:
 
+- Honor `text-align` on text buttons, retaining centered text by default;
+  task filename links use left alignment with the directory text below them.
 - Wire focus, blur and submit handlers inside keyed loop scopes as well as
   ordinary templates, allowing inline settings to commit at edit completion.
 - Sample finite animations with a monotonic high precision clock and continue

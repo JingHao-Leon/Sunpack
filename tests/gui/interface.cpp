@@ -342,21 +342,31 @@ int wmain(int argc,wchar_t** argv) {
             assert(state(app.page(),"tasks")["total"]==1);
             std::string many;
             const char* phases[]={"processing_started","failed_terminal","candidate_busy","done"};
-            for(int i=0;i<100;++i) many+=Json({{"event",phases[i%4]},{"path",utf8((dir/("task-"+std::to_string(i)+".001")).wstring())},{"time","2026-10-19T09:15:42.731112+00:00"},{"output_dirs",{utf8(dir.wstring())}}}).dump()+"\n";
+            for(int i=0;i<100;++i) many+=Json({{"event",phases[i%4]},{"path",utf8((dir/"history"/("task-"+std::to_string(i)+".001")).wstring())},{"time","2026-10-19T09:15:42.731112+00:00"},{"output_dirs",{utf8(dir.wstring())}}}).dump()+"\n";
             atomic_write(dir/".sunpack_watch"/"events.jsonl",many);
             pump([&]{return state(app.page(),"tasks")["total"]==100;});
             auto task=state(app.page(),"tasks")["rows"][0];
             assert(task["time"].get<std::string>().size()==19);
             resize_tasks(app);
-            for(auto prefix:{"task-","taskName-"}) {
+            auto task_id=task["id"].get<std::string>();
+            auto card_bounds=rect(app,"task-"+task_id), name_bounds=rect(app,"taskName-"+task_id);
+            assert(card_bounds.bottom-card_bounds.top<=80);
+            assert(name_bounds.right-name_bounds.left<(card_bounds.right-card_bounds.left)/2);
+            assert(rendered_widget(app,"taskRoot-"+task_id)["text"]=="监控目录："+utf8((dir/"history").wstring()));
+            for(auto prefix:{"task-","taskRoot-"}) {
                 click(app,(prefix+task["id"].get<std::string>()).c_str());
-                assert(state(app.page(),"requests")==Json::array({Json{{"op","openTask"},{"payload",{{"id",task["id"]}}}}}));
-                assert(!ui_widget_find_by_id(ui_page_root(app.page()),"taskDetails"));
-                // Observe the real click command but consume it before dispatch:
-                // isolated UI tests must not open Explorer windows on the desktop.
-                ui_page_set_json(app.page(),"requests","[]");
-                ui_debug_pump();
+                assert(state(app.page(),"requests").empty());
             }
+            assert(ui_debug_mouse_move(app.window(),(name_bounds.left+name_bounds.right)/2,(name_bounds.top+name_bounds.bottom)/2)==0);
+            auto* task_name=ui::GetContext().GetWindow(app.window())->Root()->FindById(("taskName-"+task_id).c_str());
+            assert(task_name && task_name->css.hasFg && task_name->css.fg.b>task_name->css.fg.r);
+            screenshot(app,L"task-name-hover.png");
+            click(app,("taskName-"+task_id).c_str());
+            assert(state(app.page(),"requests")==Json::array({Json{{"op","openTask"},{"payload",{{"id",task["id"]}}}}}));
+            assert(!ui_widget_find_by_id(ui_page_root(app.page()),"taskDetails"));
+            // Consume the real command before dispatch; never open Explorer.
+            ui_page_set_json(app.page(),"requests","[]");
+            ui_debug_pump();
             drag_after_wheel(app);
             atomic_write(dir/".sunpack_watch"/"events.jsonl",Json({{"event","done"},{"path",utf8((dir/"carrier.001").wstring())}}).dump()+"\n");
             pump([&]{return state(app.page(),"tasks")["total"]==1;});

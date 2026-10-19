@@ -80,6 +80,10 @@
       "zh": "监控目录",
       "en": "Monitored folder"
     },
+    "taskFolder": {
+      "zh": "监控目录：",
+      "en": "Monitored folder: "
+    },
     "scopeDirectory": {
       "zh": "密码适用目录",
       "en": "Password folder"

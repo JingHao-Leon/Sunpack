@@ -175,8 +175,12 @@ export default {
   .settings-row { flex-direction:row; align-items:center; gap:16px; }
   .setting-copy { flex:1; gap:4px; }
   .setting-title { font-size:14px; }
-  .task { padding:16px; gap:8px; border:1px solid var(--card-border); border-radius:8px; cursor:pointer; }
-  .taskname { display:flex; flex:1; flex-shrink:1; flex-direction:row; align-items:center; background:#00000001; padding:0px; border:0px; color:var(--fg); }
+  .task { padding:10px 14px; gap:4px; border:1px solid var(--card-border); border-radius:8px; }
+  .taskname { flex-shrink:1; background:#00000001; padding:0px; min-height:24px; border:0px; color:var(--fg); font-size:14px; font-weight:600; text-align:left; }
+  .light .taskname:hover { color:#0067c0; }
+  .dark .taskname:hover { color:#60cdff; }
+  .task-meta { align-items:flex-end; }
+  .task-meta .time { flex-shrink:0; white-space:nowrap; }
   .status { font-size:14px; font-weight:600; padding:4px 10px; border-radius:4px; flex-shrink:0; white-space:nowrap; }
   .light .status-success { color:#0f6b35; background:#dff6dd; }
   .dark .status-success { color:#6ccb5f; background:#263c28; }
@@ -306,9 +310,9 @@ export default {
           <label v-show="saveErrors['@roots']" class="error">{{ saveErrors['@roots'] }}</label><div class="action-row"><toggle id="rootDeepToggle" :checked="rootDeep" @change="v=>{rootDeep=v;commitRoot();}"/><label>{{ texts.deep }}</label><button id="finishRoot" v-show="!rootOriginal" @click="rootAction('save')">{{ texts.addToList }}</button><button v-show="rootOriginal" @click="rootAction('delete')">{{ texts.deleteRoot }}</button></div>
         </div>
           <label v-show="tasks.total===0" class="muted">{{ texts.noTasks }}</label>
-          <div v-for="t in tasks.rows" :key="t.id" :id="'task-'+t.id" :class="'task '+appearance" @click="send('openTask',{id:t.id})">
-            <div class="row"><button :id="'taskName-'+t.id" class="taskname" @click="send('openTask',{id:t.id})"><label class="fill subheading">{{ t.name }}</label></button><label class="status" :class="'status-'+t.statusTone">{{ t.statusText }}</label></div>
-            <label class="muted">{{ t.path }}</label><div class="row"><div class="spacer"/><label class="time">{{ t.time }}</label></div>
+          <div v-for="t in tasks.rows" :key="t.id" :id="'task-'+t.id" :class="'task '+appearance">
+            <div class="row"><button :id="'taskName-'+t.id" class="taskname" @click="send('openTask',{id:t.id})">{{ t.name }}</button><div class="spacer"/><label class="status" :class="'status-'+t.statusTone">{{ t.statusText }}</label></div>
+            <div class="row task-meta"><label :id="'taskRoot-'+t.id" class="muted fill">{{ texts.taskFolder }}{{ t.directory }}</label><label class="time">{{ t.time }}</label></div>
           </div>
         </div></ScrollView>
         <div v-show="!rootEditor" class="pager"><button :enabled="tasks.page>0" @click="filterTasks(tasks.page-1)">{{ texts.previous }}</button><label>{{ tasks.page+1 }} / {{ tasks.pages }} · {{ tasks.total }} {{ texts.taskCount }}</label><button :enabled="tasks.page+1 &lt; tasks.pages" @click="filterTasks(tasks.page+1)">{{ texts.next }}</button></div>

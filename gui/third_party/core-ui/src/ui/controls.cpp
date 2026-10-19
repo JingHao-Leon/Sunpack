@@ -429,7 +429,7 @@ void ButtonWidget::OnDraw(Renderer& r) {
         D2D1_RECT_F textRect = {rect.left + 33, rect.top, rect.right - 11, rect.bottom};
         r.DrawText(text_, textRect, textColor, fontSize_, DWRITE_TEXT_ALIGNMENT_LEADING);
     } else {
-        r.DrawText(text_, rect, textColor, fontSize_, DWRITE_TEXT_ALIGNMENT_CENTER);
+        r.DrawText(text_, rect, textColor, fontSize_, textAlign_);
     }
 }
 

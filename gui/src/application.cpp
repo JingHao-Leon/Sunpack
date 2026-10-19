@@ -459,12 +459,17 @@ void Application::handle_command(Json command) {
     if(op=="openPath") {
         auto path=wide(p.value("path",std::string()));
         if(!path.empty() && fs::exists(path)) {
-            auto folder=fs::is_directory(path)?fs::path(path):fs::path(path).parent_path();
+            if(fs::is_directory(path)) {
+                auto result=ShellExecuteW(hwnd_,L"explore",path.c_str(),nullptr,nullptr,SW_SHOWNORMAL);
+                if(reinterpret_cast<INT_PTR>(result)<=32) throw std::runtime_error("无法在资源管理器中打开路径");
+                return;
+            }
+            auto folder=fs::path(path).parent_path();
             PIDLIST_ABSOLUTE parent=ILCreateFromPathW(folder.c_str()), item=ILCreateFromPathW(path.c_str());
             HRESULT result=E_FAIL;
             if(parent && item) {
                 PCUITEMID_CHILD child=ILFindLastID(item);
-                result=SHOpenFolderAndSelectItems(parent,fs::is_directory(path)?0:1,&child,0);
+                result=SHOpenFolderAndSelectItems(parent,1,&child,0);
             }
             CoTaskMemFree(item); CoTaskMemFree(parent);
             if(FAILED(result)) throw std::runtime_error("无法在资源管理器中打开路径");

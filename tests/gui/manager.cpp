@@ -80,10 +80,12 @@ void projection(Fixture& f) {
     log.accept(Json{{"event","done"},{"path",utf8(file.wstring())},{"output_dirs",{utf8((f.dir/L"missing").wstring()),utf8(output.wstring())}}});
     auto row=task_rows(log,roots,{}).at("rows").at(0);
     assert(row["root"]==utf8(monitor.wstring()));
+    assert(row["directory"]==utf8(nested.wstring()));
     assert(task_directory(row)==output);
     fs::remove(output);
     assert(task_directory(row)==monitor);
     auto old_root=task_rows(log,{},{}).at("rows").at(0);
+    assert(old_root["directory"]==row["directory"]);
     assert(task_directory(old_root)==nested);
     log.accept(Json{{"event","failed_password"},{"path",utf8(file.wstring())}});
     assert(task_directory(task_rows(log,roots,{}).at("rows").at(0))==monitor);

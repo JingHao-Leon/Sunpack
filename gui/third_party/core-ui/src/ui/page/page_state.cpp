@@ -434,6 +434,23 @@ void PageState::SetValue(const std::string& name, ui::expr::Value v) {
     JS_SetPropertyStr(ctx, jsState_, name.c_str(), parsed);
 }
 
+bool PageState::CallJsonMethod(const std::string& name,const std::string& json) {
+    if(!jsRt_ || JS_IsUndefined(jsState_)) return false;
+    JSContext* ctx=jsRt_->ctx();
+    JSValue method=JS_GetPropertyStr(ctx,jsState_,name.c_str());
+    if(!JS_IsFunction(ctx,method)) { JS_FreeValue(ctx,method); return false; }
+    JSValue argument=JS_ParseJSON(ctx,json.data(),json.size(),"<call_json>");
+    if(JS_IsException(argument)) {
+        JSValue error=JS_GetException(ctx); JS_FreeValue(ctx,error);
+        JS_FreeValue(ctx,method); return false;
+    }
+    JSValue result=JS_Call(ctx,method,jsState_,1,&argument);
+    bool ok=!JS_IsException(result);
+    if(!ok) { JSValue error=JS_GetException(ctx); JS_FreeValue(ctx,error); }
+    JS_FreeValue(ctx,result); JS_FreeValue(ctx,argument); JS_FreeValue(ctx,method);
+    return ok;
+}
+
 bool PageState::GetValue(const std::string& name, ui::expr::Value& out) const {
     if (!jsRt_ || JS_IsUndefined(jsState_)) return false;
     JSContext* ctx = jsRt_->ctx();
@@ -2237,6 +2254,11 @@ void PageState::RebuildJsLoop(JsLoopRuntime& rt, bool viewportOnly) {
     JS_FreeValue(ctx, lenV);
     if (virtualList) {
         if (!viewportOnly) {
+            // The same number of different items must not inherit previous
+            // rows' measured heights (e.g. two equally sized filter results).
+            if (!JS_IsArray(rt.virtualItems) ||
+                JS_VALUE_GET_PTR(rt.virtualItems) != JS_VALUE_GET_PTR(list))
+                virtualList->InvalidateHeights();
             JS_FreeValue(ctx, rt.virtualItems);
             rt.virtualItems = JS_DupValue(ctx, list);
         }

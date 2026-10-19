@@ -30,6 +30,7 @@
 
 namespace ui {
 
+class ScrollViewWidget;
 
 class UI_API UiWindowImpl {
 public:
@@ -109,6 +110,7 @@ public:
 
     // Dialog (public for C API access)
     void LayoutRoot();
+    void ScrollWithMeasureContext(ScrollViewWidget* scroll,float y);
     WidgetPtr Root() const { return root_; }
     bool skipOpenAnimation_ = false;
     /* Build 105+ (L25): config.start_maximized 状态. ui_window_create 拷,

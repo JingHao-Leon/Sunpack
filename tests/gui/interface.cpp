@@ -370,6 +370,12 @@ int wmain(int argc,wchar_t** argv) {
             atomic_write(dir/".sunpack_watch"/"events.jsonl",many);
             pump([&]{return state(app.page(),"tasks")["total"]==512;});
             virtual_tail(app,"taskItems","taskListScroll",512);
+            auto tail=state(app.page(),"tasks")["rows"][511];
+            tail["sortTimestamp"]=1e12;
+            auto delta_json=Json{{"changes",Json::array({Json{{"id",tail["id"]},{"row",tail}}})},{"malformed",0}}.dump();
+            assert(ui_page_call_json(app.page(),"applyTaskDelta",delta_json.c_str())==0);
+            assert(state(app.page(),"tasks")["rows"][0]["id"]==tail["id"]);
+            virtual_tail(app,"taskItems","taskListScroll",512);
             auto task=state(app.page(),"tasks")["rows"][0];
             assert(task["time"].get<std::string>().size()==19);
             resize_tasks(app);
@@ -387,7 +393,7 @@ int wmain(int argc,wchar_t** argv) {
             assert(task_name && task_name->css.hasFg && task_name->css.fg.b>task_name->css.fg.r);
             screenshot(app,L"task-name-hover.png");
             click(app,("taskName-"+task_id).c_str());
-            assert(state(app.page(),"requests")==Json::array({Json{{"op","openTask"},{"payload",{{"id",task["id"]}}}}}));
+            assert(state(app.page(),"requests")==Json::array({Json{{"op","openTask"},{"payload",{{"task",task}}}}}));
             assert(!ui_widget_find_by_id(ui_page_root(app.page()),"taskDetails"));
             // Consume the real command before dispatch; never open Explorer.
             ui_page_set_json(app.page(),"requests","[]");

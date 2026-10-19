@@ -42,6 +42,24 @@ export default {
     searchDirectory(value) { this.directoryQuery=value; this.send('scrollTop',{id:'directoryItems'}); },
     searchConfig(value) { this.configQuery=value; this.send('scrollTop',{id:'configBlocks'}); },
     searchTasks(value) { this.taskQuery=value; this.filterTasks(); },
+    applyTaskDelta(patch) {
+      // Shallow-copy row references, rather than serialize all task objects.
+      // A new array identity invalidates any position-based height estimates.
+      let rows=this.tasks.rows.slice();
+      for(let change of patch.changes) {
+        let old=rows.findIndex(t=>t.id===change.id);
+        if(old>=0) rows.splice(old,1);
+        if(!change.row) continue;
+        let row=change.row,lo=0,hi=rows.length;
+        while(lo<hi) {
+          let mid=(lo+hi)>>1,other=rows[mid];
+          if(other.sortTimestamp>row.sortTimestamp || (other.sortTimestamp===row.sortTimestamp && other.sortSequence>row.sortSequence)) lo=mid+1;
+          else hi=mid;
+        }
+        rows.splice(lo,0,row);
+      }
+      this.tasks={rows:rows,total:rows.length,malformed:patch.malformed};
+    },
     searchPasswords(value) { this.passwordQuery=value; this.filterPasswords(); },
     filterTasks() { this.send('filterTasks',{query:this.taskQuery,root:this.taskRoot,status:this.statusNames[this.taskStatus]||''}); },
     selectRoot(path) { if(this.rootOriginal&&this.rootDirty) { this.rootAction('save',{taskRoot:path,rootEditor:false}); return; } this.taskRoot=path; this.filterTasks(); },
@@ -306,7 +324,7 @@ export default {
         </div>
           <label v-show="tasks.total===0" class="muted">{{ texts.noTasks }}</label>
           <VirtualList id="taskItems" class="column" estimated-height="68px"><div v-for="t in tasks.rows" :key="t.id" :id="'task-'+t.id" :class="'task '+appearance">
-            <div class="row"><button :id="'taskName-'+t.id" class="taskname" @click="send('openTask',{id:t.id})">{{ t.name }}</button><div class="spacer"/><label class="status" :class="'status-'+t.statusTone">{{ t.statusText }}</label></div>
+            <div class="row"><button :id="'taskName-'+t.id" class="taskname" @click="send('openTask',{task:t})">{{ t.name }}</button><div class="spacer"/><label class="status" :class="'status-'+t.statusTone">{{ t.statusText }}</label></div>
             <div class="row task-meta"><label :id="'taskRoot-'+t.id" class="muted fill">{{ texts.taskFolder }}{{ t.directory }}</label><label class="time">{{ t.time }}</label></div>
           </div>
           </VirtualList>

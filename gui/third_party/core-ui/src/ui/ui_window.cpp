@@ -3044,6 +3044,11 @@ void UiWindowImpl::OnMouseUp(float x, float y) {
     InvalidateNow();
 }
 
+void UiWindowImpl::ScrollWithMeasureContext(ScrollViewWidget* scroll,float y) {
+    ActiveMeasureContextScope measureScope(measureContext_,renderer_);
+    if(scroll) scroll->SetScrollY(y);
+}
+
 void UiWindowImpl::OnMouseWheel(float x, float y, int delta) {
     // Virtual rows may mount and measure during this input event.
     ActiveMeasureContextScope measureScope(measureContext_, renderer_);

@@ -1627,6 +1627,8 @@ UI_API void     ui_page_set_text_list(UiPage p, const char* name, const wchar_t*
  * ui_page_get_json 返回 malloc 出的 UTF-8 JSON, 调用方用 ui_page_free 释放.
  * 不存在或 kind=Function 返回 NULL.                                           */
 UI_API int      ui_page_set_json(UiPage p, const char* name, const char* utf8_json);
+/* Invoke a declared reactive page method with a JSON argument. */
+UI_API int      ui_page_call_json(UiPage p, const char* method, const char* utf8_json);
 UI_API char*    ui_page_get_json(UiPage p, const char* name);
 UI_API void     ui_page_free    (void* ptr);
 

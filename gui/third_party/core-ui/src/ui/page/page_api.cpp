@@ -650,6 +650,16 @@ UI_API int ui_page_set_json(UiPage p, const char* name, const char* utf8_json) {
     return 0;
 }
 
+UI_API int ui_page_call_json(UiPage p, const char* method, const char* utf8_json) {
+    auto* e = ui::page::Registry().Get(p);
+    if(!e || !e->state || !method || !utf8_json) return -1;
+    if(!e->state->CallJsonMethod(method,utf8_json)) {
+        e->lastError="ui_page_call_json failed: "+std::string(method);
+        return -1;
+    }
+    return 0;
+}
+
 UI_API char* ui_page_get_json(UiPage p, const char* name) {
     auto* e = ui::page::Registry().Get(p);
     if (!e || !e->state || !name) return nullptr;

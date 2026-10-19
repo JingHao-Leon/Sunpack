@@ -6,6 +6,8 @@
 #include <stdexcept>
 #include <iomanip>
 #include <ctime>
+#include <cmath>
+#include <optional>
 
 namespace spg {
 namespace {
@@ -111,10 +113,10 @@ std::string indexed_root(const std::wstring& key,const RootIndex& index) {
     for(auto& root:index) if(is_under(key,root.first)) return root.second;
     return "@other";
 }
-double iso_timestamp(const std::string& text) {
+std::optional<double> iso_timestamp(const std::string& text) {
     std::tm time{}; std::istringstream in(text);
     in>>std::get_time(&time,"%Y-%m-%dT%H:%M:%S");
-    if(in.fail()) return 0;
+    if(in.fail()) return {};
     double seconds=double(_mkgmtime64(&time));
     size_t at=19;
     if(at<text.size() && text[at]=='.') {
@@ -128,6 +130,15 @@ double iso_timestamp(const std::string& text) {
         }
     }
     return seconds;
+}
+std::string task_time(const Task& task) {
+    if(!task.has_timestamp || !std::isfinite(task.timestamp) || task.timestamp<0 || task.timestamp>32535215999.0) return {};
+    auto seconds=static_cast<__time64_t>(task.timestamp);
+    std::tm local{};
+    if(_localtime64_s(&local,&seconds)) return {};
+    char text[32]{};
+    std::strftime(text,sizeof(text),"%Y-%m-%d %H:%M:%S",&local);
+    return text;
 }
 }
 Json parse_json(const std::string& text) {
@@ -404,12 +415,14 @@ void EventLog::accept(const Json& j) {
     auto event=j["event"].get<std::string>(), path=j["path"].get<std::string>();
     if (path.empty()) return;
     auto status=event_status(event); auto key=path_key(wide(path));
-    if (event=="cleanup") { auto it=tasks.find(key); if(it!=tasks.end()) it->second.cleanup=j; return; }
     if (status.empty()) return;
-    Task t; t.path=path; t.status=status; t.details=j; t.sequence=++sequence_;
-    if(j.contains("time") && j["time"].is_string()) t.time=j["time"].get<std::string>();
-    if(j.contains("ts") && j["ts"].is_number()) t.timestamp=j["ts"].get<double>();
-    else if(!t.time.empty()) t.timestamp=iso_timestamp(t.time);
+    Task t; t.path=path; t.status=status; t.sequence=++sequence_;
+    if(j.contains("output_dirs") && j["output_dirs"].is_array())
+        for(auto& output:j["output_dirs"]) if(output.is_string() && !output.get_ref<const std::string&>().empty()) t.outputs.push_back(output.get<std::string>());
+    if(j.contains("ts") && j["ts"].is_number()) { t.timestamp=j["ts"].get<double>(); t.has_timestamp=std::isfinite(t.timestamp); if(!t.has_timestamp) t.timestamp=0; }
+    else if(j.contains("time") && j["time"].is_string()) {
+        if(auto parsed=iso_timestamp(j["time"].get<std::string>())) { t.timestamp=*parsed; t.has_timestamp=true; }
+    }
     tasks[key]=std::move(t);
 }
 bool EventLog::refresh(bool missing_is_final) {
@@ -439,7 +452,7 @@ bool EventLog::refresh(bool missing_is_final) {
         offset_+=chunk.size(); bytes_parsed+=chunk.size(); pending_+=chunk;
         size_t start=0, end;
         while((end=pending_.find('\n',start))!=std::string::npos) {
-            try { auto event=parse_json(pending_.substr(start,end-start)); auto old=sequence_; accept(event); changed|=sequence_!=old || event.value("event",std::string())=="cleanup"; }
+            try { auto event=parse_json(pending_.substr(start,end-start)); auto old=sequence_; accept(event); changed|=sequence_!=old; }
             catch(const std::exception&) { ++malformed; changed=true; }
             start=end+1;
         }
@@ -477,21 +490,28 @@ Json task_rows(const EventLog& log,const WatchRoots& roots,const View& v,const s
     size_t pages=std::max<size_t>(1,(rows.size()+99)/100), page=std::min(v.task_page,pages-1);
     Json result={{"rows",Json::array()},{"total",rows.size()},{"page",page},{"pages",pages},{"malformed",log.malformed}};
     for(size_t i=page*100;i<std::min(rows.size(),(page+1)*100);++i) {
-        auto& t=*rows[i]; auto details=t.details;
-        if(!t.cleanup.is_null()) details["cleanup"]=t.cleanup;
-        Json outputs=Json::array();
-        if(t.details.contains("output_dirs") && t.details["output_dirs"].is_array())
-            for(auto& output:t.details["output_dirs"]) if(output.is_string()) outputs.push_back(output);
-        std::string summary=t.details.value("event",std::string());
-        if(!t.status.empty()) summary=tr(t.status,language);
-        if(t.details.contains("success_count")) summary=tr("successCount",language)+t.details["success_count"].dump();
-        if(t.details.contains("error")) summary=t.details["error"].is_string()?t.details["error"].get<std::string>():t.details["error"].dump();
+        auto& t=*rows[i];
+        const char* tone=t.status=="成功"?"success":t.status=="失败"?"failure":
+            (t.status.rfind("等待",0)==0 || t.status.rfind("挂起",0)==0 || t.status=="准备处理")?"waiting":"info";
         result["rows"].push_back({{"id",utf8(path_key(wide(t.path)))},{"name",utf8(fs::path(wide(t.path)).filename().wstring())},
-            {"path",t.path},{"root",indexed_root(path_key(wide(t.path)),root_index)},{"status",t.status},{"statusText",tr(t.status,language)},{"time",t.time.empty()?(t.details.contains("ts")?t.details["ts"].dump():""):t.time},
-            {"summary",summary},{"outputs",outputs},
-            {"details",details.dump(2)}});
+            {"path",t.path},{"root",indexed_root(path_key(wide(t.path)),root_index)},{"status",t.status},{"statusText",tr(t.status,language)},{"time",task_time(t)},
+            {"statusTone",tone},{"outputs",t.outputs}});
     }
     return result;
+}
+fs::path task_directory(const Json& row) {
+    auto root=row.value("root",std::string());
+    auto input=fs::path(wide(row.value("path",std::string())));
+    auto monitored=root.empty() || root=="@other"?input.parent_path():fs::path(wide(root));
+    auto exists=[](const fs::path& path) { std::error_code error; return !path.empty() && fs::is_directory(path,error); };
+    if(row.contains("outputs") && row["outputs"].is_array()) for(auto& output:row["outputs"]) {
+        if(!output.is_string() || output.get_ref<const std::string&>().empty()) continue;
+        auto directory=resolve_path(wide(output.get<std::string>()),monitored);
+        if(exists(directory)) return directory;
+    }
+    if(exists(monitored)) return monitored;
+    if(exists(input.parent_path())) return input.parent_path();
+    throw std::runtime_error("路径当前不存在");
 }
 Json password_rows(const Json& passwords,const View& v,const std::string& language) {
     Json rows=Json::array();

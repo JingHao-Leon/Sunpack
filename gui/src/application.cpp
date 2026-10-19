@@ -341,6 +341,15 @@ void Application::handle_command(Json command) {
         return;
     }
     if(op=="discard") sync_toggles();
+    if(op=="openTask") {
+        auto tasks=page_value(page_,"tasks");
+        auto id=p.value("id",std::string());
+        const auto& rows=tasks.at("rows");
+        auto task=std::find_if(rows.begin(),rows.end(),[&](const Json& row){return row["id"]==id;});
+        if(task==rows.end()) return;
+        p=Json{{"path",utf8(task_directory(*task).wstring())}};
+        op="openPath";
+    }
     if(op=="openPath") {
         auto path=wide(p.value("path",std::string()));
         if(!path.empty() && fs::exists(path)) {
@@ -404,9 +413,6 @@ void Application::open() {
     ui_page_on_widget_unmount(page_,"dispatch",[](UiPage,UiWidget widget,void*){
         // The lifecycle API registers an owning handle; release it on every dispatch.
         if(widget) ui_widget_destroy(widget);
-    },nullptr);
-    ui_page_on_widget_mount(page_,"taskDetails",[](UiPage,UiWidget widget,void*){
-        ui_text_area_set_read_only(widget,true);
     },nullptr);
     rebuild_theme("en");
     ui_window_on_close(window_,[](UiWindow,void* context){

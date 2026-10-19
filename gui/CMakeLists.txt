@@ -46,7 +46,9 @@ add_executable(sunpack_gui_ui_tests ../tests/gui/interface.cpp src/application.c
 target_include_directories(sunpack_gui_ui_tests PRIVATE "${core_ui_SOURCE_DIR}/src")
 ui_core_embed_text(sunpack_gui_ui_tests FILE ../sunpack_advanced_config.json OUT ui_defaults_json.h VAR kUiDefaultsJson)
 target_link_libraries(sunpack_gui_ui_tests PRIVATE sunpack_gui_data core-ui comctl32)
-ui_core_embed_text(sunpack_gui_ui_tests FILE resources/main.uix OUT main_uix.h VAR kMainUix)
+# The application owns the shared generated header. Two MSBuild projects
+# producing the same file can otherwise overwrite it during parallel builds.
+add_dependencies(sunpack_gui_ui_tests SunPackGUI)
 target_compile_options(sunpack_gui_ui_tests PRIVATE /UNDEBUG)
 add_test(NAME gui_interface COMMAND sunpack_gui_ui_tests)
 # Only the manager is shipped; no debug server or demo is started by this host.

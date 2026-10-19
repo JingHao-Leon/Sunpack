@@ -422,6 +422,21 @@ private:
     ComPtr<IUnknown>           dcompVisual_;
     std::unordered_map<ColorKey, ComPtr<ID2D1SolidColorBrush>, ColorKeyHash> brushCache_;
     std::unordered_map<TextFormatKey, ComPtr<IDWriteTextFormat>, TextFormatKeyHash> textFormatCache_;
+    struct TextWidthKey {
+        IDWriteTextFormat* format;
+        std::wstring text;
+        bool operator==(const TextWidthKey& other) const { return format == other.format && text == other.text; }
+    };
+    struct TextWidthKeyHash {
+        size_t operator()(const TextWidthKey& key) const {
+            return std::hash<std::wstring>{}(key.text) ^ std::hash<void*>{}(key.format);
+        }
+    };
+    // Scalars only: never retain DWrite layouts. Bound both entries and UTF-16
+    // payload so resizing a full task page stays cheap without an unbounded log cache.
+    std::unordered_map<TextWidthKey, float, TextWidthKeyHash> textWidthCache_;
+    size_t textWidthChars_ = 0;
+    void ClearTextCaches();
     /* SVG 描边图标共用一个 round-cap/round-join 风格，避免锐角处出尖刺 */
     ComPtr<ID2D1StrokeStyle> roundStrokeStyle_;
     ID2D1StrokeStyle* GetRoundStrokeStyle();

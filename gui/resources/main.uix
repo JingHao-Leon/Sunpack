@@ -6,7 +6,7 @@ export default {
     actionError:'',lastCommand:{},errors:{},logPath:'',cliAllowed:false,runtime:{known:false,running:false},
     tasks:{rows:[],total:0,page:0,pages:1,malformed:0},passwords:{rows:[],total:0,page:0,pages:1},fields:[],directories:[],
     startup:{enabled:false,command:''},directoryQuery:'',directoryLimit:50,
-    taskQuery:'',taskRoot:'',taskStatus:0,selectedTask:'',
+    taskQuery:'',taskRoot:'',taskStatus:0,
     statusNames:['','等待处理','等待文件释放','准备处理','正在处理','成功','失败','挂起：等待密码','挂起：等待分卷','等待重试','跳过','已合并'],
     rootEditor:false,rootOriginal:'',rootInput:'',rootOutput:'',rootDeep:false,
     configCategory:'',configQuery:'',configPage:0,drafts:{},toggleDrafts:{},saving:false,staging:false,saveError:'',saveGeneration:0,passwordEdits:[],rootEdits:[],rootBaseline:'',rootExpected:null,passwordBaseline:'',
@@ -20,7 +20,6 @@ export default {
     shownDirectories() { let q=this.directoryQuery.toLowerCase(); return this.directories.filter(d=>d.watch&&d.path.toLowerCase().indexOf(q)>=0).slice(0,this.directoryLimit); },
     directoryCount() { return this.directories.filter(d=>d.watch).length; },
     chosenDirectory() { return this.directories.find(d=>d.watch&&d.path===this.taskRoot)||{path:'',effectiveOutput:''}; },
-    chosenTask() { return this.tasks.rows.find(t=>t.id===this.selectedTask)||{id:'',path:'',statusText:'',details:'',outputs:[]}; },
     categories() { let seen={}; return this.fields.filter(f=>{ if(seen[f.category]) return false; seen[f.category]=true; return true; }).map(f=>({id:f.category,label:f.categoryLabel})); },
     configBlocks() {
       let groups=[],seen={};
@@ -48,7 +47,7 @@ export default {
     searchTasks(value) { this.taskQuery=value; this.filterTasks(0); },
     searchPasswords(value) { this.passwordQuery=value; this.filterPasswords(0); },
     filterTasks(page) { this.send('filterTasks',{query:this.taskQuery,root:this.taskRoot,status:this.statusNames[this.taskStatus]||'',page:Math.max(0,page||0)}); },
-    selectRoot(path) { if(this.rootDirty) { this.rootAction('save',{taskRoot:path,selectedTask:'',rootEditor:false}); return; } this.taskRoot=path; this.selectedTask=''; this.filterTasks(0); },
+    selectRoot(path) { if(this.rootDirty) { this.rootAction('save',{taskRoot:path,rootEditor:false}); return; } this.taskRoot=path; this.filterTasks(0); },
     filterPasswords(page) { this.send('filterPasswords',{query:this.passwordQuery,scope:this.passwordScope,page:Math.max(0,page||0)}); },
     selectScope(path) { if(this.passwordDirty) { this.passwordAction('save',{passwordScope:path,passwordEditor:false}); return; } this.passwordScope=path; this.passwordEditor=false; this.filterPasswords(0); },
     rootState(d) { let input=d?d.path:'',output=d?d.output:'',deep=d?d.deep:false; return {rootOriginal:input,rootInput:input,rootOutput:output,rootDeep:deep,rootExpected:d?{output:output,deep:deep}:null,rootBaseline:JSON.stringify({input:input,output:output,deep:deep}),rootEditor:true}; },
@@ -163,9 +162,17 @@ export default {
   .settings-row { flex-direction:row; align-items:center; gap:16px; }
   .setting-copy { flex:1; gap:4px; }
   .setting-title { font-size:14px; }
-  .task { padding:16px; gap:8px; border:1px solid var(--card-border); border-radius:8px; }
+  .task { padding:16px; gap:8px; border:1px solid var(--card-border); border-radius:8px; cursor:pointer; }
   .taskname { display:flex; flex:1; flex-shrink:1; flex-direction:row; align-items:center; background:#00000001; padding:0px; border:0px; color:var(--fg); }
-  .status { color:var(--accent-text); font-size:12px; }
+  .status { font-size:14px; font-weight:600; padding:4px 10px; border-radius:4px; flex-shrink:0; white-space:nowrap; }
+  .light .status-success { color:#0f6b35; background:#dff6dd; }
+  .dark .status-success { color:#6ccb5f; background:#263c28; }
+  .light .status-waiting { color:#7a4e00; background:#fff4ce; }
+  .dark .status-waiting { color:#fce100; background:#433d24; }
+  .light .status-failure { color:#a4262c; background:#fde7e9; }
+  .dark .status-failure { color:#ff99a4; background:#442726; }
+  .light .status-info { color:#005a9e; background:#e5f1fb; }
+  .dark .status-info { color:#75b6e7; background:#243b50; }
   .time { color:var(--fg-2); font-size:12px; }
   .error { color:#d15b48; font-size:12px; }
   .light .card, .task.light, .card.light { background:#fbfbfb; border:1px solid #e5e5e5; }
@@ -289,14 +296,12 @@ export default {
           <div class="action-row"><toggle id="rootDeepToggle" v-model="rootDeep"/><label>{{ texts.deep }}</label><button id="finishRoot" @click="rootAction('save')">{{ rootOriginal?texts.finishEditing:texts.addToList }}</button><button v-show="rootOriginal" @click="rootAction('delete')">{{ texts.deleteRoot }}</button></div>
         </div>
           <label v-show="tasks.total===0" class="muted">{{ texts.noTasks }}</label>
-          <div v-for="t in tasks.rows" :key="t.id" :class="'task '+appearance" @click="selectedTask=t.id">
-            <div class="row"><button class="taskname" @click="selectedTask=t.id"><label class="fill subheading">{{ t.name }}</label></button><label class="status">{{ t.statusText }}</label></div>
-            <label class="muted">{{ t.path }}</label><div class="row"><label class="small fill">{{ t.summary }}</label><label class="time">{{ t.time }}</label></div>
+          <div v-for="t in tasks.rows" :key="t.id" :id="'task-'+t.id" :class="'task '+appearance" @click="send('openTask',{id:t.id})">
+            <div class="row"><button :id="'taskName-'+t.id" class="taskname" @click="send('openTask',{id:t.id})"><label class="fill subheading">{{ t.name }}</label></button><label class="status" :class="'status-'+t.statusTone">{{ t.statusText }}</label></div>
+            <label class="muted">{{ t.path }}</label><div class="row"><div class="spacer"/><label class="time">{{ t.time }}</label></div>
           </div>
         </div></ScrollView>
         <div v-show="!rootEditor" class="pager"><button :enabled="tasks.page>0" @click="filterTasks(tasks.page-1)">{{ texts.previous }}</button><label>{{ tasks.page+1 }} / {{ tasks.pages }} · {{ tasks.total }} {{ texts.taskCount }}</label><button :enabled="tasks.page+1 &lt; tasks.pages" @click="filterTasks(tasks.page+1)">{{ texts.next }}</button></div>
-        <div v-show="chosenTask.id" class="card"><div class="action-row"><label class="subheading">{{ texts.details }} · {{ chosenTask.statusText }}</label><button @click="send('openPath',{path:chosenTask.path})">{{ texts.locate }}</button><button @click="selectedTask=''">{{ texts.collapse }}</button></div>
-          <div class="action-row"><button v-for="output in chosenTask.outputs" :key="output" @click="send('openPath',{path:output})">{{ texts.openOutput }}</button></div><textarea id="taskDetails" :value="chosenTask.details" style="height:130px"/></div>
         <label v-show="tasks.malformed" class="error">{{ tasks.malformed }} {{ texts.invalidLogs }}</label>
       </div>
       <div id="page-config" v-show="tab==='config'" class="content">

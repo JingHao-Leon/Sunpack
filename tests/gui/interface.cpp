@@ -195,6 +195,33 @@ void popup_motion(Application& app,const char* id,bool upward=false) {
     assert(combo->SelectedIndex()==selected);
     assert(combo->rect.left==bounds.left && combo->rect.right==bounds.right);
 }
+void resize_tasks(Application& app) {
+    settle_motion(app);
+    std::vector<double> layouts;
+    ui_trace_set_sink([](const UiTraceEvent* event,void* data) {
+        if(std::strcmp(event->name,"layout_root_duration")) return;
+        for(uint32_t i=0;i<event->field_count;++i)
+            if(!std::strcmp(event->fields[i].key,"duration_ms"))
+                static_cast<std::vector<double>*>(data)->push_back(event->fields[i].f64);
+    },&layouts);
+    for(int width:{1110,1080,1040,1000,960,920,880,850,880,920,960,1000,1040,1080,1120})
+        ui_window_set_size(app.window(),width,720);
+    ui_trace_set_sink(nullptr,nullptr);
+    if(!layouts.empty()) {
+        std::sort(layouts.begin(),layouts.end());
+        std::cerr<<"100-task resize layout: median="<<layouts[layouts.size()/2]<<"ms; max="<<layouts.back()<<"ms\n";
+    }
+    button_texts(app);
+    screenshot(app,L"tasks-many.png");
+    auto theme=ui_widget_find_by_id(ui_page_root(app.page()),"themeSelector"); assert(theme);
+    auto choice=state(app.page(),"themeChoice").get<int>();
+    assert(ui_debug_combo_select(app.window(),theme,1)==0);
+    screenshot(app,L"tasks-many-light.png");
+    assert(ui_debug_combo_select(app.window(),theme,2)==0);
+    screenshot(app,L"tasks-many-dark.png");
+    assert(ui_debug_combo_select(app.window(),theme,choice)==0);
+    // Application owns the selector handle, as with the existing theme checks.
+}
 }
 int wmain(int argc,wchar_t** argv) {
     if(argc>1 && std::wstring(argv[1])==L"--fake-cli") {
@@ -221,6 +248,25 @@ int wmain(int argc,wchar_t** argv) {
             if(SUCCEEDED(DwmGetWindowAttribute(static_cast<HWND>(ui_window_hwnd(app.window())),DWMWA_TRANSITIONS_FORCEDISABLED,&disabled,sizeof(disabled)))) assert(!disabled);
             std::cerr<<"Initial files loaded\n";
             assert(state(app.page(),"tasks")["total"]==1);
+            std::string many;
+            const char* phases[]={"processing_started","failed_terminal","candidate_busy","done"};
+            for(int i=0;i<100;++i) many+=Json({{"event",phases[i%4]},{"path",utf8((dir/("task-"+std::to_string(i)+".001")).wstring())},{"time","2026-10-19T09:15:42.731112+00:00"},{"output_dirs",{utf8(dir.wstring())}}}).dump()+"\n";
+            atomic_write(dir/".sunpack_watch"/"events.jsonl",many);
+            pump([&]{return state(app.page(),"tasks")["total"]==100;});
+            auto task=state(app.page(),"tasks")["rows"][0];
+            assert(task["time"].get<std::string>().size()==19);
+            resize_tasks(app);
+            for(auto prefix:{"task-","taskName-"}) {
+                click(app,(prefix+task["id"].get<std::string>()).c_str());
+                assert(state(app.page(),"requests")==Json::array({Json{{"op","openTask"},{"payload",{{"id",task["id"]}}}}}));
+                assert(!ui_widget_find_by_id(ui_page_root(app.page()),"taskDetails"));
+                // Observe the real click command but consume it before dispatch:
+                // isolated UI tests must not open Explorer windows on the desktop.
+                ui_page_set_json(app.page(),"requests","[]");
+                ui_debug_pump();
+            }
+            atomic_write(dir/".sunpack_watch"/"events.jsonl",Json({{"event","done"},{"path",utf8((dir/"carrier.001").wstring())}}).dump()+"\n");
+            pump([&]{return state(app.page(),"tasks")["total"]==1;});
             assert(!state(app.page(),"texts").contains("otherTasks"));
             assert(rect(app,"allRoots").top>=rect(app,"directorySearch").bottom);
             click(app,"taskSearch"); ui_debug_type_text(app.window(),L"missing");
@@ -259,7 +305,11 @@ int wmain(int argc,wchar_t** argv) {
                 auto during=ui_widget_get_rect(page);
                 assert(during.left==rect.left && during.top==rect.top && during.right==rect.right && during.bottom==rect.bottom);
                 pump([&]{return state(app.page(),"busy")==true && read_json(dir/"cli-arguments.json")==args;});
-                assert(ui_widget_get_opacity(page)>=0.999f && ui_debug_widget_is_visible(page)==1);
+                if(ui_widget_get_opacity(page)<0.999f || ui_debug_widget_is_visible(page)!=1) {
+                    std::cerr<<"Command visibility: "<<id<<" opacity="<<ui_widget_get_opacity(page)<<" visible="<<ui_debug_widget_is_visible(page)<<"\n";
+                    screenshot(app,L"command-visibility.png");
+                    throw std::runtime_error("Command changed page visibility");
+                }
                 SetEvent(gate);
                 pump([&]{return state(app.page(),"lastCommand").value("action",std::string())==action && state(app.page(),"busy")==false;});
                 assert(read_json(dir/"cli-arguments.json")==args);
@@ -280,7 +330,9 @@ int wmain(int argc,wchar_t** argv) {
                 // interrupted; the indicator travels rather than blinking.
                 AnimationFrames animation;
                 click(app,"tabPasswords"); click(app,"tabTasks"); click(app,"tabConfig");
-                pump([&]{return state(app.page(),"tab")=="config";});
+                // The last requested tab equals the starting tab: wait for
+                // queued navigation to dispatch before checking its animation.
+                pump([&]{return state(app.page(),"tab")=="config" && state(app.page(),"requests").empty() && state(app.page(),"dispatch")==false;});
                 settle_motion(app); pump([&]{return animation.stopped;});
                 auto* indicator=ui::GetContext().GetWindow(app.window())->Root()->FindById("navIndicator");
                 assert(indicator->animationY>0);

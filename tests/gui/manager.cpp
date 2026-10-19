@@ -27,13 +27,14 @@ void projection(Fixture& f) {
     overwrite(p,event("candidate_active",source,1)+event("processing_started",source,2)+event("done",source,3)+event("cleanup",source,4));
     assert(log.refresh()); assert(log.tasks.size()==1);
     auto& task=log.tasks.begin()->second;
-    assert(task.status=="成功" && task.cleanup["event"]=="cleanup");
+    assert(task.status=="成功"); // Cleanup never replaces the task's terminal state.
     auto parsed=log.bytes_parsed; assert(!log.refresh()); assert(log.bytes_parsed==parsed);
     for(auto type:{"failed_terminal","failed_password","suspended_missing_volume","retry_password_failure","done","partial_rejected","pipeline_request_coalesced","no_tasks_found"}) {
         auto line=event(type,source,5); overwrite(p,line.substr(0,line.size()-2),true); log.refresh();
-        auto status=log.tasks.begin()->second.status;
+        auto sequence=log.tasks.begin()->second.sequence;
         overwrite(p,line.substr(line.size()-2),true); log.refresh();
-        assert(log.tasks.begin()->second.details["event"]==type);
+        assert(log.tasks.begin()->second.sequence>sequence);
+        assert(!log.tasks.begin()->second.status.empty());
     }
     auto reset_source=f.dir/L"载体.fake";
     std::string replacement=event("processing_started",reset_source,50);
@@ -47,6 +48,47 @@ void projection(Fixture& f) {
     overwrite(p,"{invalid}\n"+event("failed_password",reset_source,52)); log.refresh();
     assert(log.malformed==1 && log.tasks.size()==1);
     fs::remove(p); fails([&]{log.refresh();}); assert(!log.tasks.empty()); log.refresh(true); assert(log.tasks.empty());
+    // Equivalent ISO offsets and numeric epochs must display the same local
+    // wall time. TZ is process-only.
+    char* previous=nullptr; size_t count=0; _dupenv_s(&previous,&count,"TZ");
+    std::string old_zone=previous?previous:""; std::free(previous);
+    _putenv_s("TZ","UTC-8"); _tzset();
+    for(auto value:{"2026-10-19T09:15:42.731112+00:00","2026-10-19T17:15:42.731112+08:00","2026-10-19T04:15:42-05:00","2026-10-19T09:15:42Z"}) {
+        log.accept(Json{{"event","done"},{"path",utf8(source.wstring())},{"time",value}});
+        auto row=task_rows(log,{},{}).at("rows").at(0);
+        assert(row["time"]=="2026-10-19 17:15:42");
+        assert(!row.contains("details"));
+        auto stamp=log.tasks.begin()->second.timestamp;
+        log.accept(Json{{"event","done"},{"path",utf8(source.wstring())},{"ts",stamp}});
+        assert(task_rows(log,{},{}).at("rows").at(0).at("time")==row["time"]);
+    }
+    for(auto value:{"","invalid"}) {
+        log.accept(Json{{"event","done"},{"path",utf8(source.wstring())},{"time",value}});
+        assert(task_rows(log,{},{}).at("rows").at(0).at("time")=="");
+    }
+    log.accept(Json{{"event","done"},{"path",utf8(source.wstring())},{"ts",0}});
+    assert(task_rows(log,{},{}).at("rows").at(0).at("time")=="1970-01-01 08:00:00");
+    _putenv_s("TZ",old_zone.c_str()); _tzset();
+
+    // Resolve navigation from the same projected row at activation, including
+    // deleted input archives and outputs moved after the page was displayed.
+    auto monitor=f.dir/L"监控", nested=monitor/L"子目录", output=f.dir/L"输出";
+    fs::create_directories(nested); fs::create_directory(output);
+    auto file=nested/L"已删除的载体.001";
+    WatchRoots roots; roots.entries={{f.dir,"",false},{monitor,"",false}};
+    log.tasks.clear();
+    log.accept(Json{{"event","done"},{"path",utf8(file.wstring())},{"output_dirs",{utf8((f.dir/L"missing").wstring()),utf8(output.wstring())}}});
+    auto row=task_rows(log,roots,{}).at("rows").at(0);
+    assert(row["root"]==utf8(monitor.wstring()));
+    assert(task_directory(row)==output);
+    fs::remove(output);
+    assert(task_directory(row)==monitor);
+    auto old_root=task_rows(log,{},{}).at("rows").at(0);
+    assert(task_directory(old_root)==nested);
+    log.accept(Json{{"event","failed_password"},{"path",utf8(file.wstring())}});
+    assert(task_directory(task_rows(log,roots,{}).at("rows").at(0))==monitor);
+    fs::remove(nested); fs::remove(monitor);
+    fails([&]{task_directory(row);});
 }
 void editing(Fixture& f) {
     auto p=f.dir/"builtin_passwords.json";

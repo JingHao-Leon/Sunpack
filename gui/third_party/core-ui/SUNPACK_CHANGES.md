@@ -24,6 +24,10 @@ Local changes:
   motion, on the same finite paint-only animation host. Respect system settings.
 - Remove the redundant ScrollView layout during wheel dispatch: scrolling already
   shifts arranged rectangles, and the extra layout lost the text measure context.
+- Cache intrinsic text widths across layout passes/resizes, keyed by exact text
+  and DWrite format. Keep at most 1024 scalar results and 65536 UTF-16 characters;
+  clear on font/fallback changes, factory reinitialization and target release.
+  No retained text layouts or background work.
 
 The framework is MIT licensed; see [LICENSE](LICENSE). The original license and
 copyright notices are preserved, including [LunaSVG](third_party/lunasvg/LICENSE),

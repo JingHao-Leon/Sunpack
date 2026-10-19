@@ -28,10 +28,11 @@ WatchRoots apply_root_changes(WatchRoots roots, const fs::path& base, const Json
 Json save_changes(const fs::path& directory, const Json& fields, const Json& passwords, const Json& roots);
 std::string root_for(const fs::path& path, const WatchRoots& roots);
 struct Task {
-    std::string path, status, time;
+    std::string path, status;
     double timestamp = 0;
+    bool has_timestamp = false;
     uint64_t sequence = 0;
-    Json details, cleanup;
+    std::vector<std::string> outputs;
 };
 class EventLog {
     fs::path path_;
@@ -53,6 +54,8 @@ struct View {
     size_t task_page = 0, password_page = 0;
 };
 Json task_rows(const EventLog& log, const WatchRoots& roots, const View& view, const std::string& language = "zh");
+// Resolve only on activation so removed/moved output directories fall back then.
+fs::path task_directory(const Json& row);
 Json password_rows(const Json& passwords, const View& view, const std::string& language = "zh");
 Json config_fields(const Json& config, const std::string& source, const std::string& language = "zh");
 Json directory_rows(const WatchRoots& roots, const Json& config);

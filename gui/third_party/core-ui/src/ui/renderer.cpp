@@ -242,7 +242,7 @@ bool Renderer::Init() {
     dwFactory_  = ownedDwFactory_.Get();
     wicFactory_ = ownedWicFactory_.Get();
     brushCache_.clear();
-    textFormatCache_.clear();
+    ClearTextCaches();
     return true;
 }
 
@@ -252,7 +252,7 @@ bool Renderer::Init(ID2D1Factory1* factory, IDWriteFactory* dwFactory, IWICImagi
     dwFactory_  = dwFactory;
     wicFactory_ = wicFactory;
     brushCache_.clear();
-    textFormatCache_.clear();
+    ClearTextCaches();
     return true;
 }
 
@@ -566,6 +566,7 @@ void Renderer::ReleaseRenderTarget() {
     transformStack_.clear();
     brushCache_.clear();
     imageBitmapCache_.clear();
+    ClearTextCaches();
     targetBitmap_.Reset();
     swapChain_.Reset();
     ctx5_.Reset();
@@ -953,6 +954,12 @@ ComPtr<ID2D1SolidColorBrush> Renderer::GetBrush(const D2D1_COLOR_F& color) {
     return brush;
 }
 
+void Renderer::ClearTextCaches() {
+    textWidthCache_.clear();
+    textWidthChars_ = 0;
+    textFormatCache_.clear();
+}
+
 ComPtr<IDWriteTextFormat> Renderer::GetTextFormat(float fontSize, const wchar_t* family,
                                                    DWRITE_FONT_WEIGHT weight) {
     if (!dwFactory_) return nullptr;
@@ -1010,14 +1017,14 @@ theme::TextRenderMode Renderer::TextRenderMode() const {
 
 void Renderer::SetDefaultFontFamily(const wchar_t* family) {
     defaultFontOverride_ = family ? family : L"";
-    textFormatCache_.clear();  /* 缓存失效 */
+    ClearTextCaches();  /* 缓存失效 */
     RebuildFontFallback();
 }
 
 void Renderer::SetCjkFonts(const wchar_t* latin, const wchar_t* cjk) {
     latinFontOverride_ = latin ? latin : L"";
     cjkFontOverride_   = cjk   ? cjk   : L"";
-    textFormatCache_.clear();
+    ClearTextCaches();
     RebuildFontFallback();
 }
 
@@ -1078,6 +1085,7 @@ void Renderer::ApplyTextRenderMode() {
    CJK 覆盖的 Unicode 块：CJK Unified Ideographs + Extension A + 符号 / 标点 /
    全角形式 / 汉字偏旁 / 注音等常见范围。 */
 void Renderer::RebuildFontFallback() {
+    ClearTextCaches();
     fontFallback_.Reset();
     const wchar_t* latin = LatinFontFamily();
     const wchar_t* cjk   = CjkFontFamily();
@@ -1338,6 +1346,11 @@ float Renderer::MeasureTextWidth(const std::wstring& text, float fontSize,
     auto fmt = GetTextFormat(fontSize, family, weight);
     if (!fmt) return 0.0f;
 
+    TextWidthKey key{fmt.Get(), text};
+    auto cached = textWidthCache_.find(key);
+    if (cached != textWidthCache_.end()) return cached->second;
+    TraceEvent("core_renderer", "measure_text_width_miss");
+
     ComPtr<IDWriteTextLayout> layout;
     HRESULT hr = dwFactory_->CreateTextLayout(
         text.c_str(),
@@ -1351,7 +1364,16 @@ float Renderer::MeasureTextWidth(const std::wstring& text, float fontSize,
     DWRITE_TEXT_METRICS metrics{};
     hr = layout->GetMetrics(&metrics);
     if (FAILED(hr)) return 0.0f;
-    return metrics.widthIncludingTrailingWhitespace;
+    const float width = metrics.widthIncludingTrailingWhitespace;
+    if (text.size() <= 4096) {
+        if (textWidthCache_.size() >= 1024 || textWidthChars_ + text.size() > 65536) {
+            textWidthCache_.clear();
+            textWidthChars_ = 0;
+        }
+        textWidthChars_ += text.size();
+        textWidthCache_.emplace(std::move(key), width);
+    }
+    return width;
 }
 
 float Renderer::MeasureTextHeight(const std::wstring& text, float maxWidth, float fontSize,

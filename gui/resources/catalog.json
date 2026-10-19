@@ -116,10 +116,6 @@
       "zh": "编辑监控目录",
       "en": "Edit monitored folder"
     },
-    "collapse": {
-      "zh": "收起",
-      "en": "Close"
-    },
     "back": {
       "zh": "返回",
       "en": "Back"
@@ -163,18 +159,6 @@
     "taskCount": {
       "zh": "个任务",
       "en": "tasks"
-    },
-    "details": {
-      "zh": "任务详情",
-      "en": "Task details"
-    },
-    "locate": {
-      "zh": "在资源管理器中定位",
-      "en": "Show in Explorer"
-    },
-    "openOutput": {
-      "zh": "打开输出目录",
-      "en": "Open output folder"
     },
     "invalidLogs": {
       "zh": "条无效日志已跳过",
@@ -335,10 +319,6 @@
     "batchEmpty": {
       "zh": "请至少输入一个密码。",
       "en": "Enter at least one password."
-    },
-    "successCount": {
-      "zh": "成功项数：",
-      "en": "Successful items: "
     },
     "recursiveFixed": {
       "zh": "指定轮数",

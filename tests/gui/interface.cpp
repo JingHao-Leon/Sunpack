@@ -379,6 +379,14 @@ int wmain(int argc,wchar_t** argv) {
             assert(!ui_widget_find_by_id(ui_page_root(app.page()),"discardAll"));
             auto error=ui_page_last_error(app.page()); if(error && *error) std::cerr<<error<<"\n";
             screenshot(app,L"tasks.png");
+            auto navigation_bounds=rect(app,"navigation"), monitor_bounds=rect(app,"monitorControls"), nav_bounds=rect(app,"navItems");
+            auto directory_bounds=rect(app,"directoryPane"), task_bounds=rect(app,"page-tasks");
+            auto identity_bounds=rect(app,"identity"), status_bounds=rect(app,"runtimeStatus");
+            assert(status_bounds.left>=rect(app,"brand").right && status_bounds.right<=navigation_bounds.right);
+            assert(status_bounds.top>=identity_bounds.top && status_bounds.bottom<=identity_bounds.bottom);
+            assert(monitor_bounds.bottom<=nav_bounds.top && nav_bounds.bottom<=directory_bounds.top);
+            assert(directory_bounds.left>=navigation_bounds.left && directory_bounds.right<=navigation_bounds.right);
+            assert(task_bounds.left>=navigation_bounds.right);
             click(app,"watchStart");
             pump([&]{return state(app.page(),"lastCommand").value("action",std::string())=="start";});
             assert(read_json(dir/"cli-arguments.json")==Json::array({"watch","start"}));
@@ -412,7 +420,13 @@ int wmain(int argc,wchar_t** argv) {
                 assert(ui_widget_get_opacity(page)>=0.999f && ui_debug_widget_is_visible(page)==1);
                 ui_widget_destroy(page);
             };
+            click(app,"tabPasswords"); pump([&]{return state(app.page(),"tab")=="passwords";});
+            settle_motion(app);
+            assert(rect(app,"monitorControls").top==monitor_bounds.top);
             stable_commands("watchStop","stop",Json::array({"watch","stop"}));
+            click(app,"tabConfig"); pump([&]{return state(app.page(),"tab")=="config";});
+            settle_motion(app);
+            assert(rect(app,"monitorControls").top==monitor_bounds.top);
             stable_commands("watchStart","start",Json::array({"watch","start"}));
             click(app,"tabConfig"); pump([&]{return state(app.page(),"tab")=="config";});
             auto content=ui_widget_find_by_id(ui_page_root(app.page()),"page-config");
@@ -639,7 +653,7 @@ int wmain(int argc,wchar_t** argv) {
             {
                 FileMutex hold(dir/"builtin_passwords.json");
                 click(app,"passwordScopes"); ui_debug_pump();
-                click(app,"passwordValue"); ui_debug_type_text(app.window(),L" latest");
+                click(app,"passwordValue"); assert(ui_debug_key(app.window(),VK_END)==0); ui_debug_type_text(app.window(),L" latest");
                 ui_window_focus_widget(app.window(),0); ui_debug_pump();
             }
             finish_input(app);
@@ -758,8 +772,9 @@ int wmain(int argc,wchar_t** argv) {
             pump([&]{size_t count=0; for(auto& d:state(app.page(),"directories")) if(d["watch"]==true) ++count; return count==73;});
             click(app,"tabTasks"); pump([&]{return state(app.page(),"tab")=="tasks";});
             ui_window_relayout(app.window());
-            auto pane_rect=rect(app,"directoryPane"), list_rect=rect(app,"directoryListScroll");
-            assert(list_rect.bottom-list_rect.top>(pane_rect.bottom-pane_rect.top)*0.5f);
+            auto list_rect=rect(app,"directoryListScroll");
+            screenshot(app,L"directories-small.png");
+            assert(list_rect.bottom-list_rect.top>=132);
             auto button_before=rect(app,"newRoot");
             auto list=ui_widget_find_by_id(ui_page_root(app.page()),"directoryListScroll");
             assert(ui_debug_scroll_set(list,100000)==0); ui_widget_destroy(list); ui_window_relayout(app.window());
@@ -775,7 +790,7 @@ int wmain(int argc,wchar_t** argv) {
                 auto bounds=rect(app,"directory-"+directory["id"].get<std::string>());
                 if(bounds.top>=list_rect.top && bounds.bottom<=list_rect.bottom) ++visible;
             }
-            assert(visible>=5);
+            assert(visible>=3);
             screenshot(app,L"directories-small.png");
             auto first=state(app.page(),"shownDirectories")[1];
             click(app,("directory-"+first["id"].get<std::string>()).c_str());

@@ -502,6 +502,14 @@ void Application::open() {
     const char* stage="初始化渲染器";
     try {
     ui_init_with_theme(system_theme());
+    stage="加载图标";
+    auto module=GetModuleHandleW(nullptr);
+    auto resource=FindResourceW(module,MAKEINTRESOURCEW(2),RT_RCDATA);
+    if(!resource) win_error("FindResource SunPack logo");
+    auto logo=LoadResource(module,resource);
+    auto bytes=LockResource(logo); auto size=SizeofResource(module,resource);
+    if(!bytes || !size) throw std::runtime_error("无法加载 SunPack 图标资源");
+    ui_asset_register_blob("sunpack.png",bytes,size);
     stage="设置中文字体";
     ui_theme_set_cjk_font(L"Segoe UI Variable Text",L"Microsoft YaHei UI");
     stage="加载布局";

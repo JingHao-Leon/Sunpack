@@ -122,9 +122,11 @@ export default {
   .light { background:#f3f3f3; }
   .dark { background:#202020; }
   label { display:block; }
-  .navigation { width:208px; flex-shrink:0; padding:24px 12px 8px; gap:4px; }
-  .identity { flex-direction:row; align-items:center; gap:12px; padding:0px 12px 24px; }
-  .app-icon { width:40px; height:40px; padding:9px; border-radius:8px; color:var(--accent-text); }
+  .navigation { width:280px; flex-shrink:0; padding:16px 12px 8px; gap:4px; }
+  .identity { flex-direction:row; align-items:center; gap:12px; padding:0px 4px 8px; flex-shrink:0; }
+  .monitor-controls { gap:8px; padding:0px 4px 8px; flex-shrink:0; }
+  .monitor-actions button { flex:1; }
+  .app-icon { width:40px; height:40px; flex-shrink:0; }
   .brand { font-size:20px; font-weight:600; }
   .nav-item { display:flex; width:100%; flex-direction:row; align-items:center; height:40px; padding:0px 4px; gap:12px; border:0px; border-radius:4px; background:#00000001; color:var(--fg); }
   .light .nav-item:hover { background:#ebebeb; }
@@ -133,7 +135,9 @@ export default {
   .dark .on { background:#363636; color:var(--fg); }
   .nav-icon { width:18px; height:18px; color:var(--fg); }
   .nav-mark { width:3px; height:16px; }
-  .nav-items { gap:4px; }
+  /* Three 40 px entries and two gaps; the overlaid selection indicator
+     must not reserve an additional row below the navigation. */
+  .nav-items { height:128px; gap:4px; flex-shrink:0; }
   .nav-indicator { position:absolute; left:4px; top:12px; width:3px; height:16px; border-radius:2px; background:var(--accent-text); }
   .light .nav-indicator { background:#0067c0; }
   .dark .nav-indicator { background:#60cdff; }
@@ -154,11 +158,12 @@ export default {
   .subheading { font-size:14px; font-weight:600; }
   .muted { color:var(--fg-2); font-size:12px; }
   .small { font-size:12px; }
-  .directory-pane { width:224px; flex-shrink:0; padding:24px 10px 24px 0px; gap:10px; }
-  .directory-pane > input, .directory-pane > button { width:100%; flex-shrink:0; }
+  .directory-pane { flex:1; padding:8px 4px 4px; gap:4px; }
+  .directory-tools { gap:8px; flex-shrink:0; }
+  .directory-tools > button { width:100%; flex-shrink:0; }
   .directory-list { gap:2px; }
   .directory-list > button { width:100%; flex-shrink:0; }
-  .directory-item { min-height:50px; padding:6px 8px; flex-shrink:0; }
+  .directory-item { min-height:44px; padding:4px 8px; flex-shrink:0; }
   .directory-item .column { gap:2px; }
   .directory-name, .directory-path { white-space:nowrap; }
   .directory-actions button { flex:1; flex-shrink:0; }
@@ -218,8 +223,8 @@ export default {
   .setting-item > textarea { width:100%; }
   .setting-divider { height:1px; background:var(--card-border); }
   .block-heading { padding:16px 0px 0px; font-size:14px; font-weight:600; }
-  .runtime-badge { flex-direction:row; align-items:center; gap:7px; }
-  .runtime-dot { width:8px; height:8px; border-radius:4px; background:#8a8a8a; }
+  .runtime-badge { width:92px; flex-direction:row; align-items:center; gap:7px; flex-shrink:0; }
+  .runtime-dot { width:8px; height:8px; border-radius:4px; background:#8a8a8a; flex-shrink:0; }
   .runtime-dot.running { background:#6ccb5f; }
   .setting-description { color:var(--fg-2); font-size:12px; }
   .choice-host { height:32px; flex-direction:row; }
@@ -239,12 +244,17 @@ export default {
 <template>
   <div :class="'app '+appearance">
     <div class="body">
-      <div class="navigation">
-        <div class="identity">
-          <svg class="app-icon" viewBox="0 0 24 24" fill="none"><path d="M3 7 12 3 21 7 12 11 3 7ZM3 7v10l9 4 9-4V7M12 11v10M7.5 5 16.5 9" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
-          <div class="column" style="gap:3px"><label class="brand">SunPack</label><label class="muted">{{ texts.manager }}</label></div>
+      <div id="navigation" class="navigation">
+        <div id="identity" class="identity">
+          <img id="appIcon" class="app-icon" src="sunpack.png" width="40" height="40" object-fit="contain"/>
+          <div id="brand" class="column fill" style="gap:3px"><label class="brand">SunPack</label><label class="muted">{{ texts.manager }}</label></div>
+          <div id="runtimeStatus" class="runtime-badge"><div :class="runtime.known &amp;&amp; runtime.running?'runtime-dot running':'runtime-dot'"/><label class="muted">{{ !runtime.known?texts.runtimeUnknown:runtime.running?texts.runtimeRunning:texts.runtimeStopped }}</label></div>
         </div>
-      <div class="nav-items">
+        <div id="monitorControls" class="monitor-controls">
+          <div class="row monitor-actions"><button id="watchStart" :enabled="cliAllowed" @click="send('cli',{action:'start'})">{{ texts.startWatch }}</button><button id="watchStop" :enabled="cliAllowed" @click="send('cli',{action:'stop'})">{{ texts.stopWatch }}</button></div>
+          <label v-show="actionError" class="error">{{ actionError }}</label>
+        </div>
+      <div id="navItems" class="nav-items">
         <button id="tabTasks" :class="tab==='tasks'?'nav-item on':'nav-item'" @click="go('tasks')">
           <div class="nav-mark"/>
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none"><path d="m3 6 1.5 1.5L7 5M10 6h11M3 12l1.5 1.5L7 11M10 12h11M3 18l1.5 1.5L7 17M10 18h11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg><label>{{ texts.tasks }}</label>
@@ -264,13 +274,12 @@ export default {
         <button :class="!configCategory?'context-item on':'context-item'" @click="selectCategory('')"><label>{{ texts.allSettings }}</label></button>
         <ScrollView id="categoryScroll"><div class="column"><button v-for="c in categories" :key="c.id" :id="'category-'+c.id" :class="configCategory===c.id?'context-item on':'context-item'" @click="selectCategory(c.id)"><label>{{ c.label }}</label></button></div></ScrollView>
       </div>
-      <div v-show="tab!=='config'" class="spacer"/>
-      </div>
       <div id="directoryPane" v-show="tab==='tasks'" class="directory-pane">
-        <div class="row"><label class="subheading fill">{{ texts.roots }}</label><label class="muted">{{ directoryCount }}</label></div>
-        <button id="newRoot" @click="editRoot(null)">{{ texts.addRoot }}</button>
-        <label class="muted">{{ texts.searchDirectory }}</label><input id="directorySearch" :value="directoryQuery" @input="searchDirectory"/>
+        <div class="directory-tools">
+        <div class="row"><label class="subheading fill">{{ texts.roots }}</label><label class="muted">{{ directoryCount }}</label><button id="newRoot" @click="editRoot(null)">{{ texts.addRoot }}</button></div>
+        <div class="row"><label class="muted">{{ texts.searchDirectory }}</label><input id="directorySearch" class="fill" :value="directoryQuery" @input="searchDirectory"/></div>
         <button id="allRoots" :class="!taskRoot?'context-item on':'context-item'" @click="selectRoot('')"><label>{{ texts.allDirectories }}</label></button>
+        </div>
         <ScrollView id="directoryListScroll"><div class="directory-list">
           <button v-for="d in shownDirectories" :key="d.id" :id="'directory-'+d.id" class="context-item directory-item" :class="taskRoot===d.path?'on':''" @click="selectRoot(d.path)">
             <div class="column fill"><label class="directory-name">{{ d.name||d.path }}</label><label class="muted directory-path">{{ d.path }}</label></div>
@@ -279,11 +288,11 @@ export default {
         </div></ScrollView>
         <div v-show="tab==='tasks' &amp;&amp; chosenDirectory.path" class="row directory-actions"><button id="editSelectedRoot" @click="editRoot(chosenDirectory)">{{ texts.edit }}</button><button @click="send('openPath',{path:chosenDirectory.path})">{{ texts.open }}</button><button id="deleteSelectedRoot" :enabled="!recordSaving.roots" @click="deleteListedRoot(chosenDirectory)">{{ texts.delete }}</button></div>
       </div>
+      <div v-show="tab==='passwords'" class="spacer"/>
+      </div>
       <div class="workspace">
       <div id="page-tasks" v-show="tab==='tasks'" class="content">
-        <div class="page-header"><label class="heading">{{ texts.tasks }}</label><div class="spacer"/><div id="runtimeStatus" class="runtime-badge"><div :class="runtime.known &amp;&amp; runtime.running?'runtime-dot running':'runtime-dot'"/><label class="muted">{{ !runtime.known?texts.runtimeUnknown:runtime.running?texts.runtimeRunning:texts.runtimeStopped }}</label></div></div>
-        <div class="row"><button id="watchStart" :enabled="cliAllowed" @click="send('cli',{action:'start'})">{{ texts.startWatch }}</button><button id="watchStop" :enabled="cliAllowed" @click="send('cli',{action:'stop'})">{{ texts.stopWatch }}</button></div>
-        <label v-show="actionError" class="error">{{ actionError }}</label>
+        <div class="page-header"><label class="heading">{{ texts.tasks }}</label></div>
         <label v-show="!rootEditor &amp;&amp; saveErrors['@roots']" class="error">{{ saveErrors['@roots'] }}</label>
         <div v-show="chosenDirectory.path &amp;&amp; !rootEditor" class="selected-directory"><label>{{ chosenDirectory.path }}</label><label>{{ texts.output }}{{ chosenDirectory.effectiveOutput }}</label></div>
         <div v-show="!rootEditor" class="column"><label class="muted">{{ texts.taskSearch }}</label><div class="row task-filters"><input id="taskSearch" class="fill" :value="taskQuery" @input="searchTasks"/>
@@ -307,7 +316,6 @@ export default {
       </div>
       <div id="page-config" v-show="tab==='config'" class="content">
         <div class="page-header"><label class="heading">{{ texts.config }}</label></div>
-        <label v-show="actionError" class="error">{{ actionError }}</label>
         <label class="muted">{{ texts.settingSearch }}</label><input id="configSearch" :value="configQuery" @input="searchConfig"/>
         <ScrollView id="configListScroll"><div id="configBlocks" class="column">
           <div v-show="!configCategory &amp;&amp; !configQuery &amp;&amp; configPage===0" class="card settings-row">
@@ -343,7 +351,6 @@ export default {
       </div>
       <div id="page-passwords" v-show="tab==='passwords'" class="content">
         <div class="page-header"><label class="heading">{{ texts.passwords }}</label></div>
-        <label v-show="actionError" class="error">{{ actionError }}</label>
         <label v-show="!passwordEditor &amp;&amp; saveErrors['@passwords']" class="error">{{ saveErrors['@passwords'] }}</label>
         <div class="password-tabs"><button id="newPassword" :class="passwordEditor &amp;&amp; !passwordOriginal?'on':''" @click="editPassword(null)">{{ texts.addPasswords }}</button><button id="savedPasswords" :class="passwordScope==='@all' &amp;&amp; !passwordEditor?'on':''" @click="selectScope('@all')">{{ texts.savedPasswords }}</button><button id="clipboardHistory" :class="passwordScope==='@history' &amp;&amp; !passwordEditor?'on':''" @click="selectScope('@history')">{{ texts.history }}</button><label class="muted">{{ texts.passwordSearch }}</label><input id="passwordSearch" :value="passwordQuery" @input="searchPasswords"/></div>
         <ScrollView id="passwordListScroll"><div id="passwordBody" class="column">

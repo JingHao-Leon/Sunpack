@@ -326,8 +326,8 @@ WatchRoots read_roots(const fs::path& p) {
     return parse_roots(read_file(p),p.parent_path());
 }
 WatchRoots apply_root_changes(WatchRoots roots,const fs::path& base,const Json& edits) {
-    for(auto& edit:edits) {
-        std::string op=edit.at("operation"), original=edit.value("original",std::string()), input=edit.at("input"), output=edit.at("output");
+    auto apply=[&](const Json& edit,const std::string& input,bool batch) {
+        std::string op=edit.at("operation"), original=edit.value("original",std::string()), output=edit.at("output");
         bool deep=edit.at("deep");
         auto path = resolve_path(wide(input),base);
         if (input.empty() || input.find_first_of("|\r\n") != std::string::npos || output.find_first_of("|\r\n") != std::string::npos)
@@ -343,10 +343,20 @@ WatchRoots apply_root_changes(WatchRoots roots,const fs::path& base,const Json& 
         else {
             auto key=path_key(path);
             auto duplicate=std::find_if(roots.entries.begin(),roots.entries.end(),[&](auto& r){return path_key(r.input)==key;});
-            if (duplicate!=roots.entries.end() && duplicate!=it) throw std::runtime_error("监控目录已存在");
+            if (duplicate!=roots.entries.end() && duplicate!=it) {
+                if(batch && duplicate->output==trim(output) && duplicate->deep==deep) return;
+                throw std::runtime_error("监控目录已存在");
+            }
             WatchRoot replacement{path,trim(output),deep};
             if(it==roots.entries.end()) roots.entries.push_back(replacement); else *it=replacement;
         }
+    };
+    for(auto& edit:edits) {
+        if(edit.at("operation")=="addMany") {
+            const auto& inputs=edit.at("inputs");
+            if(!inputs.is_array() || inputs.empty()) throw std::runtime_error("rootsEmpty");
+            for(auto& input:inputs) apply(edit,input.get<std::string>(),true);
+        } else apply(edit,edit.at("input").get<std::string>(),false);
     }
     return roots;
 }
@@ -487,22 +497,15 @@ Json password_rows(const Json& passwords,const View& v,const std::string& langua
     Json rows=Json::array();
     if(v.password_scope=="@history") {
         for(auto& p:passwords.value("clipboard_history",Json::array())) if(contains(p.get<std::string>(),v.password_query))
-            rows.push_back({{"id",std::to_string(rows.size())},{"value",p},{"source",tr("history",language)},{"original",""},{"scopes",""},{"direct",false}});
+            rows.push_back({{"id",std::to_string(rows.size())},{"value",p},{"original",""},{"scopes",""}});
     } else {
         for(auto& p:passwords.value("passwords",Json::array())) {
-            if(!contains(p["value"].get<std::string>(),v.password_query)) continue;
-            bool global=!p.contains("scopes"), direct=global; std::string source=global?tr("globalPasswords",language):"";
             std::string scopes;
-            if(!global) for(auto& s:p["scopes"]) {
+            if(p.contains("scopes")) for(auto& s:p["scopes"]) {
                 auto scope=s.get<std::string>(); if(!scopes.empty()) scopes+="\n"; scopes+=scope;
-                if(v.password_scope.size() && v.password_scope[0]!='@' && is_under(scope_key(wide(v.password_scope)),scope_key(wide(scope)))) {
-                    if(scope_key(wide(v.password_scope))==scope_key(wide(scope))) { direct=true; source=tr("direct",language); }
-                    else if(!direct) source=tr("inherited",language)+scope;
-                }
             }
-            bool include=v.password_scope=="@all" || (v.password_scope=="@global" && global) || (v.password_scope[0]!='@' && !source.empty());
-            if(include) rows.push_back({{"id",p.dump()+"#"+std::to_string(rows.size())},{"value",p["value"]},{"source",source.empty()?tr("folderPassword",language):source},
-                {"original",p.dump()},{"scopes",scopes},{"direct",direct && !global}});
+            if(!contains(p["value"].get<std::string>()+"\n"+(scopes.empty()?tr("allFolders",language):scopes),v.password_query)) continue;
+            rows.push_back({{"id",p.dump()+"#"+std::to_string(rows.size())},{"value",p["value"]},{"original",p.dump()},{"scopes",scopes}});
         }
     }
     size_t pages=std::max<size_t>(1,(rows.size()+99)/100), page=std::min(v.password_page,pages-1);
@@ -541,18 +544,14 @@ Json config_fields(const Json& config,const std::string& source,const std::strin
     };
     walk(config,"",""); return rows;
 }
-Json directory_rows(const WatchRoots& roots,const Json& passwords,const Json& config) {
-    Json rows=Json::array(); std::set<std::wstring> seen;
+Json directory_rows(const WatchRoots& roots,const Json& config) {
+    Json rows=Json::array();
     std::string default_out=".";
     if(config.contains("watch") && config["watch"].is_object() && config["watch"].contains("out_dir") && config["watch"]["out_dir"].is_string()) default_out=config["watch"]["out_dir"].get<std::string>();
     for(auto& r:roots.entries) {
-        auto key=path_key(r.input); seen.insert(scope_key(r.input));
+        auto key=path_key(r.input);
         rows.push_back({{"id",utf8(key)},{"path",utf8(r.input.wstring())},{"name",utf8(r.input.filename().wstring())},
             {"watch",true},{"output",r.output},{"effectiveOutput",utf8(resolve_path(wide(r.output.empty()?default_out:r.output),r.input).wstring())},{"deep",r.deep}});
-    }
-    for(auto& p:passwords.value("passwords",Json::array())) if(p.contains("scopes")) for(auto& scope:p["scopes"]) {
-        auto path=wide(scope.get<std::string>()); auto key=scope_key(path);
-        if(seen.insert(key).second) rows.push_back({{"id",utf8(key)},{"path",scope},{"name",utf8(fs::path(path).filename().wstring())},{"watch",false}});
     }
     return rows;
 }

@@ -24,10 +24,6 @@
       "zh": "监控目录",
       "en": "Monitored folders"
     },
-    "sources": {
-      "zh": "密码来源",
-      "en": "Password sources"
-    },
     "searchDirectory": {
       "zh": "搜索目录",
       "en": "Search folders"
@@ -44,17 +40,25 @@
       "zh": "添加监控目录",
       "en": "Add monitored folder"
     },
-    "globalPasswords": {
-      "zh": "全局密码",
-      "en": "Global passwords"
-    },
     "history": {
-      "zh": "剪贴板历史 · 只读",
-      "en": "Clipboard history · Read only"
+      "zh": "剪贴板历史",
+      "en": "Clipboard history"
     },
-    "manualPasswords": {
-      "zh": "全部手动密码",
-      "en": "All saved passwords"
+    "savedPasswords": {
+      "zh": "密码列表",
+      "en": "Saved passwords"
+    },
+    "allFolders": {
+      "zh": "全部目录",
+      "en": "All folders"
+    },
+    "rootBatchHint": {
+      "zh": "每行一个目录，可粘贴多行；以下设置应用于本次添加的所有目录。",
+      "en": "One folder per line. The settings below apply to all folders in this batch."
+    },
+    "rootsEmpty": {
+      "zh": "请至少输入一个目录。",
+      "en": "Enter at least one folder."
     },
     "edit": {
       "zh": "编辑",
@@ -88,10 +92,6 @@
       "zh": "监控目录中的直接文件。",
       "en": "Monitors files directly inside each folder."
     },
-    "scopeHint": {
-      "zh": "目录密码也适用于其子目录。",
-      "en": "Folder passwords also apply to subfolders."
-    },
     "categories": {
       "zh": "配置分类",
       "en": "Categories"
@@ -115,10 +115,6 @@
     "allStatus": {
       "zh": "全部状态",
       "en": "All statuses"
-    },
-    "filter": {
-      "zh": "筛选",
-      "en": "Filter"
     },
     "editRoot": {
       "zh": "编辑监控目录",
@@ -257,8 +253,8 @@
       "en": "Add passwords"
     },
     "passwordSearch": {
-      "zh": "搜索密码",
-      "en": "Search passwords"
+      "zh": "搜索",
+      "en": "Search"
     },
     "noPasswords": {
       "zh": "没有匹配的密码。",
@@ -269,7 +265,7 @@
       "en": "Edit password"
     },
     "copyPassword": {
-      "zh": "另存为手动密码",
+      "zh": "保存到密码列表",
       "en": "Save a copy"
     },
     "passwordText": {
@@ -277,24 +273,20 @@
       "en": "Password"
     },
     "batchHint": {
-      "zh": "每行一个密码，可粘贴多行；保留空格和 #，忽略空行。",
-      "en": "One password per line. Paste multiple lines; spaces and # are kept. Empty lines are skipped."
+      "zh": "每行一个密码，可批量粘贴。",
+      "en": "One password per line."
     },
     "scopeLabel": {
-      "zh": "适用目录",
-      "en": "Folders"
+      "zh": "作用范围",
+      "en": "Applies to"
     },
     "scopeDescription": {
-      "zh": "每行一个绝对目录；新密码留空表示适用于全部目录。",
-      "en": "One absolute folder per line. Leave blank for new passwords to apply everywhere."
+      "zh": "每行一个完整目录路径（含子目录）；新密码留空表示全部目录。",
+      "en": "One full folder path per line, including subfolders. Leave blank for new passwords to apply everywhere."
     },
     "chooseScope": {
       "zh": "添加适用目录",
       "en": "Add folder"
-    },
-    "removeScope": {
-      "zh": "仅从当前目录移除",
-      "en": "Remove from this folder"
     },
     "makeGlobal": {
       "zh": "适用于全部目录",
@@ -309,8 +301,8 @@
       "en": "entries"
     },
     "scopeGuard": {
-      "zh": "目录密码不能直接清空适用目录。请移除当前目录，或选择“适用于全部目录”。",
-      "en": "To remove the last folder, remove the password from that folder or choose Apply everywhere."
+      "zh": "请保留至少一个目录，或点击“适用于全部目录”。",
+      "en": "Keep at least one folder, or choose Apply everywhere."
     },
     "operationFailed": {
       "zh": "操作未完成",
@@ -351,18 +343,6 @@
     "successCount": {
       "zh": "成功项数：",
       "en": "Successful items: "
-    },
-    "inherited": {
-      "zh": "继承自 ",
-      "en": "Inherited from "
-    },
-    "direct": {
-      "zh": "直接适用",
-      "en": "Assigned to this folder"
-    },
-    "folderPassword": {
-      "zh": "目录密码",
-      "en": "Folder password"
     },
     "recursiveFixed": {
       "zh": "指定轮数",

@@ -149,7 +149,7 @@ void roots(Fixture& f) {
         log.accept(Json({{"event","done"},{"path",utf8((f.dir/std::to_wstring(i)/"file").wstring())},{"ts",i}}));
     }
     auto rows=task_rows(log,all,view); assert(rows["total"]==501 && rows["rows"].size()==100 && rows["pages"]==6);
-    assert(directory_rows(all,Json({{"passwords",Json::array()}}),Json::object()).size()==503);
+    assert(directory_rows(all,Json::object()).size()==503);
 }
 void batch_editing(Fixture& fixture) {
     auto dir=fixture.dir/"batch"; fs::create_directory(dir);
@@ -186,6 +186,21 @@ void batch_editing(Fixture& fixture) {
     assert(read_json(passwords)["passwords"][0]["value"]=="changed");
     assert(read_json(passwords)["clipboard_history"][0]=="latest background history");
     assert(read_roots(roots).entries[0].deep && read_file(roots).find("# retained")!=std::string::npos);
+    // Batch folder additions preflight together and ignore identical duplicates.
+    auto first=dir/"first", second=dir/"second"; fs::create_directory(first); fs::create_directory(second);
+    Json batch=Json::array({Json{{"operation","addMany"},{"inputs",{utf8(first.wstring()),utf8((dir/"missing").wstring())}},{"output",""},{"deep",true}}});
+    auto before=read_file(roots);
+    auto bad=save_changes(dir,Json::array(),Json::array(),batch);
+    assert(!bad["error"].get<std::string>().empty() && read_file(roots)==before);
+    batch[0]["inputs"]=Json::array({utf8(first.wstring()),utf8(second.wstring()),utf8(first.wstring())});
+    assert(save_changes(dir,Json::array(),Json::array(),batch)["error"]=="");
+    assert(read_roots(roots).entries.size()==3 && read_roots(roots).entries.back().deep);
+    View view;
+    auto saved=read_json(passwords);
+    saved["passwords"].push_back({{"value","everywhere"}});
+    assert(password_rows(saved,view)["total"]==2);
+    view.password_query=utf8(dir.wstring());
+    auto matches=password_rows(saved,view); assert(matches["total"]==1 && matches["rows"][0]["scopes"]==utf8(dir.wstring()));
 }
 void runtime_identity(Fixture& fixture) {
     struct Child {

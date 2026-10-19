@@ -3,8 +3,25 @@
 #include <cassert>
 #include <iostream>
 #include <dwmapi.h>
+#include <cstring>
 using namespace spg;
 namespace {
+struct AnimationFrames {
+    bool finished=false, layout=false;
+    unsigned frames=0;
+    AnimationFrames() {
+        ui_trace_set_sink([](const UiTraceEvent* event,void* data){
+            if(std::strcmp(event->name,"animation_frame")) return;
+            auto& self=*static_cast<AnimationFrames*>(data); ++self.frames;
+            for(uint32_t i=0;i<event->field_count;++i) {
+                const auto& f=event->fields[i];
+                if(!std::strcmp(f.key,"remaining_count") && f.i64==0) self.finished=true;
+                if(!std::strcmp(f.key,"needs_layout") && f.i64!=0) self.layout=true;
+            }
+        },this);
+    }
+    ~AnimationFrames() { ui_trace_set_sink(nullptr,nullptr); }
+};
 Json state(UiPage page,const char* key) { char* text=ui_page_get_json(page,key); if(!text) throw std::runtime_error(std::string("UI state unavailable: ")+key); auto j=parse_json(text); ui_page_free(text); return j; }
 UiRect rect(Application& app,const std::string& id) {
     auto widget=ui_widget_find_by_id(ui_page_root(app.page()),id.c_str()); assert(widget);
@@ -38,6 +55,29 @@ void pump(const std::function<bool()>& condition) {
 }
 void click(Application& app,const char* id) {
     ui_window_relayout(app.window());
+    // Scroll the containing pane as a person would before clicking an action
+    // in a long inline form. Never click through a clipped viewport.
+    char* dump=ui_debug_dump_tree(app.window()); assert(dump);
+    auto tree=parse_json(dump); ui_debug_free(dump);
+    std::vector<Json> ancestors;
+    std::function<bool(const Json&)> path=[&](const Json& node) {
+        if(node.value("id",std::string())==id) return true;
+        if(node.contains("children")) for(auto& child:node["children"]) if(path(child)) {
+            if(node.value("type",std::string())=="ScrollView") ancestors.push_back(node);
+            return true;
+        }
+        return false;
+    };
+    path(tree);
+    for(auto& pane:ancestors) {
+        auto bounds=rect(app,id); auto viewport=pane["rect"];
+        float top=viewport[1], bottom=viewport[3], center=(bounds.top+bounds.bottom)/2;
+        if(center<top+4 || center>bottom-4) {
+            auto scroll=ui_widget_find_by_id(ui_page_root(app.page()),pane["id"].get<std::string>().c_str()); assert(scroll);
+            ui_debug_scroll_set(scroll,pane["scrollY"].get<float>()+center-(top+bottom)/2);
+            ui_widget_destroy(scroll); ui_window_relayout(app.window());
+        }
+    }
     auto widget=ui_widget_find_by_id(ui_page_root(app.page()),id); assert(widget);
     if(ui_debug_widget_is_visible(widget)!=1) {
         char* info=ui_debug_dump_widget(widget); std::cerr<<id<<": "<<(info?info:"")<<"\n"; ui_debug_free(info);
@@ -45,6 +85,20 @@ void click(Application& app,const char* id) {
     assert(ui_debug_widget_is_visible(widget)==1);
     assert(ui_debug_click(app.window(),widget)==0);
     ui_widget_destroy(widget);
+}
+void button_texts(Application& app) {
+    ui_window_relayout(app.window());
+    char* dump=ui_debug_dump_tree(app.window()); assert(dump);
+    auto tree=parse_json(dump); ui_debug_free(dump);
+    std::function<void(const Json&)> check=[&](const Json& node) {
+        if(!node.value("visible",true)) return;
+        if(node.value("type",std::string())=="Button" && node.contains("textWidth")) {
+            if(node["textWidth"].get<float>()>node["availWidth"].get<float>()+0.5f)
+                throw std::runtime_error("Truncated action: "+node.dump());
+        }
+        if(node.contains("children")) for(auto& child:node["children"]) check(child);
+    };
+    check(tree);
 }
 void save(Application& app) {
     auto generation=state(app.page(),"saveGeneration").get<int>();
@@ -87,6 +141,19 @@ int wmain(int argc,wchar_t** argv) {
             if(SUCCEEDED(DwmGetWindowAttribute(static_cast<HWND>(ui_window_hwnd(app.window())),DWMWA_TRANSITIONS_FORCEDISABLED,&disabled,sizeof(disabled)))) assert(!disabled);
             std::cerr<<"Initial files loaded\n";
             assert(state(app.page(),"tasks")["total"]==1);
+            click(app,"taskSearch"); ui_debug_type_text(app.window(),L"missing");
+            try { pump([&]{return state(app.page(),"tasks")["total"]==0;}); }
+            catch(...) { std::cerr<<"Search tasks: "<<state(app.page(),"taskQuery")<<" requests="<<state(app.page(),"requests")<<" error="<<ui_page_last_error(app.page())<<"\n"; screenshot(app,L"search-failed.png"); throw; }
+            for(int i=0;i<7;++i) ui_debug_type_char(app.window(),8);
+            try { pump([&]{return state(app.page(),"tasks")["total"]==1;}); }
+            catch(...) { std::cerr<<"Clear tasks: "<<state(app.page(),"taskQuery")<<"\n"; throw; }
+            auto status=ui_widget_find_by_id(ui_page_root(app.page()),"taskStatus"); assert(status);
+            assert(ui_debug_combo_select(app.window(),status,1)==0);
+            pump([&]{return state(app.page(),"tasks")["total"]==0;});
+            assert(ui_debug_combo_select(app.window(),status,0)==0);
+            pump([&]{return state(app.page(),"tasks")["total"]==1;});
+            // The status selector handle belongs to Application, like themeSelector.
+            assert(!ui_widget_find_by_id(ui_page_root(app.page()),"filterTasks"));
             assert(state(app.page(),"changeCount")==0);
             assert(rendered_widget(app,"saveAll").value("enabled",true)==false);
             auto error=ui_page_last_error(app.page()); if(error && *error) std::cerr<<error<<"\n";
@@ -165,6 +232,15 @@ int wmain(int argc,wchar_t** argv) {
             ui_page_set_text(app.page(),"configQuery",L"toast_enabled");
             auto toast=ui_widget_find_by_id(ui_page_root(app.page()),"toggle-/watch/toast_enabled"); assert(toast);
             assert(ui_debug_toggle_set(app.window(),toast,0)==0);
+            assert(state(app.page(),"toggleDrafts").size()==1 && state(app.page(),"drafts").empty());
+            assert(ui_debug_toggle_set(app.window(),toast,1)==0);
+            assert(state(app.page(),"changeCount")==0);
+            {
+            AnimationFrames animation;
+            assert(ui_debug_toggle_set(app.window(),toast,0)==0);
+            pump([&]{return animation.finished;});
+            assert(animation.frames>1 && !animation.layout);
+            }
             ui_widget_destroy(toast);
             click(app,"saveAll");
             click(app,"tabTasks"); // Rapid navigation must not overwrite the save command.
@@ -211,6 +287,7 @@ int wmain(int argc,wchar_t** argv) {
             assert(state(app.page(),"texts")["config"]=="Settings");
             assert(state(app.page(),"fields")[0]["label"]=="Language");
             screenshot(app,L"configuration-english.png");
+            button_texts(app);
             ui_page_set_text(app.page(),"configQuery",L"language");
             auto language=ui_widget_find_by_id(ui_page_root(app.page()),"select-/cli/language"); assert(language);
             assert(ui_debug_combo_select(app.window(),language,0)==0);
@@ -221,6 +298,8 @@ int wmain(int argc,wchar_t** argv) {
             click(app,"tabPasswords"); pump([&]{return state(app.page(),"tab")=="passwords";});
             std::cerr<<"Password view mounted\n";
             assert(state(app.page(),"passwords")["rows"][0]["value"]=="  #中文  ");
+            assert(state(app.page(),"passwordScope")=="@all");
+            assert(!ui_widget_find_by_id(ui_page_root(app.page()),"globalPasswords"));
             click(app,"newPassword"); assert(state(app.page(),"passwordEditor")==true);
             click(app,"passwordValue"); ui_debug_type_text(app.window(),L"添加的密码\n  #批量  \n\n添加的密码");
             assert(state(app.page(),"passwordValue")=="添加的密码\n  #批量  \n\n添加的密码");
@@ -237,10 +316,13 @@ int wmain(int argc,wchar_t** argv) {
             catch(...) { std::cerr<<"Password model: "<<state(app.page(),"passwords")<<" errors="<<state(app.page(),"errors")<<"\n"; throw; }
             std::cerr<<"Password model updated\n";
             // One save spans config, multiple password edits, and a watched folder.
-            auto pending_root=dir/L"pending-root"; fs::create_directory(pending_root);
+            auto pending_root=dir/L"pending-root", pending_second=dir/L"pending-second"; fs::create_directory(pending_root); fs::create_directory(pending_second);
             auto disk_roots=read_file(dir/"sunpack_watch_roots.txt");
             click(app,"tabTasks"); pump([&]{return state(app.page(),"tab")=="tasks";});
-            click(app,"newRoot"); click(app,"rootInput"); ui_debug_type_text(app.window(),pending_root.c_str());
+            click(app,"newRoot");
+            assert(rendered_widget(app,"directoryPane").value("visible",true));
+            click(app,"rootInput"); ui_debug_type_text(app.window(),(pending_root.wstring()+L"\n"+pending_second.wstring()+L"\n"+pending_root.wstring()).c_str());
+            button_texts(app); screenshot(app,L"root-inline-batch-small.png");
             click(app,"finishRoot"); pump([&]{return state(app.page(),"rootEdits").size()==1 && state(app.page(),"staging")==false;});
             assert(read_file(dir/"sunpack_watch_roots.txt")==disk_roots);
             click(app,"tabPasswords"); pump([&]{return state(app.page(),"tab")=="passwords";});
@@ -259,10 +341,17 @@ int wmain(int argc,wchar_t** argv) {
             save(app);
             assert(state(app.page(),"changeCount")==0);
             assert(read_json(dir/"sunpack_config.json")["watch"]["out_dir"]=="batch-output");
-            assert(read_roots(dir/"sunpack_watch_roots.txt").entries.size()==2);
+            assert(read_roots(dir/"sunpack_watch_roots.txt").entries.size()==3);
             auto committed=read_json(dir/"builtin_passwords.json"); assert(committed["passwords"].size()==5);
             assert(committed["passwords"][3]["scopes"][0]==utf8(pending_root.wstring()));
             assert(committed["clipboard_history"].back()=="external while editing");
+            click(app,"tabPasswords"); pump([&]{return state(app.page(),"tab")=="passwords";});
+            click(app,"passwordSearch"); ui_debug_type_text(app.window(),L"pending scoped");
+            pump([&]{return state(app.page(),"passwords")["total"]==1;});
+            assert(state(app.page(),"passwords")["rows"][0]["scopes"]==utf8(pending_root.wstring()));
+            for(int i=0;i<14;++i) ui_debug_type_char(app.window(),8);
+            pump([&]{return state(app.page(),"passwords")["total"]==5;});
+            screenshot(app,L"passwords-unified.png");
             atomic_write(dir/".sunpack_watch"/"events.jsonl",Json({{"event","failed_password"},{"path",utf8((dir/"carrier.001").wstring())}}).dump()+"\n");
             try { pump([&]{return state(app.page(),"tasks")["rows"][0]["status"]=="挂起：等待密码";}); }
             catch(...) { std::cerr<<"Log model: "<<state(app.page(),"tasks")<<" errors="<<state(app.page(),"errors")<<"\n"; throw; }
@@ -282,6 +371,14 @@ int wmain(int argc,wchar_t** argv) {
             ui_page_set_json(app.page(),"drafts","{}"); ui_page_set_text(app.page(),"configQuery",L"");
             click(app,"tabConfig"); pump([&]{return state(app.page(),"tab")=="config";});
             ui_window_relayout(app.window());
+            button_texts(app);
+            auto startup_before=rect(app,"startupToggle");
+            auto config_scroll=ui_widget_find_by_id(ui_page_root(app.page()),"configListScroll"); assert(config_scroll);
+            ui_debug_scroll_set(config_scroll,100000); ui_window_relayout(app.window()); button_texts(app);
+            auto startup_after=rect(app,"startupToggle");
+            assert(startup_before.right-startup_before.left==startup_after.right-startup_after.left);
+            ui_debug_scroll_set(config_scroll,0); ui_debug_wheel(app.window(),config_scroll,-1200); ui_debug_pump(); button_texts(app);
+            ui_debug_scroll_set(config_scroll,0); ui_widget_destroy(config_scroll); ui_window_relayout(app.window());
             for(auto pair:{std::pair<const char*,const char*>{"categoryScroll","category-cli"},{"configListScroll","field-/cli/language"}}) {
                 auto scroll=ui_widget_find_by_id(ui_page_root(app.page()),pair.first);
                 auto item=ui_widget_find_by_id(ui_page_root(app.page()),pair.second);
@@ -356,6 +453,7 @@ int wmain(int argc,wchar_t** argv) {
             auto copy_info=rendered_widget(app,"copy-history-0");
             assert(copy_info["textWidth"].get<float>()<=copy_info["availWidth"].get<float>());
             screenshot(app,L"clipboard-history-small.png");
+            button_texts(app);
             click(app,"copy-history-0");
             assert(state(app.page(),"passwordValue")=="  #history value  ");
             assert(state(app.page(),"passwordOriginal")=="");

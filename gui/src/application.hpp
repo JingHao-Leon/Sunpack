@@ -26,11 +26,13 @@ class Application {
     bool notified_ = false, stopping_ = false;
     unsigned dirty_ = 15;
     std::thread worker_, registry_;
-    struct ChoiceBinding { Application* owner; Json field; };
-    std::map<std::string,std::unique_ptr<ChoiceBinding>> choices_;
+    struct ControlBinding { Application* owner; Json field; };
+    std::map<std::string,std::unique_ptr<ControlBinding>> controls_;
     UiWidget theme_widget_ = 0;
     UiWidget status_widget_ = 0;
-    void bind_choices(const Json& fields);
+    void bind_controls(const Json& fields);
+    void sync_toggles();
+    void reveal_form(bool password);
     void rebuild_theme(const std::string& language);
     void navigate(const std::string& tab);
     void work();

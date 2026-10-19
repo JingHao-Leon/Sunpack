@@ -49,12 +49,12 @@ public:
     const fs::path& path() const { return path_; }
 };
 struct View {
-    std::string task_query, task_root, task_status, password_query, password_scope = "@global";
+    std::string task_query, task_root, task_status, password_query, password_scope = "@all";
     size_t task_page = 0, password_page = 0;
 };
 Json task_rows(const EventLog& log, const WatchRoots& roots, const View& view, const std::string& language = "zh");
 Json password_rows(const Json& passwords, const View& view, const std::string& language = "zh");
 Json config_fields(const Json& config, const std::string& source, const std::string& language = "zh");
-Json directory_rows(const WatchRoots& roots, const Json& passwords, const Json& config);
+Json directory_rows(const WatchRoots& roots, const Json& config);
 fs::path log_directory(const fs::path& data_dir, const Json& config);
 }

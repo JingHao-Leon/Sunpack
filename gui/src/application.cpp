@@ -105,12 +105,14 @@ void Application::apply_pending() {
         if(password && page_value(page_,"passwordEditor")==false) {
             for(auto name:{"passwordValue","passwordOriginal","scopeText","passwordBaseline"}) set_text(page_,name,"");
         }
+        if(staged["nextState"].value(password?"passwordEditor":"rootEditor",false)) reveal_form(password);
         patch.erase("stagedEdit");
     }
     if(patch.contains("batchAck")) {
         auto ack=patch["batchAck"], submitted=ack["payload"];
         auto saved=[&](const char* section){return std::find(ack["saved"].begin(),ack["saved"].end(),section)!=ack["saved"].end();};
-        auto drafts=page_value(page_,"drafts");
+        for(auto name:{"drafts","toggleDrafts"}) {
+        auto drafts=page_value(page_,name);
         if(saved("config")) for(auto& edit:submitted["fields"]) {
             auto id=edit["pointer"].get<std::string>();
             if(!drafts.contains(id)) continue;
@@ -125,7 +127,8 @@ void Application::apply_pending() {
                 draft["baselineBoolean"]=edit["draft"]["boolean"];
             }
         }
-        auto encoded=drafts.dump(); ui_page_set_json(page_,"drafts",encoded.c_str());
+        auto encoded=drafts.dump(); ui_page_set_json(page_,name,encoded.c_str());
+        }
         for(auto section:{"passwords","roots"}) if(saved(section)) {
             bool password=std::string(section)=="passwords";
             auto key=password?"passwordEdits":"rootEdits";
@@ -140,21 +143,22 @@ void Application::apply_pending() {
         ui_page_set_int(page_,"saveGeneration",page_value(page_,"saveGeneration").get<int>()+1);
         patch.erase("batchAck");
     }
-    if(patch.contains("fields")) bind_choices(patch["fields"]);
+    if(patch.contains("fields")) bind_controls(patch["fields"]);
     for(auto it=patch.begin();it!=patch.end();++it) {
         auto text=it.value().dump();
         if(ui_page_set_json(page_,it.key().c_str(),text.c_str())!=0) throw std::runtime_error("Core UI 数据绑定失败");
     }
     if(patch.contains("fields")) {
         auto drafts=page_value(page_,"drafts");
-        for(auto it=choices_.begin();it!=choices_.end();) {
+        for(auto it=controls_.begin();it!=controls_.end();) {
             bool exists=std::any_of(patch["fields"].begin(),patch["fields"].end(),[&](const Json& f){return f["id"]==it->first;});
             if(!exists) {
-                auto host="choice-"+it->first;
+                auto host=(it->second->field["editor"]=="toggle"?"toggle-host-":"choice-")+it->first;
                 ui_page_on_widget_mount(page_,host.c_str(),nullptr,nullptr);
                 ui_page_on_widget_unmount(page_,host.c_str(),nullptr,nullptr);
-                it=choices_.erase(it); continue;
+                it=controls_.erase(it); continue;
             }
+            if(it->second->field["editor"]=="toggle") { ++it; continue; }
             auto widget=ui_widget_find_by_id(ui_page_root(page_),("select-"+it->first).c_str());
             if(widget) {
                 if(!drafts.contains(it->first)) ui_combobox_set_selected(widget,it->second->field["choice"].get<int>());
@@ -163,6 +167,7 @@ void Application::apply_pending() {
             ++it;
         }
     }
+    if(patch.contains("fields") || patch.contains("saving")) sync_toggles();
     if(patch.contains("language")) {
         auto language=patch["language"].get<std::string>();
         ui_window_set_title(window_,wide(tr("title",language)).c_str());
@@ -186,22 +191,62 @@ void Application::navigate(const std::string& tab) {
     ui_page_set_float(page_,"pageOpacity",1.0f);
     set_text(page_,"actionError","");
 }
-void Application::bind_choices(const Json& fields) {
+void Application::sync_toggles() {
+    auto drafts=page_value(page_,"toggleDrafts");
+    for(auto& pair:controls_) if(pair.second->field["editor"]=="toggle") {
+        auto widget=ui_widget_find_by_id(ui_page_root(page_),("toggle-"+pair.first).c_str());
+        if(!widget) continue;
+        bool on=drafts.contains(pair.first)?drafts[pair.first]["boolean"].get<bool>():pair.second->field["boolean"].get<bool>();
+        ui_toggle_set_on(widget,on); ui_widget_destroy(widget);
+    }
+}
+void Application::reveal_form(bool password) {
+    ui_window_relayout(window_);
+    auto scroll=ui_widget_find_by_id(ui_page_root(page_),password?"passwordListScroll":"taskListScroll");
+    // Core UI exposes programmatic scrolling through this public entry point;
+    // it only adjusts the viewport and does not start a debug server.
+    if(scroll) { ui_debug_scroll_set(scroll,0); ui_widget_destroy(scroll); }
+    auto input=ui_widget_find_by_id(ui_page_root(page_),password?"passwordValue":"rootInput");
+    if(input) { ui_window_focus_widget(window_,input); ui_widget_destroy(input); }
+}
+void Application::bind_controls(const Json& fields) {
     for(auto& field:fields) {
         auto editor=field.value("editor",std::string());
-        if(editor!="choice" && editor!="recursive") continue;
+        if(editor!="choice" && editor!="recursive" && editor!="toggle") continue;
         auto id=field["id"].get<std::string>();
-        auto& binding=choices_[id];
-        if(!binding) binding=std::make_unique<ChoiceBinding>(ChoiceBinding{this,field});
+        auto& binding=controls_[id];
+        if(!binding) binding=std::make_unique<ControlBinding>(ControlBinding{this,field});
         else binding->field=field;
-        auto host="choice-"+id;
+        auto host=(editor=="toggle"?"toggle-host-":"choice-")+id;
         ui_page_on_widget_mount(page_,host.c_str(),[](UiPage,UiWidget parent,void* context){
-            auto* binding=static_cast<ChoiceBinding*>(context); auto* self=binding->owner;
+            auto* binding=static_cast<ControlBinding*>(context); auto* self=binding->owner;
             auto id=binding->field["id"].get<std::string>();
+            bool toggle=binding->field["editor"]=="toggle";
             // Nested scope mounting visits descendants again when its parent
             // mounts. One native selector belongs to each host for its lifetime.
-            auto existing=ui_widget_find_by_id(parent,("select-"+id).c_str());
+            auto existing=ui_widget_find_by_id(parent,((toggle?"toggle-":"select-")+id).c_str());
             if(existing) { ui_widget_destroy(existing); return; }
+            if(toggle) {
+                auto widget=ui_toggle(L""); ui_widget_set_id(widget,("toggle-"+id).c_str());
+                ui_widget_set_width(widget,44); ui_widget_set_height(widget,26);
+                auto drafts=page_value(self->page_,"toggleDrafts");
+                ui_toggle_set_on_immediate(widget,drafts.contains(id)?drafts[id]["boolean"].get<bool>():binding->field["boolean"].get<bool>());
+                ui_toggle_on_changed(widget,[](UiWidget,int value,void* context){
+                    auto* binding=static_cast<ControlBinding*>(context); auto* self=binding->owner;
+                    try {
+                    auto id=binding->field["id"].get<std::string>();
+                    // A switch owns its finite animation. Keep its draft channel
+                    // separate so a click doesn't rebind every text/list control.
+                    auto drafts=page_value(self->page_,"toggleDrafts");
+                    Json draft=drafts.contains(id)?drafts[id]:Json{{"original",binding->field["original"]},{"text",binding->field["text"]},{"boolean",binding->field["boolean"]},{"baselineText",binding->field["text"]},{"baselineBoolean",binding->field["boolean"]}};
+                    draft["boolean"]=value!=0;
+                    if(draft["boolean"]==draft["baselineBoolean"]) drafts.erase(id); else drafts[id]=std::move(draft);
+                    auto encoded=drafts.dump(); ui_page_set_json(self->page_,"toggleDrafts",encoded.c_str());
+                    if(page_value(self->page_,"saveError")!="") set_text(self->page_,"saveError","");
+                    } catch(const std::exception& e) { set_text(self->page_,"saveError",translated_error(e.what(),page_value(self->page_,"language").get<std::string>())); }
+                },binding);
+                ui_widget_add_child(parent,widget); ui_widget_destroy(widget); return;
+            }
             std::vector<std::wstring> labels; std::vector<const wchar_t*> texts;
             for(auto& option:binding->field["options"]) labels.push_back(wide(option["label"].get<std::string>()));
             for(auto& label:labels) texts.push_back(label.c_str());
@@ -211,7 +256,7 @@ void Application::bind_choices(const Json& fields) {
             int selected=drafts.contains(id)?drafts[id].value("choice",binding->field["choice"].get<int>()):binding->field["choice"].get<int>();
             ui_combobox_set_selected(combo,selected);
             ui_combobox_on_changed(combo,[](UiWidget,int index,void* context){
-                auto* binding=static_cast<ChoiceBinding*>(context); auto* self=binding->owner;
+                auto* binding=static_cast<ControlBinding*>(context); auto* self=binding->owner;
                 try {
                     auto id=binding->field["id"].get<std::string>();
                     auto drafts=page_value(self->page_,"drafts");
@@ -253,7 +298,12 @@ void Application::rebuild_theme(const std::string& language) {
     status_widget_=ui_combobox(status_texts.data(),int(status_texts.size()));
     ui_widget_set_id(status_widget_,"taskStatus"); ui_widget_set_expand(status_widget_,true); ui_widget_set_height(status_widget_,32);
     ui_combobox_set_selected(status_widget_,page_value(page_,"taskStatus").get<int>());
-    ui_combobox_on_changed(status_widget_,[](UiWidget,int index,void* context){ui_page_set_int(static_cast<Application*>(context)->page_,"taskStatus",index);},this);
+    ui_combobox_on_changed(status_widget_,[](UiWidget,int index,void* context){
+        auto* self=static_cast<Application*>(context);
+        ui_page_set_int(self->page_,"taskStatus",index);
+        auto statuses=page_value(self->page_,"statusNames");
+        self->handle_command(Json{{"op","filterTasks"},{"payload",{{"query",page_value(self->page_,"taskQuery")},{"root",page_value(self->page_,"taskRoot")},{"status",index>=0 && size_t(index)<statuses.size()?statuses[index]:Json("")},{"page",0}}}});
+    },this);
     ui_widget_add_child(host,status_widget_); ui_widget_destroy(host);
 }
 void Application::dispatch() {
@@ -271,18 +321,20 @@ void Application::handle_command(Json command) {
     auto op=command.value("op",std::string());
     auto p=command.value("payload",Json::object());
     if(op=="navigate") { navigate(p.value("tab",std::string())); return; }
+    if(op=="revealForm") { reveal_form(p.value("kind",std::string())=="password"); return; }
     if(op=="browse") {
         auto selected=choose_directory(hwnd_);
         if(!selected.empty()) {
             auto target=p.value("target",std::string());
-            if(target=="scopeText") {
-                auto text=page_value(page_,"scopeText").get<std::string>();
+            if(target=="scopeText" || (target=="rootInput" && page_value(page_,"rootOriginal")=="")) {
+                auto text=page_value(page_,target.c_str()).get<std::string>();
                 if(!text.empty() && text.back()!='\n') text+='\n';
-                text+=utf8(selected.wstring()); set_text(page_,"scopeText",text);
+                text+=utf8(selected.wstring()); set_text(page_,target.c_str(),text);
             } else if(target=="rootInput" || target=="rootOutput") set_text(page_,target.c_str(),utf8(selected.wstring()));
         }
         return;
     }
+    if(op=="discard") sync_toggles();
     if(op=="openPath") {
         auto path=wide(p.value("path",std::string()));
         if(!path.empty() && fs::exists(path)) {
@@ -464,8 +516,7 @@ void Application::work() {
                         view.task_query=p.value("query",std::string()); view.task_root=p.value("root",std::string());
                         view.task_status=p.value("status",std::string()); view.task_page=p.value("page",size_t(0)); tasks_changed=true;
                     } else if(op=="filterPasswords") {
-                        view.password_query=p.value("query",std::string()); view.password_scope=p.value("scope",std::string("@global"));
-                        if(view.password_scope.empty()) view.password_scope="@global";
+                        view.password_query=p.value("query",std::string()); view.password_scope=p.value("scope",std::string("@all"));
                         view.password_page=p.value("page",size_t(0)); passwords_changed=true;
                     } else if(op=="stagePassword" || op=="stageRoot") {
                         bool password=op=="stagePassword";
@@ -579,7 +630,7 @@ void Application::work() {
             if(tasks_changed || language_changed || !previous_patch.contains("tasks")) patch["tasks"]=task_rows(log,shown_roots,view,language);
             if(passwords_changed || language_changed || !previous_patch.contains("passwords")) patch["passwords"]=password_rows(shown_passwords,view,language);
             if(config_changed || language_changed || !previous_patch.contains("fields")) patch["fields"]=config_fields(config,last_config,language);
-            if(dirs_changed || !previous_patch.contains("directories")) patch["directories"]=directory_rows(shown_roots,shown_passwords,config);
+            if(dirs_changed || !previous_patch.contains("directories")) patch["directories"]=directory_rows(shown_roots,config);
             if(flags&Startup || !previous_patch.contains("startup")) {
                 try { auto state=read_startup(); patch["startup"]={{"enabled",state.enabled},{"command",state.command}}; errors.erase("startup"); }
                 catch(const std::exception& e){errors["startup"]=e.what();}

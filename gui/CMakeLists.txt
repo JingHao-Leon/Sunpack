@@ -25,11 +25,12 @@ set(JSON_Install OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(json URL https://codeload.github.com/nlohmann/json/tar.gz/65ee68451d8eb2b5f3a30b410476ab83deb3289b
   DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
 FetchContent_MakeAvailable(json)
-add_library(sunpack_gui_data STATIC src/platform.cpp src/model.cpp
+add_library(sunpack_gui_data STATIC src/platform.cpp src/model.cpp src/presentation.cpp
   ../native/third_party/lz4/xxhash.c)
 target_include_directories(sunpack_gui_data PUBLIC src PRIVATE ../native/third_party/lz4)
 target_link_libraries(sunpack_gui_data PUBLIC nlohmann_json::nlohmann_json
   shell32 ole32 advapi32 ntdll)
+ui_core_embed_text(sunpack_gui_data FILE resources/catalog.json OUT catalog_json.h VAR kCatalogJson)
 add_executable(SunPackGUI WIN32 src/main.cpp src/application.cpp resources/app.rc)
 target_link_libraries(SunPackGUI PRIVATE sunpack_gui_data core-ui comctl32)
 ui_core_embed_text(SunPackGUI FILE resources/main.uix OUT main_uix.h VAR kMainUix)
@@ -37,10 +38,12 @@ target_link_options(SunPackGUI PRIVATE /OPT:REF /OPT:ICF
   "/MANIFESTINPUT:${CMAKE_CURRENT_SOURCE_DIR}/../sunpack.manifest")
 enable_testing()
 add_executable(sunpack_gui_tests ../tests/gui/manager.cpp)
+ui_core_embed_text(sunpack_gui_tests FILE ../sunpack_advanced_config.json OUT defaults_json.h VAR kDefaultsJson)
 target_link_libraries(sunpack_gui_tests PRIVATE sunpack_gui_data)
 target_compile_options(sunpack_gui_tests PRIVATE /UNDEBUG)
 add_test(NAME gui_file_contracts COMMAND sunpack_gui_tests)
 add_executable(sunpack_gui_ui_tests ../tests/gui/interface.cpp src/application.cpp)
+ui_core_embed_text(sunpack_gui_ui_tests FILE ../sunpack_advanced_config.json OUT ui_defaults_json.h VAR kUiDefaultsJson)
 target_link_libraries(sunpack_gui_ui_tests PRIVATE sunpack_gui_data core-ui comctl32)
 ui_core_embed_text(sunpack_gui_ui_tests FILE resources/main.uix OUT main_uix.h VAR kMainUix)
 target_compile_options(sunpack_gui_ui_tests PRIVATE /UNDEBUG)

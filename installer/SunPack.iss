@@ -81,6 +81,7 @@ english.WatchRootsFileMapping=# Optional columns: input folder | output folder |
 english.WatchRootsFileDeepDetect=# deep_detect accepts true or false; blank defaults to false.
 english.WatchRootsFileExample=# Example: C:\Downloads | D:\Extracted | true
 english.EditableConfigCreateFailed=Failed to create the initial editable configuration file: %s
+english.EditableConfigUpgradeFailed=Failed to upgrade SunPack data: %s. Check the file format and permissions, then run Setup again.
 chinesesimplified.TaskAddToPath=将 sunpack 添加到系统 PATH
 chinesesimplified.TaskContextMenu=注册 sunpack 文件夹右键菜单
 chinesesimplified.TaskAutostart=Windows 启动时运行 sunpack 监控
@@ -110,6 +111,7 @@ chinesesimplified.WatchRootsFileMapping=# 可选字段格式：输入目录 | �
 chinesesimplified.WatchRootsFileDeepDetect=# deep_detect 可填写 true 或 false；留空时默认为 false。
 chinesesimplified.WatchRootsFileExample=# 示例：C:\Downloads | D:\Extracted | true
 chinesesimplified.EditableConfigCreateFailed=无法创建初始可编辑配置文件：%s
+chinesesimplified.EditableConfigUpgradeFailed=无法升级 SunPack 数据：%s。请检查文件格式和权限后重新运行安装程序。
 
 [Tasks]
 Name: "addtopath"; Description: "{cm:TaskAddToPath}"; GroupDescription: "{cm:GroupShellIntegration}"
@@ -634,7 +636,6 @@ begin
     (CompareText(FileName, 'sunpack_config.json') = 0) or
     (CompareText(FileName, 'sunpack_watch_roots.txt') = 0) or
     (CompareText(FileName, 'builtin_passwords.txt') = 0) or
-    (CompareText(FileName, 'builtin_passwords.txt.bak') = 0) or
     (CompareText(FileName, 'builtin_passwords.json') = 0);
 end;
 
@@ -797,6 +798,31 @@ begin
   Result := Result + '"';
 end;
 
+procedure UpgradeEditableData(const AppPath, DataPath: string);
+var
+  ResultCode: Integer;
+begin
+  { Validate any existing password JSON before removing obsolete text files.
+    Reuse the native JSON token editor for config cleanup; no UI is started. }
+  if not Exec(AddBackslash(AppPath) + 'SunPackGUI.exe',
+    '--upgrade-data ' + AddQuotes(DataPath), DataPath, SW_HIDE,
+    ewWaitUntilTerminated, ResultCode) then
+    RaiseException(Format(CustomMessage('EditableConfigUpgradeFailed'), [DataPath]));
+  if ResultCode <> 0 then
+    RaiseException(Format(CustomMessage('EditableConfigUpgradeFailed'), [DataPath]));
+end;
+
+procedure DeleteLegacyPasswordFiles(const DataPath: string);
+var
+  OldPath: string;
+begin
+  OldPath := AddBackslash(DataPath) + 'builtin_passwords.txt';
+  if FileExists(OldPath) and not DeleteFile(OldPath) then
+    RaiseException(Format(CustomMessage('EditableConfigUpgradeFailed'), [OldPath]));
+  if FileExists(OldPath + '.bak') and not DeleteFile(OldPath + '.bak') then
+    RaiseException(Format(CustomMessage('EditableConfigUpgradeFailed'), [OldPath + '.bak']));
+end;
+
 procedure EnsurePasswordJson(const DataPath: string);
 var
   TargetPath, OldPath, Value, Passwords, History: string;
@@ -807,7 +833,11 @@ var
   Index, BlockBegin, BlockEnd: Integer;
 begin
   TargetPath := AddBackslash(DataPath) + 'builtin_passwords.json';
-  if FileExists(TargetPath) then Exit;
+  if FileExists(TargetPath) then
+  begin
+    DeleteLegacyPasswordFiles(DataPath);
+    Exit;
+  end;
   OldPath := AddBackslash(DataPath) + 'builtin_passwords.txt';
   Passwords := '';
   History := '';
@@ -861,9 +891,6 @@ begin
         end;
       end;
     end;
-    if not FileExists(OldPath + '.bak') then
-      if not FileCopy(OldPath, OldPath + '.bak', True) then
-        RaiseException(Format(CustomMessage('EditableConfigCreateFailed'), [OldPath + '.bak']));
   end
   else
     Passwords := '{"value":"123456"},{"value":"123"},{"value":"0000"},{"value":"789"}';
@@ -872,6 +899,7 @@ begin
   SaveUTF8TextLines(TargetPath + '.tmp', Output);
   if not RenameFile(TargetPath + '.tmp', TargetPath) then
     RaiseException(Format(CustomMessage('EditableConfigCreateFailed'), [TargetPath]));
+  DeleteLegacyPasswordFiles(DataPath);
 end;
 
 procedure EnsureLocalizedEditableConfigFiles;
@@ -885,6 +913,7 @@ begin
     RaiseException(Format(CustomMessage('EditableConfigCreateFailed'), [DataPath]));
   SecurePasswordDataDirectory(DataPath);
 
+  UpgradeEditableData(ExpandConstant('{app}'), DataPath);
   EnsurePasswordJson(DataPath);
 
   FilePath := AddBackslash(DataPath) + 'sunpack_watch_roots.txt';

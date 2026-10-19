@@ -1,74 +1,59 @@
-<window title="SunPack 管理面板" width="1120" height="720" min-width="850" min-height="560" centered="true" frameless="false"/>
+<window title="SunPack Manager" width="1120" height="720" min-width="850" min-height="560" centered="true" frameless="false"/>
 <script>
 export default {
-  data() {
-    return {
-      tab:'tasks', theme:'system', themeChoice:0, appearance:'light', dispatch:false, request:{}, ready:false, busy:false,
-      notice:'', dataDirectory:'', logPath:'', cliAllowed:false, errors:{},
-      tasks:{rows:[],total:0,page:0,pages:1,malformed:0},
-      passwords:{rows:[],total:0,page:0,pages:1}, fields:[], directories:[],
-      startup:{enabled:false,command:''}, directoryQuery:'', directoryLimit:50,
-      taskQuery:'', taskRoot:'', taskStatus:0, selectedTask:'',
-      statusNames:['','等待处理','等待文件释放','准备处理','正在处理','成功','失败','挂起：等待密码','挂起：等待分卷','等待重试','跳过','已合并'],
-      rootEditor:false, rootOriginal:'', rootInput:'', rootOutput:'', rootDeep:false,
-      configCategory:'', configQuery:'', configPage:0, configPointer:'',
-      configOriginal:'', configType:'string', configText:'', configBoolean:false,
-      passwordScope:'@global', passwordQuery:'', passwordOriginal:'', passwordValue:'', scopeText:'',
-      passwordEditor:false, passwordDirect:false
-    };
-  },
+  data() { return {
+    tab:'tasks',theme:'system',themeChoice:0,appearance:'light',pageOpacity:1,language:'en',texts:{},dispatch:false,requests:[],ready:false,busy:false,
+    actionError:'',cliResult:'',lastCommand:{},errors:{},logPath:'',cliAllowed:false,
+    tasks:{rows:[],total:0,page:0,pages:1,malformed:0},passwords:{rows:[],total:0,page:0,pages:1},fields:[],directories:[],
+    startup:{enabled:false,command:''},directoryQuery:'',directoryLimit:50,
+    taskQuery:'',taskRoot:'',taskStatus:0,selectedTask:'',
+    statusNames:['','等待处理','等待文件释放','准备处理','正在处理','成功','失败','挂起：等待密码','挂起：等待分卷','等待重试','跳过','已合并'],
+    rootEditor:false,rootOriginal:'',rootInput:'',rootOutput:'',rootDeep:false,
+    configCategory:'',configQuery:'',configPage:0,drafts:{},savedField:'',settingError:{},
+    passwordScope:'@global',passwordQuery:'',passwordOriginal:'',passwordValue:'',scopeText:'',passwordEditor:false,passwordDirect:false
+  }; },
   computed: {
-    errorList() { return Object.keys(this.errors).map(k=>k+'：'+this.errors[k]); },
-    shownDirectories() {
-      let q=this.directoryQuery.toLowerCase();
-      return this.directories.filter(d=>(this.tab==='passwords'||d.watch)&&d.path.toLowerCase().indexOf(q)>=0).slice(0,this.directoryLimit);
-    },
+    errorList() { return Object.keys(this.errors).map(k=>k+': '+this.errors[k]); },
+    shownDirectories() { let q=this.directoryQuery.toLowerCase(); return this.directories.filter(d=>(this.tab==='passwords'||d.watch)&&d.path.toLowerCase().indexOf(q)>=0).slice(0,this.directoryLimit); },
     directoryCount() { return this.directories.filter(d=>this.tab==='passwords'||d.watch).length; },
-    chosenTask() { return this.tasks.rows.find(t=>t.id===this.selectedTask)||{id:'',path:'',status:'',details:'',outputs:[]}; },
-    categories() { return Array.from(new Set(this.fields.map(f=>f.category))); },
-    matchingFields() {
-      let q=this.configQuery.toLowerCase();
-      return this.fields.filter(f=>(!this.configCategory||f.category===this.configCategory)&&f.label.toLowerCase().indexOf(q)>=0);
-    },
-    shownFields() { return this.matchingFields.slice(this.configPage*50,(this.configPage+1)*50); },
-    configPages() { return Math.max(1,Math.ceil(this.matchingFields.length/50)); }
+    chosenTask() { return this.tasks.rows.find(t=>t.id===this.selectedTask)||{id:'',path:'',statusText:'',details:'',outputs:[]}; },
+    categories() { let seen={}; return this.fields.filter(f=>{ if(seen[f.category]) return false; seen[f.category]=true; return true; }).map(f=>({id:f.category,label:f.categoryLabel})); },
+    matchingFields() { let q=this.configQuery.toLowerCase(); return this.fields.filter(f=>(!this.configCategory||f.category===this.configCategory)&&(f.label+' '+f.description+' '+f.id).toLowerCase().indexOf(q)>=0); },
+    shownFields() { return this.matchingFields.slice(this.configPage*30,(this.configPage+1)*30); },
+    configPages() { return Math.max(1,Math.ceil(this.matchingFields.length/30)); }
   },
   methods: {
-    send(op,payload) { this.request={op:op,payload:payload||{}}; this.dispatch=true; },
-    go(tab) { this.tab=tab; this.directoryLimit=50; this.send('refresh'); },
+    send(op,payload) { this.requests=this.requests.concat([{op:op,payload:payload||{}}]); this.dispatch=true; },
+    go(tab) { this.send('navigate',{tab:tab}); },
     searchDirectory(value) { this.directoryQuery=value; this.directoryLimit=50; },
     searchConfig(value) { this.configQuery=value; this.configPage=0; },
     filterTasks(page) { this.send('filterTasks',{query:this.taskQuery,root:this.taskRoot,status:this.statusNames[this.taskStatus]||'',page:Math.max(0,page||0)}); },
     selectRoot(path) { this.taskRoot=path; this.selectedTask=''; this.filterTasks(0); },
     filterPasswords(page) { this.send('filterPasswords',{query:this.passwordQuery,scope:this.passwordScope,page:Math.max(0,page||0)}); },
     selectScope(path) { this.passwordScope=path; this.passwordEditor=false; this.filterPasswords(0); },
-    editRoot(d) {
-      this.rootOriginal=d?d.path:''; this.rootInput=d?d.path:''; this.rootOutput=d?d.output:'';
-      this.rootDeep=d?d.deep:false; this.rootEditor=true;
+    editRoot(d) { this.actionError=''; this.rootOriginal=d?d.path:''; this.rootInput=d?d.path:''; this.rootOutput=d?d.output:''; this.rootDeep=d?d.deep:false; this.rootEditor=true; },
+    rootAction(operation) { this.actionError=''; this.send('root',{operation:operation,original:this.rootOriginal,input:this.rootInput,output:this.rootOutput,deep:this.rootDeep}); },
+    changeField(f,value) {
+      let d=this.drafts[f.id]||{original:f.original,text:f.text,boolean:f.boolean,choice:f.choice};
+      if(f.type==='boolean') d.boolean=value; else d.text=value;
+      this.drafts=Object.assign({},this.drafts,{[f.id]:d}); this.settingError={}; this.savedField='';
     },
-    rootAction(operation) {
-      this.send('root',{operation:operation,original:this.rootOriginal,input:this.rootInput,output:this.rootOutput,deep:this.rootDeep});
+    saveField(f) {
+      let d=this.drafts[f.id]; if(!d) return;
+      let text=d.text;
+      if(f.editor==='lines') text=JSON.stringify(text.split(/\r?\n/).filter(s=>s.length>0));
+      this.send('saveConfig',{pointer:f.id,original:d.original,type:f.editor==='recursive'?'string':f.type,text:text,boolean:d.boolean,draft:Object.assign({},d)});
     },
-    chooseField(f) {
-      this.configPointer=f.id; this.configOriginal=f.original; this.configType=f.type;
-      this.configText=f.text; this.configBoolean=f.boolean;
-    },
-    saveConfig() {
-      this.send('saveConfig',{pointer:this.configPointer,original:this.configOriginal,type:this.configType,text:this.configText,boolean:this.configBoolean});
-    },
-    editPassword(p) {
-      this.passwordOriginal=p?p.original:''; this.passwordValue=p?p.value:'';
-      this.scopeText=p?p.scopes:(this.passwordScope[0]==='@'?'':this.passwordScope);
-      this.passwordDirect=p?p.direct:false; this.passwordEditor=true;
-    },
+    editPassword(p) { this.actionError=''; this.passwordOriginal=p?p.original:''; this.passwordValue=p?p.value:''; this.scopeText=p?p.scopes:(this.passwordScope[0]==='@'?'':this.passwordScope); this.passwordDirect=p?p.direct:false; this.passwordEditor=true; },
     passwordAction(operation) {
+      this.actionError='';
       let scopes=this.scopeText.split(/\r?\n/).map(s=>s.trim()).filter(s=>s.length>0);
-      if(operation==='save'&&this.passwordOriginal&&JSON.parse(this.passwordOriginal).scopes&&scopes.length===0) {
-        this.notice='目录密码不能隐式变成全局密码。请移除当前作用域、删除记录，或点击“转为全局密码”。'; return;
-      }
+      if(operation==='save'&&this.passwordOriginal&&JSON.parse(this.passwordOriginal).scopes&&scopes.length===0) { this.actionError=this.texts.scopeGuard; return; }
       if(operation==='global') scopes=[];
-      this.send('password',{operation:operation==='save'||operation==='global'?(this.passwordOriginal?'replace':'add'):operation,
-        original:this.passwordOriginal,value:this.passwordValue,scopes:scopes,scope:this.passwordScope[0]==='@'?'':this.passwordScope});
+      let values=this.passwordValue.split(/\r?\n/).filter(s=>s.length>0);
+      if(!this.passwordOriginal&&operation==='save'&&values.length===0) { this.actionError=this.texts.batchEmpty; return; }
+      this.send('password',{operation:operation==='save'||operation==='global'?(this.passwordOriginal?'replace':'addMany'):operation,
+        original:this.passwordOriginal,value:this.passwordValue,values:values,scopes:scopes,scope:this.passwordScope[0]==='@'?'':this.passwordScope});
     }
   }
 }
@@ -99,7 +84,7 @@ export default {
   .sidebar button { min-height:32px; }
   .context-item { display:flex; width:100%; flex-direction:row; align-items:center; padding:7px 12px; gap:10px; border:0px; background:#00000001; color:var(--fg); }
   .context-item:hover { background:var(--sidebar-hover); }
-  .content { flex:1; padding:24px 32px 16px; gap:16px; }
+  .content { flex:1; padding:24px 28px 24px; gap:16px; }
   .workspace { flex:1; gap:12px; }
   .page-header { flex-direction:row; align-items:center; gap:12px; padding-bottom:4px; }
   .row { flex-direction:row; align-items:center; gap:8px; }
@@ -114,7 +99,6 @@ export default {
   .directory .muted { white-space:nowrap; }
   .card { padding:16px 20px; gap:10px; border:1px solid var(--card-border); border-radius:8px; }
   .settings-row { flex-direction:row; align-items:center; gap:16px; }
-  .settings-icon { width:20px; height:20px; color:var(--fg); }
   .setting-copy { flex:1; gap:4px; }
   .setting-title { font-size:14px; }
   .task { padding:16px; gap:8px; border:1px solid var(--card-border); border-radius:8px; }
@@ -122,22 +106,29 @@ export default {
   .status { color:var(--accent-text); font-size:12px; }
   .time { color:var(--fg-2); font-size:12px; }
   .error { color:#d15b48; font-size:12px; }
-  .notice { padding:8px 20px; font-size:12px; max-height:78px; border-top:1px solid var(--card-border); }
-  .footer { padding:4px 20px 8px; font-size:11px; color:var(--fg-3); white-space:nowrap; }
   .editor { flex:1; padding:20px; gap:12px; border:1px solid var(--card-border); border-radius:8px; }
   .editor > button { align-self:flex-start; }
-  .field { padding:12px 16px; gap:6px; border:1px solid var(--card-border); border-radius:8px; }
-  .light .card, .task.light, .light .editor, .field.light, .card.light, .light .notice { background:#fbfbfb; border:1px solid #e5e5e5; }
-  .dark .card, .task.dark, .dark .editor, .field.dark, .card.dark, .dark .notice { background:#2b2b2b; border:1px solid #303030; }
-  .field-button { display:flex; width:100%; flex-direction:row; align-items:center; gap:8px; padding:0px; min-height:24px; border:0px; background:#00000001; color:var(--fg); }
-  .field .muted { white-space:nowrap; }
+  .light .card, .task.light, .light .editor, .card.light { background:#fbfbfb; border:1px solid #e5e5e5; }
+  .dark .card, .task.dark, .dark .editor, .card.dark { background:#2b2b2b; border:1px solid #303030; }
   .pager { flex-direction:row; align-items:center; gap:12px; }
   .pager label { font-size:12px; color:var(--fg-2); }
   button { padding:6px 12px; border-radius:4px; min-height:32px; cursor:pointer; }
   input, select { height:32px; }
   .content > input, .sidebar > input, .editor input, .editor textarea { display:block; width:100%; }
   textarea { min-height:90px; }
-  ScrollView { flex:1; }
+  /* Core UI scrollbars overlay the viewport (up to 9 px plus a 2 px
+     inset). Reserve 18 px for the bar and shadows in every scroll pane. */
+  ScrollView { flex:1; padding:2px 18px 6px 2px; }
+  .setting-control { width:220px; gap:8px; }
+  .setting-control input, .setting-control textarea { width:100%; }
+  .setting-card { padding:16px 20px; gap:10px; border:1px solid var(--card-border); border-radius:8px; }
+  .setting-card.light { background:#fbfbfb; border:1px solid #e5e5e5; }
+  .setting-card.dark { background:#2b2b2b; border:1px solid #303030; }
+  .setting-description { color:var(--fg-2); font-size:12px; }
+  .choice-host { height:32px; flex-direction:row; }
+  .inline-message { color:var(--fg-2); font-size:12px; }
+  .password-input { height:110px; }
+  .nav-item { transition:background-color 140ms ease-out; }
 </style>
 <template>
   <div :class="'app '+appearance">
@@ -145,158 +136,125 @@ export default {
       <div class="navigation">
         <div class="identity">
           <svg class="app-icon" viewBox="0 0 24 24" fill="none"><path d="M3 7 12 3 21 7 12 11 3 7ZM3 7v10l9 4 9-4V7M12 11v10M7.5 5 16.5 9" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
-          <div class="column" style="gap:3px"><label class="brand">SunPack</label><label class="muted">管理面板</label></div>
+          <div class="column" style="gap:3px"><label class="brand">SunPack</label><label class="muted">{{ texts.manager }}</label></div>
         </div>
         <button id="tabTasks" :class="tab==='tasks'?'nav-item on':'nav-item'" @click="go('tasks')">
-          <div class="nav-mark"><div v-show="tab==='tasks'" class="nav-indicator"/></div>
-          <svg class="nav-icon" viewBox="0 0 24 24" fill="none"><path d="m3 6 1.5 1.5L7 5M10 6h11M3 12l1.5 1.5L7 11M10 12h11M3 18l1.5 1.5L7 17M10 18h11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          <label>任务状态</label>
+          <div class="nav-mark"><div :opacity="tab==='tasks'?1:0" transition="opacity 140ms ease-out" class="nav-indicator"/></div>
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none"><path d="m3 6 1.5 1.5L7 5M10 6h11M3 12l1.5 1.5L7 11M10 12h11M3 18l1.5 1.5L7 17M10 18h11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg><label>{{ texts.tasks }}</label>
         </button>
         <button id="tabConfig" :class="tab==='config'?'nav-item on':'nav-item'" @click="go('config')">
-          <div class="nav-mark"><div v-show="tab==='config'" class="nav-indicator"/></div>
-          <svg class="nav-icon" viewBox="0 0 24 24" fill="none"><path d="M4 7h16M4 17h16M8 4v6M16 14v6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-          <label>配置管理</label>
+          <div class="nav-mark"><div :opacity="tab==='config'?1:0" transition="opacity 140ms ease-out" class="nav-indicator"/></div>
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none"><path d="M4 7h16M4 17h16M8 4v6M16 14v6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg><label>{{ texts.config }}</label>
         </button>
         <button id="tabPasswords" :class="tab==='passwords'?'nav-item on':'nav-item'" @click="go('passwords')">
-          <div class="nav-mark"><div v-show="tab==='passwords'" class="nav-indicator"/></div>
-          <svg class="nav-icon" viewBox="0 0 24 24" fill="none"><path d="M14 5a5 5 0 1 1-2 8l-7 7H2v-3l7-7a5 5 0 0 1 5-5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><circle cx="16" cy="8" r="1" fill="currentColor"/></svg>
-          <label>密码管理</label>
+          <div class="nav-mark"><div :opacity="tab==='passwords'?1:0" transition="opacity 140ms ease-out" class="nav-indicator"/></div>
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none"><path d="M14 5a5 5 0 1 1-2 8l-7 7H2v-3l7-7a5 5 0 0 1 5-5Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg><label>{{ texts.passwords }}</label>
         </button>
-        <div v-show="!ready" class="spacer"/>
       <div v-show="tab==='tasks'||tab==='passwords'" class="sidebar">
         <ScrollView><div class="column">
-        <label class="sidebar-heading">{{ tab==='tasks'?'监控目录':'密码来源' }}</label>
-        <input id="directorySearch" :value="directoryQuery" placeholder="搜索目录" @input="searchDirectory"/>
-        <button v-show="tab==='tasks'" :class="taskRoot===''?'context-item on':'context-item'" @click="selectRoot('')"><label>全部目录 · {{ tasks.total }}</label></button>
-        <button v-show="tab==='tasks'" :class="taskRoot==='@other'?'context-item on':'context-item'" @click="selectRoot('@other')"><label>其他日志任务</label></button>
-        <button v-show="tab==='tasks'" id="newRoot" @click="editRoot(null)">＋ 添加监控目录</button>
-        <button v-show="tab==='passwords'" :class="passwordScope==='@global'?'context-item on':'context-item'" @click="selectScope('@global')"><label>全局密码</label></button>
-        <button v-show="tab==='passwords'" :class="passwordScope==='@history'?'context-item on':'context-item'" @click="selectScope('@history')"><label>剪贴板历史 · 只读</label></button>
-        <button v-show="tab==='passwords'" :class="passwordScope==='@all'?'context-item on':'context-item'" @click="selectScope('@all')"><label>全部手动密码</label></button>
-          <div class="column">
-            <div v-for="d in shownDirectories" :key="d.id" class="directory">
-              <button :class="taskRoot===d.path||passwordScope===d.path?'context-item on':'context-item'" @click="tab==='tasks'?selectRoot(d.path):selectScope(d.path)"><label class="fill">{{ d.name||d.path }}</label></button>
-              <label class="muted">{{ d.path }}</label>
-              <div v-show="tab==='tasks'" class="row">
-                <button @click="editRoot(d)">编辑</button>
-                <button @click="send('openPath',{path:d.path})">打开</button>
-              </div>
-              <label v-show="tab==='tasks'" class="muted">{{ d.output?'输出：':'继承默认输出：' }}{{ d.effectiveOutput }}</label>
-              <label v-show="tab==='passwords'" class="muted">{{ d.watch?'Watch 根目录':'密码作用域目录' }}</label>
-            </div>
-            <button v-show="directoryLimit &lt; directoryCount" @click="directoryLimit=directoryLimit+50">加载更多目录</button>
+          <label class="sidebar-heading">{{ tab==='tasks'?texts.roots:texts.sources }}</label>
+          <label class="muted">{{ texts.searchDirectory }}</label><input id="directorySearch" :value="directoryQuery" @input="searchDirectory"/>
+          <button v-show="tab==='tasks'" :class="!taskRoot?'context-item on':'context-item'" @click="selectRoot('')"><label>{{ texts.allDirectories }}</label></button>
+          <button v-show="tab==='tasks'" :class="taskRoot==='@other'?'context-item on':'context-item'" @click="selectRoot('@other')"><label>{{ texts.otherTasks }}</label></button>
+          <button v-show="tab==='tasks'" id="newRoot" @click="editRoot(null)">{{ texts.addRoot }}</button>
+          <button v-show="tab==='passwords'" :class="passwordScope==='@global'?'context-item on':'context-item'" @click="selectScope('@global')"><label>{{ texts.globalPasswords }}</label></button>
+          <button v-show="tab==='passwords'" :class="passwordScope==='@history'?'context-item on':'context-item'" @click="selectScope('@history')"><label>{{ texts.history }}</label></button>
+          <button v-show="tab==='passwords'" :class="passwordScope==='@all'?'context-item on':'context-item'" @click="selectScope('@all')"><label>{{ texts.manualPasswords }}</label></button>
+          <div v-for="d in shownDirectories" :key="d.id" class="directory">
+            <button :class="taskRoot===d.path||passwordScope===d.path?'context-item on':'context-item'" @click="tab==='tasks'?selectRoot(d.path):selectScope(d.path)"><label class="fill">{{ d.name||d.path }}</label></button>
+            <label class="muted">{{ d.path }}</label>
+            <div v-show="tab==='tasks'" class="row"><button @click="editRoot(d)">{{ texts.edit }}</button><button @click="send('openPath',{path:d.path})">{{ texts.open }}</button></div>
+            <label v-show="tab==='tasks'" class="muted">{{ d.output?texts.output:texts.defaultOutput }}{{ d.effectiveOutput }}</label>
           </div>
-        <label class="muted">{{ tab==='tasks'?'Watch 处理根目录中的直接文件。':'密码可以继承父目录作用域。' }}</label>
+          <button v-show="directoryLimit &lt; directoryCount" @click="directoryLimit=directoryLimit+50">{{ texts.moreDirectories }}</button>
+          <label class="muted">{{ tab==='tasks'?texts.watchHint:texts.scopeHint }}</label>
         </div></ScrollView>
       </div>
       <div v-show="tab==='config'" class="sidebar">
-        <label class="sidebar-heading">配置分类</label><button :class="!configCategory?'context-item on':'context-item'" @click="configCategory='',configPage=0"><label>全部实际字段</label></button>
-        <ScrollView><div class="column"><button v-for="c in categories" :key="c" :class="configCategory===c?'context-item on':'context-item'" @click="configCategory=c,configPage=0"><label>{{ c }}</label></button></div></ScrollView>
-        <label class="muted">显示已有字段，保留未知配置。</label>
+        <label class="sidebar-heading">{{ texts.categories }}</label>
+        <button :class="!configCategory?'context-item on':'context-item'" @click="configCategory='',configPage=0"><label>{{ texts.allSettings }}</label></button>
+        <ScrollView id="categoryScroll"><div class="column"><button v-for="c in categories" :key="c.id" :id="'category-'+c.id" :class="configCategory===c.id?'context-item on':'context-item'" @click="configCategory=c.id,configPage=0"><label>{{ c.label }}</label></button></div></ScrollView>
       </div>
-      <button id="refresh" class="context-item" @click="send('refresh')"><svg class="nav-icon" viewBox="0 0 24 24" fill="none"><path d="M20 10a8 8 0 1 0-1 7M20 4v6h-6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg><label>刷新</label></button>
+      <button id="refresh" class="context-item" @click="send('refresh')"><label>{{ texts.refresh }}</label></button>
       </div>
-      <div v-show="!ready" class="content"><label>正在读取实际文件…</label></div>
-      <div v-show="ready" class="workspace">
-      <div v-show="tab==='tasks'" class="content">
-        <div class="page-header"><label class="heading">任务状态</label><div class="spacer"/>
-          <button id="watchStart" :enabled="cliAllowed &amp;&amp; !busy" @click="send('cli',{action:'start'})">启动 Watch</button>
-          <button id="watchStop" :enabled="cliAllowed &amp;&amp; !busy" @click="send('cli',{action:'stop'})">停止 Watch</button>
-          <button :enabled="cliAllowed &amp;&amp; !busy" @click="send('cli',{action:'status'})">CLI 状态</button>
-        </div>
-        <label class="muted">{{ taskRoot==='@other'?'其他日志任务':taskRoot||'全部目录' }} · 状态仅来自当前日志</label>
-        <div class="row">
-          <input id="taskSearch" class="fill" v-model="taskQuery" placeholder="搜索任务路径" @submit="filterTasks(0)"/>
-          <select v-model="taskStatus"><option>全部状态</option><option>等待处理</option><option>等待文件释放</option><option>准备处理</option><option>正在处理</option><option>成功</option><option>失败</option><option>挂起：等待密码</option><option>挂起：等待分卷</option><option>等待重试</option><option>跳过</option><option>已合并</option></select>
-          <button id="filterTasks" @click="filterTasks(0)">筛选</button>
-        </div>
+      <div class="workspace">
+      <div id="page-tasks" v-show="tab==='tasks'" class="content" :opacity="pageOpacity" transition="opacity 180ms ease-out">
+        <div class="page-header"><label class="heading">{{ texts.tasks }}</label><div class="spacer"/></div>
+        <div class="row"><button id="watchStart" :enabled="cliAllowed &amp;&amp; !busy" @click="send('cli',{action:'start'})">{{ texts.startWatch }}</button><button id="watchStop" :enabled="cliAllowed &amp;&amp; !busy" @click="send('cli',{action:'stop'})">{{ texts.stopWatch }}</button><button :enabled="cliAllowed &amp;&amp; !busy" @click="send('cli',{action:'status'})">{{ texts.watchStatus }}</button></div>
+        <label v-show="cliResult" class="muted">{{ cliResult }}</label>
+        <label v-show="actionError" class="error">{{ actionError }}</label>
+        <label class="muted">{{ texts.taskSearch }}</label><div class="row"><input id="taskSearch" class="fill" v-model="taskQuery" @submit="filterTasks(0)"/>
+          <div id="taskStatusHost" style="width:180px;height:32px"/>
+          <button id="filterTasks" @click="filterTasks(0)">{{ texts.filter }}</button></div>
         <div v-show="rootEditor" class="card">
-          <div class="row"><label class="subheading">{{ rootOriginal?'编辑监控目录':'添加监控目录' }}</label><div class="spacer"/><button @click="rootEditor=false">收起</button></div>
-          <div class="row"><input class="fill" v-model="rootInput" placeholder="输入目录"/><button @click="send('browse',{target:'rootInput'})">选择目录</button></div>
-          <div class="row"><input class="fill" v-model="rootOutput" placeholder="输出目录；留空继承 watch.out_dir"/><button @click="send('browse',{target:'rootOutput'})">选择输出</button></div>
-          <div class="row"><toggle v-model="rootDeep"/><label>深度检测</label><div class="spacer"/><button id="saveRoot" type="primary" @click="rootAction('save')">保存目录</button><button v-show="rootOriginal" @click="rootAction('delete')">删除目录</button></div>
+          <div class="row"><label class="subheading">{{ rootOriginal?texts.editRoot:texts.addRoot }}</label><div class="spacer"/><button @click="rootEditor=false">{{ texts.collapse }}</button></div>
+          <label class="muted">{{ texts.inputDirectory }}</label><div class="row"><input class="fill" v-model="rootInput"/><button @click="send('browse',{target:'rootInput'})">{{ texts.chooseDirectory }}</button></div>
+          <label class="muted">{{ texts.rootOutput }}</label><div class="row"><input class="fill" v-model="rootOutput"/><button @click="send('browse',{target:'rootOutput'})">{{ texts.chooseOutput }}</button></div>
+          <div class="row"><toggle v-model="rootDeep"/><label>{{ texts.deep }}</label><div class="spacer"/><button id="saveRoot" type="primary" @click="rootAction('save')">{{ texts.saveRoot }}</button><button v-show="rootOriginal" @click="rootAction('delete')">{{ texts.deleteRoot }}</button></div>
         </div>
-        <ScrollView>
-          <div class="column">
-            <label v-show="tasks.total===0" class="muted">当前日志中没有符合筛选条件的任务。</label>
-            <div v-for="t in tasks.rows" :key="t.id" :class="'task '+appearance" @click="selectedTask=t.id">
-              <div class="row"><button class="taskname" @click="selectedTask=t.id"><label class="fill subheading">{{ t.name }}</label></button><label class="status">{{ t.status }}</label></div>
-              <label class="muted">{{ t.path }}</label><div class="row"><label class="small fill">{{ t.summary }}</label><label class="time">{{ t.time }}</label></div>
-            </div>
+        <ScrollView id="taskListScroll"><div class="column">
+          <label v-show="tasks.total===0" class="muted">{{ texts.noTasks }}</label>
+          <div v-for="t in tasks.rows" :key="t.id" :class="'task '+appearance" @click="selectedTask=t.id">
+            <div class="row"><button class="taskname" @click="selectedTask=t.id"><label class="fill subheading">{{ t.name }}</label></button><label class="status">{{ t.statusText }}</label></div>
+            <label class="muted">{{ t.path }}</label><div class="row"><label class="small fill">{{ t.summary }}</label><label class="time">{{ t.time }}</label></div>
           </div>
-        </ScrollView>
-        <div class="pager"><button :enabled="tasks.page>0" @click="filterTasks(tasks.page-1)">上一页</button><label>{{ tasks.page+1 }} / {{ tasks.pages }} · {{ tasks.total }} 个任务</label><button :enabled="tasks.page+1 &lt; tasks.pages" @click="filterTasks(tasks.page+1)">下一页</button></div>
-        <div v-show="chosenTask.id" class="card">
-          <div class="row"><label class="subheading">任务详情 · {{ chosenTask.status }}</label><div class="spacer"/><button @click="send('openPath',{path:chosenTask.path})">在资源管理器中定位</button><button @click="selectedTask=''">收起</button></div>
-          <div class="row"><button v-for="output in chosenTask.outputs" :key="output" @click="send('openPath',{path:output})">打开输出目录</button></div>
-          <textarea id="taskDetails" :value="chosenTask.details" style="height:130px"/>
-        </div>
-        <label v-show="tasks.malformed" class="error">{{ tasks.malformed }} 条无效日志行已跳过；未完成的末行将在追加后解析。</label>
+        </div></ScrollView>
+        <div class="pager"><button :enabled="tasks.page>0" @click="filterTasks(tasks.page-1)">{{ texts.previous }}</button><label>{{ tasks.page+1 }} / {{ tasks.pages }} · {{ tasks.total }} {{ texts.taskCount }}</label><button :enabled="tasks.page+1 &lt; tasks.pages" @click="filterTasks(tasks.page+1)">{{ texts.next }}</button></div>
+        <div v-show="chosenTask.id" class="card"><div class="row"><label class="subheading">{{ texts.details }} · {{ chosenTask.statusText }}</label><div class="spacer"/><button @click="send('openPath',{path:chosenTask.path})">{{ texts.locate }}</button><button @click="selectedTask=''">{{ texts.collapse }}</button></div>
+          <div class="row"><button v-for="output in chosenTask.outputs" :key="output" @click="send('openPath',{path:output})">{{ texts.openOutput }}</button></div><textarea id="taskDetails" :value="chosenTask.details" style="height:130px"/></div>
+        <label v-show="tasks.malformed" class="error">{{ tasks.malformed }} {{ texts.invalidLogs }}</label>
       </div>
-      <div v-show="tab==='config'" class="content">
-        <div class="page-header"><label class="heading">配置管理</label><div class="spacer"/><button v-show="configPointer||configOriginal" id="closeConfig" @click="configPointer='',configOriginal=''">返回配置列表</button></div>
-        <div v-show="!configPointer &amp;&amp; !configOriginal" class="card settings-row">
-          <svg class="settings-icon" viewBox="0 0 24 24" fill="none"><path d="M12 3v9M7 5.5a8 8 0 1 0 10 0" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-          <div class="setting-copy"><label class="setting-title">开机启动 Watch</label><label class="muted">登录 Windows 后自动监控目录</label></div>
-          <label class="muted">{{ startup.enabled?'已启用':'未启用' }}</label>
-            <button id="startupToggle" :enabled="cliAllowed &amp;&amp; !busy" @click="send('cli',{action:startup.enabled?'startupDisable':'startupEnable'})">{{ startup.enabled?'关闭开机自启':'开启开机自启' }}</button>
-        </div>
-        <div v-show="!configPointer &amp;&amp; !configOriginal" class="card settings-row">
-          <svg class="settings-icon" viewBox="0 0 24 24" fill="none"><path d="M12 3a9 9 0 1 0 9 9 9 9 0 0 0-9-9ZM12 3v18" stroke="currentColor" stroke-width="1.5"/><path d="M12 3a9 9 0 0 1 0 18Z" fill="currentColor"/></svg>
-          <div class="setting-copy"><label class="setting-title">界面主题</label><label class="muted">选择管理面板的显示外观</label></div>
-          <select id="themeSelector" :value="themeChoice"><option>跟随系统</option><option>浅色</option><option>深色</option></select>
-        </div>
-        <div class="row"><label class="subheading fill">主程序配置</label><button :enabled="cliAllowed &amp;&amp; !busy" @click="send('cli',{action:'reload'})">重载 Watch 配置</button></div>
-        <input v-show="!configPointer &amp;&amp; !configOriginal" id="configSearch" :value="configQuery" placeholder="按字段路径搜索" @input="searchConfig"/>
-        <div class="body">
-          <ScrollView v-show="!configPointer &amp;&amp; !configOriginal"><div class="column"><div v-for="f in shownFields" :key="f.id" :class="'field '+appearance"><button :id="'field-'+f.id" class="field-button" @click="chooseField(f)"><label class="fill">{{ f.label }}</label><label class="muted">›</label></button><label class="muted">{{ f.type }} · {{ f.text.length>100?f.text.slice(0,100)+'…':f.text }}</label></div><label v-show="matchingFields.length===0" class="muted">没有匹配字段。</label></div></ScrollView>
-          <div v-show="configPointer||configOriginal" class="editor">
-            <label class="subheading">{{ configPointer||'/' }}</label><label class="muted">{{ configType }} · 编辑值尚未写入文件</label>
-            <ScrollView><div class="column">
-            <toggle v-show="configType==='boolean'" v-model="configBoolean"/>
-            <input v-show="configType==='string'||configType==='number'" id="configScalar" v-model="configText"/>
-            <button v-show="configPointer==='/watch/out_dir'" @click="send('browse',{target:'configText'})">选择输出目录</button>
-            <textarea v-show="configType!=='boolean' &amp;&amp; configType!=='string' &amp;&amp; configType!=='number'" id="configValue" v-model="configText" style="height:180px"/>
-            <label class="muted">字符串原样保存；数字、数组、对象和 null 使用 JSON。保存时仅修改此字段。</label>
-            </div></ScrollView>
-            <button id="saveConfig" type="primary" @click="saveConfig()">保存字段</button>
+      <div id="page-config" v-show="tab==='config'" class="content" :opacity="pageOpacity" transition="opacity 180ms ease-out">
+        <div class="page-header"><label class="heading">{{ texts.config }}</label><div class="spacer"/><button :enabled="cliAllowed &amp;&amp; !busy" @click="send('cli',{action:'reload'})">{{ texts.reload }}</button></div>
+        <label v-show="actionError" class="error">{{ actionError }}</label>
+        <label class="muted">{{ texts.settingSearch }}</label><input id="configSearch" :value="configQuery" @input="searchConfig"/>
+        <ScrollView id="configListScroll"><div class="column">
+          <div v-show="!configCategory &amp;&amp; !configQuery &amp;&amp; configPage===0" class="card settings-row">
+            <div class="setting-copy"><label class="setting-title">{{ texts.startup }}</label><label class="muted">{{ texts.startupDescription }}</label></div>
+            <button id="startupToggle" :enabled="cliAllowed &amp;&amp; !busy" @click="send('cli',{action:startup.enabled?'startupDisable':'startupEnable'})">{{ startup.enabled?texts.startupOff:texts.startupOn }}</button>
           </div>
-        </div>
-        <div v-show="!configPointer &amp;&amp; !configOriginal" class="pager"><button :enabled="configPage>0" @click="configPage=configPage-1">上一页</button><label>{{ configPage+1 }} / {{ configPages }}</label><button :enabled="configPage+1 &lt; configPages" @click="configPage=configPage+1">下一页</button></div>
-      </div>
-      <div v-show="tab==='passwords'" class="content">
-        <div class="page-header"><label class="heading">密码管理</label><div class="spacer"/><button v-show="!passwordEditor" id="newPassword" type="primary" @click="editPassword(null)">＋ 添加密码</button></div>
-        <label v-show="!passwordEditor" class="muted">{{ passwordScope==='@global'?'全局密码':passwordScope==='@history'?'剪贴板密码历史':passwordScope==='@all'?'全部手动密码':passwordScope }}</label>
-        <div v-show="!passwordEditor" class="row"><input id="passwordSearch" class="fill" v-model="passwordQuery" placeholder="搜索明文密码（不修改空格）" @submit="filterPasswords(0)"/><button @click="filterPasswords(0)">筛选</button></div>
-        <div class="body">
-          <ScrollView v-show="!passwordEditor"><div class="column">
-            <label v-show="passwords.total===0" class="muted">没有匹配密码。</label>
-            <div v-for="p in passwords.rows" :key="p.id" :class="'card '+appearance">
-              <label>{{ p.value }}</label><label class="muted">{{ p.source }}</label><label v-show="p.scopes" class="muted">{{ p.scopes }}</label>
-              <button v-show="passwordScope==='@all'||passwordScope==='@global'||p.direct" @click="editPassword(p)">编辑记录 / 多目录作用域</button>
-              <button v-show="passwordScope==='@history'" @click="editPassword(p)">复制为手动密码</button>
+          <div v-show="!configCategory &amp;&amp; !configQuery &amp;&amp; configPage===0" class="card settings-row"><div class="setting-copy"><label class="setting-title">{{ texts.theme }}</label><label class="muted">{{ texts.themeDescription }}</label></div><div id="themeHost" style="width:180px;height:32px"/></div>
+          <div v-for="f in shownFields" :key="f.key" :id="'field-'+f.id" :class="'setting-card '+appearance">
+            <div class="settings-row">
+              <div class="setting-copy"><label class="setting-title">{{ f.label }}</label><label class="setting-description">{{ f.description }}</label></div>
+              <div class="setting-control">
+                <toggle v-show="f.editor==='toggle'" :id="'toggle-'+f.id" :value="drafts[f.id]?drafts[f.id].boolean:f.boolean" @change="v=>changeField(f,v)"/>
+                <div v-show="f.editor==='choice'||f.editor==='recursive'" :id="'choice-'+f.id" class="choice-host"/>
+                <input v-show="f.editor==='text'" :id="'input-'+f.id" :value="drafts[f.id]?drafts[f.id].text:f.text" @input="v=>changeField(f,v)"/>
+                <div v-show="f.editor==='recursive' &amp;&amp; (drafts[f.id]?drafts[f.id].choice:f.choice)===2" class="column"><label class="muted">{{ texts.rounds }}</label><input :id="'rounds-'+f.id" :value="drafts[f.id]?drafts[f.id].text:f.text" @input="v=>changeField(f,v)"/></div>
+                <label v-show="f.editor==='readonly'" class="muted">{{ texts.readOnly }}</label>
+              </div>
             </div>
+            <textarea v-show="f.editor==='lines'" :id="'lines-'+f.id" :value="drafts[f.id]?drafts[f.id].text:f.text" @input="v=>changeField(f,v)" style="height:110px"/>
+            <div v-show="drafts[f.id]||savedField===f.id||settingError.id===f.id" class="row"><label v-show="settingError.id===f.id" class="error fill">{{ settingError.message }}</label><label v-show="savedField===f.id &amp;&amp; !drafts[f.id]" class="inline-message">{{ texts.saved }}</label><div class="spacer"/><button v-show="drafts[f.id]" :id="'save-'+f.id" type="primary" @click="saveField(f)">{{ texts.save }}</button></div>
+          </div>
+          <label v-show="matchingFields.length===0" class="muted">{{ texts.noSettings }}</label>
+        </div></ScrollView>
+        <div v-show="configPages>1" class="pager"><button :enabled="configPage>0" @click="configPage=configPage-1">{{ texts.previous }}</button><label>{{ configPage+1 }} / {{ configPages }}</label><button :enabled="configPage+1 &lt; configPages" @click="configPage=configPage+1">{{ texts.next }}</button></div>
+      </div>
+      <div id="page-passwords" v-show="tab==='passwords'" class="content" :opacity="pageOpacity" transition="opacity 180ms ease-out">
+        <div class="page-header"><label class="heading">{{ texts.passwords }}</label><div class="spacer"/><button v-show="!passwordEditor" id="newPassword" type="primary" @click="editPassword(null)">{{ texts.addPasswords }}</button></div>
+        <label v-show="actionError" class="error">{{ actionError }}</label>
+        <label v-show="!passwordEditor" class="muted">{{ passwordScope==='@global'?texts.globalPasswords:passwordScope==='@history'?texts.history:passwordScope==='@all'?texts.manualPasswords:passwordScope }}</label>
+        <label v-show="!passwordEditor" class="muted">{{ texts.passwordSearch }}</label><div v-show="!passwordEditor" class="row"><input id="passwordSearch" class="fill" v-model="passwordQuery" @submit="filterPasswords(0)"/><button @click="filterPasswords(0)">{{ texts.filter }}</button></div>
+        <div class="body">
+          <ScrollView v-show="!passwordEditor"><div class="column"><label v-show="passwords.total===0" class="muted">{{ texts.noPasswords }}</label>
+            <div v-for="p in passwords.rows" :key="p.id" :class="'card '+appearance"><label>{{ p.value }}</label><label class="muted">{{ p.source }}</label><label v-show="p.scopes" class="muted">{{ p.scopes }}</label><button v-show="passwordScope==='@all'||passwordScope==='@global'||p.direct" @click="editPassword(p)">{{ texts.editPassword }}</button><button v-show="passwordScope==='@history'" @click="editPassword(p)">{{ texts.copyPassword }}</button></div>
           </div></ScrollView>
           <div v-show="passwordEditor" class="editor">
-            <div class="row"><label class="subheading">{{ passwordOriginal?'编辑密码':'添加密码' }}</label><div class="spacer"/><button @click="passwordEditor=false">收起</button></div>
+            <div class="row"><label class="subheading">{{ passwordOriginal?texts.editPassword:texts.addPasswords }}</label><div class="spacer"/><button @click="passwordEditor=false">{{ texts.collapse }}</button></div>
             <ScrollView><div class="column">
-            <label class="muted">密码文本（保留首尾空格和 #）</label><input id="passwordValue" v-model="passwordValue"/>
-            <label class="muted">作用域：每行一个绝对目录；新密码留空表示全局。</label><textarea id="passwordScopes" v-model="scopeText" style="height:150px"/>
-            <button @click="send('browse',{target:'scopeText'})">＋ 选择作用域目录</button>
-            <button v-show="passwordOriginal &amp;&amp; passwordDirect" @click="passwordAction('removeScope')">仅从当前目录移除</button>
-            <button v-show="passwordOriginal &amp;&amp; scopeText" @click="passwordAction('global')">转为全局密码</button>
-            <button v-show="passwordOriginal" @click="passwordAction('delete')">删除整条记录</button>
-            </div></ScrollView>
-            <button id="savePassword" type="primary" @click="passwordAction('save')">保存密码</button>
+              <label class="muted">{{ passwordOriginal?texts.passwordText:texts.batchHint }}</label><textarea id="passwordValue" v-model="passwordValue" class="password-input"/>
+              <label class="subheading">{{ texts.scopeLabel }}</label><label class="muted">{{ texts.scopeDescription }}</label><textarea id="passwordScopes" v-model="scopeText" style="height:100px"/>
+              <button @click="send('browse',{target:'scopeText'})">{{ texts.chooseScope }}</button><button v-show="passwordOriginal &amp;&amp; passwordDirect" @click="passwordAction('removeScope')">{{ texts.removeScope }}</button><button v-show="passwordOriginal &amp;&amp; scopeText" @click="passwordAction('global')">{{ texts.makeGlobal }}</button><button v-show="passwordOriginal" @click="passwordAction('delete')">{{ texts.deletePassword }}</button>
+            </div></ScrollView><button id="savePassword" type="primary" @click="passwordAction('save')">{{ texts.savePasswords }}</button>
           </div>
         </div>
-        <div v-show="!passwordEditor" class="pager"><button :enabled="passwords.page>0" @click="filterPasswords(passwords.page-1)">上一页</button><label>{{ passwords.page+1 }} / {{ passwords.pages }} · {{ passwords.total }} 条</label><button :enabled="passwords.page+1 &lt; passwords.pages" @click="filterPasswords(passwords.page+1)">下一页</button></div>
+        <div v-show="!passwordEditor" class="pager"><button :enabled="passwords.page>0" @click="filterPasswords(passwords.page-1)">{{ texts.previous }}</button><label>{{ passwords.page+1 }} / {{ passwords.pages }} · {{ passwords.total }} {{ texts.entries }}</label><button :enabled="passwords.page+1 &lt; passwords.pages" @click="filterPasswords(passwords.page+1)">{{ texts.next }}</button></div>
       </div>
       </div>
     </div>
-    <div v-show="errorList.length" class="notice"><label v-for="e in errorList" :key="e" class="error">{{ e }}</label></div>
-    <div v-show="notice" class="notice"><div class="row"><label class="fill">{{ notice }}</label><button @click="notice=''">关闭提示</button></div></div>
-    <label class="footer">{{ dataDirectory }}{{ tab==='tasks'?' · '+logPath:'' }}</label>
+    <div v-show="errorList.length" class="card"><label class="error">{{ texts.fileProblems }}</label><label v-for="e in errorList" :key="e" class="error">{{ e }}</label></div>
     <div v-if="dispatch" id="dispatch" style="width:0px;height:0px"/>
   </div>
 </template>

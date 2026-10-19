@@ -5,6 +5,7 @@
 #include <deque>
 #include <mutex>
 #include <atomic>
+#include <map>
 
 namespace spg {
 struct Options {
@@ -25,10 +26,18 @@ class Application {
     bool notified_ = false, stopping_ = false;
     unsigned dirty_ = 15;
     std::thread worker_, registry_;
+    struct ChoiceBinding { Application* owner; Json field; };
+    std::map<std::string,std::unique_ptr<ChoiceBinding>> choices_;
+    UiWidget theme_widget_ = 0;
+    UiWidget status_widget_ = 0;
+    void bind_choices(const Json& fields);
+    void rebuild_theme(const std::string& language);
+    void navigate(const std::string& tab);
     void work();
     void publish(Json patch);
     void changed(unsigned flags);
     void dispatch();
+    void handle_command(Json command);
     void apply_pending();
     static LRESULT CALLBACK subclass(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
 public:

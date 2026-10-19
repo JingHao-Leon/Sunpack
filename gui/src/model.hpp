@@ -10,6 +10,8 @@ Json read_json(const fs::path& path);
 void validate_passwords(const Json& document);
 void save_config_field(const fs::path& path, const std::string& pointer, const std::string& original,
     const std::string& type, const std::string& text, bool boolean);
+// Installer-only upgrade: remove retired fields without reserializing user values.
+void upgrade_config_file(const fs::path& path);
 // original is the exact selected record, not an index that external edits can move.
 void edit_password(const fs::path& path, const std::string& operation, const Json& original,
     const Json& replacement, const std::string& scope = {});
@@ -45,9 +47,9 @@ struct View {
     std::string task_query, task_root, task_status, password_query, password_scope = "@global";
     size_t task_page = 0, password_page = 0;
 };
-Json task_rows(const EventLog& log, const WatchRoots& roots, const View& view);
-Json password_rows(const Json& passwords, const View& view);
-Json config_fields(const Json& config, const std::string& source);
+Json task_rows(const EventLog& log, const WatchRoots& roots, const View& view, const std::string& language = "zh");
+Json password_rows(const Json& passwords, const View& view, const std::string& language = "zh");
+Json config_fields(const Json& config, const std::string& source, const std::string& language = "zh");
 Json directory_rows(const WatchRoots& roots, const Json& passwords, const Json& config);
 fs::path log_directory(const fs::path& data_dir, const Json& config);
 }

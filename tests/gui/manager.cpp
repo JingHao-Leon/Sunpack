@@ -1,4 +1,6 @@
 #include "model.hpp"
+#include "presentation.hpp"
+#include "defaults_json.h"
 #include <cassert>
 #include <fstream>
 #include <iostream>
@@ -63,6 +65,11 @@ void editing(Fixture& f) {
     // Coordinate with a second writer using the exact production lock.
     std::thread writer([&]{ FileMutex lock(p); auto current=read_json(p); current["clipboard_history"].push_back("latest"); atomic_write(p,current.dump()); }); writer.join();
     edit_password(p,"add",Json(),Json({{"value","after history"}})); assert(read_json(p)["clipboard_history"].back()=="latest");
+    auto before=read_file(p);
+    fails([&]{edit_password(p,"addMany",Json(),Json::array({Json{{"value","valid"}},Json{{"value","invalid"},{"scopes",Json::array()}}}));});
+    assert(read_file(p)==before); // A bad record cannot commit a partial batch.
+    edit_password(p,"addMany",Json(),Json::array({Json{{"value"," # batch "}},Json{{"value"," # batch "}},Json{{"value","other"}}}));
+    assert(read_json(p)["passwords"].size()==4 && read_json(p)["clipboard_history"].back()=="latest");
     auto c=f.dir/"sunpack_config.json";
     atomic_write(c,R"({"watch":{"out_dir":"."},"unknown":{"large":9007199254740993,"huge":123456789012345678901234567890},"filters":[{"name":"x","rules":["*","r",3]}]})");
     save_config_field(c,"/watch/out_dir","\".\"","string","中文",false);
@@ -73,7 +80,52 @@ void editing(Fixture& f) {
     assert((*huge)["text"]=="123456789012345678901234567890");
     assert(conf["filters"][0]["rules"]==Json::array({"*","r",3}));
     fails([&]{save_config_field(c,"/watch/out_dir","\".\"","string","stale",false);});
+    fails([&]{validate_setting("/runtime/process_mode",Json("typo"));});
+    fails([&]{validate_setting("/watch/max_folders",Json(0));});
+    fails([&]{validate_setting("/embedded_scan/recursive_candidate_ratio",Json(1.5));});
+    validate_setting("/recursive_extract",Json("12"));
+    fails([&]{validate_setting("/recursive_extract",Json("0"));});
+    // One coarse catalog contract covers every shipped setting, including
+    // fields nested in filter/module arrays, in both CLI-supported languages.
+    for(auto language:{"zh","en"}) {
+        auto defaults=parse_json(kDefaultsJson);
+        for(auto& field:config_fields(defaults,kDefaultsJson,language)) {
+            if(!field["known"].get<bool>()) throw std::runtime_error("Missing setting description: "+field["id"].get<std::string>());
+            assert(!field["label"].get<std::string>().empty() && !field["description"].get<std::string>().empty());
+        }
+        assert(!describe_setting("/retired/enabled","",language)["known"].get<bool>());
+        assert(!describe_setting("/watch/directory_password_file_auto_create","",language)["known"].get<bool>());
+        assert(!describe_setting("/passwords/directory_passwords_enabled","",language)["known"].get<bool>());
+        // Module identity, rather than position, survives copying/reordering.
+        auto module=config_fields(parse_json(R"({"analysis":{"modules":[{"name":"gzip","max_probe_bytes":2048}]}})"),"",language);
+        assert(module.size()==1 && module[0]["known"].get<bool>());
+    }
     assert(log_directory(f.dir,Json({{"watch",{{"state_dir","other"}}}}))==f.dir/"other");
+}
+void installer_upgrade(Fixture& fixture) {
+    auto path=fixture.dir/"upgrade.json";
+    const std::string keep=R"("advanced":{"integer":123456789012345678901234567890,"text":"directory_password_file_auto_create"})";
+    const std::vector<std::string> inputs={
+        R"({"watch":{"directory_password_file_auto_create":true,"password_retry_include_subtree":false}})",
+        R"({"passwords":{"directory_passwords_enabled":true,"directory_passwords_max_file_bytes":1048576,"directory_passwords_max_password_length":512},"watch":{"directory_password_file_auto_create":false}})",
+        "{\"watch\":{\"directory_password_file_auto_create\":true,\"quiet_max_seconds\":13,\"password_retry_include_subtree\":false},"+keep+"}",
+        "{\"passwords\":{\"clipboard_passwords_enabled\":true,\"directory_passwords_enabled\":false,\"directory_passwords_max_file_bytes\":1,\"directory_passwords_max_password_length\":1},"+keep+"}"
+    };
+    for(auto& input:inputs) {
+        atomic_write(path,input); upgrade_config_file(path);
+        auto output=read_file(path); auto config=parse_json(output);
+        assert(!config.contains(Json::json_pointer("/watch/directory_password_file_auto_create")));
+        assert(!config.contains(Json::json_pointer("/watch/password_retry_include_subtree")));
+        for(auto name:{"directory_passwords_enabled","directory_passwords_max_file_bytes","directory_passwords_max_password_length"})
+            assert(!config.contains(Json::json_pointer(std::string("/passwords/")+name)));
+        if(config.contains("advanced")) assert(output.find(keep)!=std::string::npos);
+        if(config.contains("watch")) assert(config["watch"]["quiet_max_seconds"]==13);
+        if(config.contains("passwords")) assert(config["passwords"]["clipboard_passwords_enabled"]==true);
+        upgrade_config_file(path); assert(read_file(path)==output);
+    }
+    // Retained advanced values are not normalized or reformatted on upgrade.
+    atomic_write(path,kDefaultsJson); upgrade_config_file(path); assert(read_file(path)==kDefaultsJson);
+    atomic_write(path,"{invalid}"); fails([&]{upgrade_config_file(path);}); assert(read_file(path)=="{invalid}");
 }
 void roots(Fixture& f) {
     auto p=f.dir/"sunpack_watch_roots.txt";
@@ -105,7 +157,7 @@ int wmain(int argc,wchar_t** argv) {
     if(argc==3 && std::wstring(argv[1])==L"--mutex") { std::cout<<utf8(mutex_name(argv[2]))<<"\n"<<utf8(mutex_name(argv[2],L"SunPackWatchRoots"))<<"\n"; return 0; }
     if(argc>=2 && std::wstring(argv[1])==L"--echo") { Json args=Json::array(); for(int i=2;i<argc;++i) args.push_back(utf8(argv[i])); std::cout<<args.dump(); return 7; }
     if(argc==4 && std::wstring(argv[1])==L"--password-add") { edit_password(argv[2],"add",Json(),Json({{"value",utf8(argv[3])}})); return 0; }
-    try { Fixture f; projection(f); editing(f); roots(f); std::cout<<"GUI file contracts passed\n"; }
+    try { Fixture f; projection(f); editing(f); roots(f); installer_upgrade(f); std::cout<<"GUI file contracts passed\n"; }
     catch(const std::exception& e) { std::cerr<<e.what()<<"\n"; return 1; }
     CliCommand cli{executable_path(),fs::temp_directory_path(),{L"--echo"}};
     Handle stop(CreateEventW(nullptr,TRUE,FALSE,nullptr));

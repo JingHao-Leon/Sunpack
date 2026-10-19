@@ -1,4 +1,5 @@
 #include "model.hpp"
+#include "presentation.hpp"
 #include <algorithm>
 #include <set>
 #include <sstream>
@@ -49,7 +50,9 @@ std::string pointer_escape(const std::string& key) {
 struct JsonTokens {
     const std::string& source;
     size_t at=0;
+    bool collect_members=false;
     std::unordered_map<std::string,std::pair<size_t,size_t>> ranges;
+    std::unordered_map<std::string,std::pair<size_t,size_t>> members;
     void space() { while(at<source.size() && (source[at]==' ' || source[at]=='\t' || source[at]=='\r' || source[at]=='\n')) ++at; }
     void string() {
         ++at;
@@ -62,7 +65,9 @@ struct JsonTokens {
             while(source.at(at)!='}') {
                 auto begin=at; string();
                 auto key=parse_json(source.substr(begin,at-begin)).get<std::string>();
-                space(); ++at; value(path+"/"+pointer_escape(key)); space();
+                auto child=path+"/"+pointer_escape(key);
+                space(); ++at; value(child);
+                if(collect_members) members[child]={begin,at-begin}; space();
                 if(source.at(at)!=',') break; ++at; space();
             }
             ++at;
@@ -77,7 +82,7 @@ struct JsonTokens {
         else while(at<source.size() && std::string(",]} \t\r\n").find(source[at])==std::string::npos) ++at;
         ranges[path]={start,at-start};
     }
-    explicit JsonTokens(const std::string& text):source(text) { if(text.rfind("\xef\xbb\xbf",0)==0) at=3; value(""); }
+    explicit JsonTokens(const std::string& text,bool properties=false):source(text),collect_members(properties) { if(text.rfind("\xef\xbb\xbf",0)==0) at=3; value(""); }
     std::string token(const std::string& path) const { auto r=ranges.at(path); return source.substr(r.first,r.second); }
 };
 std::string text_at(HANDLE f, uint64_t offset, size_t count) {
@@ -168,9 +173,54 @@ void save_config_field(const fs::path& p, const std::string& pointer, const std:
     Json replacement = type == "string" ? Json(text) : type == "boolean" ? Json(boolean) : parse_json(text);
     if ((type == "number" && !replacement.is_number()) || (type == "array" && !replacement.is_array()) ||
         (type == "object" && !replacement.is_object())) throw std::runtime_error("输入类型与字段类型不一致");
+    std::string module;
+    auto parent=pointer.substr(0,pointer.find_last_of('/'));
+    if(j.contains(Json::json_pointer(parent))) {
+        const auto& owner=j.at(Json::json_pointer(parent));
+        if(owner.is_object() && owner.contains("name") && owner["name"].is_string()) module=owner["name"].get<std::string>();
+    }
+    validate_setting(pointer,replacement,module);
     auto range=tokens.ranges.at(pointer);
     source.replace(range.first,range.second,type=="string" || type=="boolean"?replacement.dump():text);
     atomic_write(p,source);
+}
+void upgrade_config_file(const fs::path& path) {
+    FileMutex lock(path);
+    if(!fs::exists(path)) return;
+    auto source=read_file(path);
+    auto document=parse_json(source);
+    if(!document.is_object()) throw std::runtime_error("Configuration must be a JSON object");
+    bool changed=false;
+    auto erase_member=[&](const std::string& pointer) {
+        JsonTokens tokens(source,true);
+        auto range=tokens.members.at(pointer);
+        size_t begin=range.first, end=range.first+range.second, next=end;
+        auto whitespace=[](char c){return c==' ' || c=='\t' || c=='\r' || c=='\n';};
+        while(next<source.size() && whitespace(source[next])) ++next;
+        if(next<source.size() && source[next]==',') end=next+1;
+        else {
+            auto previous=begin;
+            while(previous && whitespace(source[previous-1])) --previous;
+            if(previous && source[previous-1]==',') begin=previous-1;
+        }
+        source.erase(begin,end-begin); changed=true;
+    };
+    // Removed by the structured-password refactor after the dev branch was
+    // created. These paths are migration data, never GUI field aliases.
+    const std::pair<const char*,std::vector<const char*>> retired[]={
+        {"watch",{"directory_password_file_auto_create","password_retry_include_subtree"}},
+        {"passwords",{"directory_passwords_enabled","directory_passwords_max_file_bytes","directory_passwords_max_password_length"}}
+    };
+    for(auto& section:retired) {
+        if(!document.contains(section.first) || !document[section.first].is_object()) continue;
+        auto& object=document[section.first]; bool removed=false;
+        for(auto field:section.second) if(object.contains(field)) {
+            erase_member(std::string("/")+section.first+"/"+field);
+            object.erase(field); removed=true;
+        }
+        if(removed && object.empty()) { erase_member(std::string("/")+section.first); document.erase(section.first); }
+    }
+    if(changed) { parse_json(source); atomic_write(path,source); }
 }
 void edit_password(const fs::path& p, const std::string& op, const Json& original,
     const Json& replacement, const std::string& scope) {
@@ -178,6 +228,14 @@ void edit_password(const fs::path& p, const std::string& op, const Json& origina
     Json j = read_json(p); validate_passwords(j);
     auto& records = j["passwords"];
     if (op == "add") records.push_back(replacement);
+    else if(op=="addMany") {
+        if(!replacement.is_array() || replacement.empty()) throw std::runtime_error("batchEmpty");
+        // One production mutex and one atomic write for the complete batch. Exact
+        // duplicates are ignored; whitespace and # are part of the password.
+        std::set<std::string> existing;
+        for(auto& record:records) existing.insert(record.dump());
+        for(auto& record:replacement) if(existing.insert(record.dump()).second) records.push_back(record);
+    }
     else {
         auto it = std::find(records.begin(), records.end(), original);
         if (it == records.end()) throw std::runtime_error("密码记录已被外部修改，请重新选择");
@@ -321,7 +379,7 @@ bool EventLog::refresh(bool missing_is_final) {
     }
     return changed;
 }
-Json task_rows(const EventLog& log,const WatchRoots& roots,const View& v) {
+Json task_rows(const EventLog& log,const WatchRoots& roots,const View& v,const std::string& language) {
     const auto root_index=index_roots(roots);
     std::vector<const Task*> rows;
     for(auto& pair:log.tasks) {
@@ -343,34 +401,35 @@ Json task_rows(const EventLog& log,const WatchRoots& roots,const View& v) {
         if(t.details.contains("output_dirs") && t.details["output_dirs"].is_array())
             for(auto& output:t.details["output_dirs"]) if(output.is_string()) outputs.push_back(output);
         std::string summary=t.details.value("event",std::string());
-        if(t.details.contains("success_count")) summary="成功项数："+t.details["success_count"].dump();
+        if(!t.status.empty()) summary=tr(t.status,language);
+        if(t.details.contains("success_count")) summary=tr("successCount",language)+t.details["success_count"].dump();
         if(t.details.contains("error")) summary=t.details["error"].is_string()?t.details["error"].get<std::string>():t.details["error"].dump();
         result["rows"].push_back({{"id",utf8(path_key(wide(t.path)))},{"name",utf8(fs::path(wide(t.path)).filename().wstring())},
-            {"path",t.path},{"root",indexed_root(path_key(wide(t.path)),root_index)},{"status",t.status},{"time",t.time.empty()?(t.details.contains("ts")?t.details["ts"].dump():""):t.time},
+            {"path",t.path},{"root",indexed_root(path_key(wide(t.path)),root_index)},{"status",t.status},{"statusText",tr(t.status,language)},{"time",t.time.empty()?(t.details.contains("ts")?t.details["ts"].dump():""):t.time},
             {"summary",summary},{"outputs",outputs},
             {"details",details.dump(2)}});
     }
     return result;
 }
-Json password_rows(const Json& passwords,const View& v) {
+Json password_rows(const Json& passwords,const View& v,const std::string& language) {
     Json rows=Json::array();
     if(v.password_scope=="@history") {
         for(auto& p:passwords.value("clipboard_history",Json::array())) if(contains(p.get<std::string>(),v.password_query))
-            rows.push_back({{"id",std::to_string(rows.size())},{"value",p},{"source","剪贴板历史（只读）"},{"original",""},{"scopes",""},{"direct",false}});
+            rows.push_back({{"id",std::to_string(rows.size())},{"value",p},{"source",tr("history",language)},{"original",""},{"scopes",""},{"direct",false}});
     } else {
         for(auto& p:passwords.value("passwords",Json::array())) {
             if(!contains(p["value"].get<std::string>(),v.password_query)) continue;
-            bool global=!p.contains("scopes"), direct=global; std::string source=global?"全局密码":"";
+            bool global=!p.contains("scopes"), direct=global; std::string source=global?tr("globalPasswords",language):"";
             std::string scopes;
             if(!global) for(auto& s:p["scopes"]) {
                 auto scope=s.get<std::string>(); if(!scopes.empty()) scopes+="\n"; scopes+=scope;
                 if(v.password_scope.size() && v.password_scope[0]!='@' && is_under(scope_key(wide(v.password_scope)),scope_key(wide(scope)))) {
-                    if(scope_key(wide(v.password_scope))==scope_key(wide(scope))) { direct=true; source="直接绑定"; }
-                    else if(!direct) source="继承自 "+scope;
+                    if(scope_key(wide(v.password_scope))==scope_key(wide(scope))) { direct=true; source=tr("direct",language); }
+                    else if(!direct) source=tr("inherited",language)+scope;
                 }
             }
             bool include=v.password_scope=="@all" || (v.password_scope=="@global" && global) || (v.password_scope[0]!='@' && !source.empty());
-            if(include) rows.push_back({{"id",p.dump()+"#"+std::to_string(rows.size())},{"value",p["value"]},{"source",source.empty()?"目录密码":source},
+            if(include) rows.push_back({{"id",p.dump()+"#"+std::to_string(rows.size())},{"value",p["value"]},{"source",source.empty()?tr("folderPassword",language):source},
                 {"original",p.dump()},{"scopes",scopes},{"direct",direct && !global}});
         }
     }
@@ -379,20 +438,36 @@ Json password_rows(const Json& passwords,const View& v) {
     for(size_t i=page*100;i<std::min(rows.size(),(page+1)*100);++i) subset.push_back(std::move(rows[i]));
     return {{"rows",subset},{"total",rows.size()},{"page",page},{"pages",pages}};
 }
-Json config_fields(const Json& config,const std::string& source) {
+Json config_fields(const Json& config,const std::string& source,const std::string& language) {
     Json rows=Json::array();
     if(config.empty()) return rows;
     std::unique_ptr<JsonTokens> tokens;
     if(!source.empty()) tokens=std::make_unique<JsonTokens>(source);
-    std::function<void(const Json&,std::string,std::string,std::string)> walk;
-    walk=[&](const Json& item,std::string pointer,std::string label,std::string category) {
-        if(item.is_object() && !item.empty()) { for(auto it=item.begin();it!=item.end();++it) walk(it.value(),pointer+"/"+pointer_escape(it.key()),label.empty()?it.key():label+"."+it.key(),category.empty()?it.key():category); return; }
+    std::function<void(const Json&,std::string,std::string)> walk;
+    walk=[&](const Json& item,std::string pointer,std::string module) {
+        if(item.is_object() && !item.empty()) {
+            if(item.contains("name") && item["name"].is_string()) module=item["name"].get<std::string>();
+            for(auto it=item.begin();it!=item.end();++it) if(it.key()!="name" || module.empty()) walk(it.value(),pointer+"/"+pointer_escape(it.key()),module);
+            return;
+        }
+        if(item.is_array() && !item.empty() && std::all_of(item.begin(),item.end(),[](const Json& i){return i.is_object();})) {
+            for(size_t i=0;i<item.size();++i) walk(item[i],pointer+"/"+std::to_string(i),module); return;
+        }
         std::string type=item.is_boolean()?"boolean":item.is_string()?"string":item.is_number()?"number":item.is_array()?"array":item.is_object()?"object":"null";
         auto raw=tokens?tokens->token(pointer):item.dump(2);
-        rows.push_back({{"id",pointer},{"label",label},{"category",category},{"type",type},{"original",raw},
-            {"text",item.is_string()?item.get<std::string>():raw},{"boolean",item.is_boolean()?item.get<bool>():false}});
+        auto field=describe_setting(pointer,module,language);
+        std::string editor=field["editor"], text=item.is_string()?item.get<std::string>():raw;
+        bool lines=item.is_array() && std::all_of(item.begin(),item.end(),[](const Json& i){return i.is_string();});
+        if(lines) { text.clear(); for(auto& i:item) { if(!text.empty()) text+='\n'; text+=i.get<std::string>(); } }
+        if(editor.empty()) editor=!field["known"].get<bool>()?"readonly":!field["options"].empty()?"choice":lines?"lines":type=="boolean"?"toggle":type=="string"||type=="number"?"text":"readonly";
+        int choice=-1;
+        for(size_t i=0;i<field["options"].size();++i) if(field["options"][i]["value"]==item) choice=int(i);
+        if(editor=="recursive" && choice<0) choice=2;
+        field.update(Json{{"id",pointer},{"key",pointer+"@"+language},{"type",type},{"original",raw},{"text",text},{"boolean",item.is_boolean()?item.get<bool>():false},
+            {"editor",editor},{"choice",choice}});
+        rows.push_back(std::move(field));
     };
-    walk(config,"","",""); return rows;
+    walk(config,"",""); return rows;
 }
 Json directory_rows(const WatchRoots& roots,const Json& passwords,const Json& config) {
     Json rows=Json::array(); std::set<std::wstring> seen;

@@ -1,4 +1,5 @@
 #include "application.hpp"
+#include "presentation.hpp"
 #include "main_uix.h"
 #include <commctrl.h>
 #include <dwmapi.h>
@@ -10,9 +11,15 @@
 
 namespace spg {
 namespace {
-constexpr UINT Dispatch = WM_APP + 101, Update = WM_APP + 102;
+// Keep host messages outside Core UI's startup/render message range.
+constexpr UINT Dispatch = WM_APP + 0x401, Update = WM_APP + 0x402;
 constexpr unsigned Config = 1, Passwords = 2, Roots = 4, Log = 8, Startup = 16;
 using Clock=std::chrono::steady_clock;
+struct VisualBatch {
+    UiWindow window;
+    explicit VisualBatch(UiWindow w):window(w) { ui_window_begin_canvas_visual_transaction(w); }
+    ~VisualBatch() { ui_window_end_canvas_visual_transaction(window); }
+};
 struct ReadRetry {
     unsigned attempts=0;
     Clock::time_point due=Clock::time_point::max();
@@ -33,6 +40,8 @@ void set_text(UiPage page,const char* name,const std::string& value) {
 }
 void style_frame(HWND hwnd,UiThemeMode mode) {
     BOOL dark=mode==UI_THEME_DARK;
+    BOOL disable_transitions=FALSE;
+    DwmSetWindowAttribute(hwnd,DWMWA_TRANSITIONS_FORCEDISABLED,&disable_transitions,sizeof(disable_transitions));
     COLORREF background=dark?RGB(32,32,32):RGB(243,243,243);
     COLORREF foreground=dark?RGB(255,255,255):RGB(26,26,26);
     auto corners=DWMWCP_ROUND;
@@ -75,23 +84,161 @@ void Application::changed(unsigned flags) {
 void Application::publish(Json patch) {
     std::lock_guard<std::mutex> lock(mutex_);
     if(stopping_) return;
-    for(auto it=patch.begin();it!=patch.end();++it) pending_[it.key()]=std::move(it.value());
+    for(auto it=patch.begin();it!=patch.end();++it) {
+        if(it.key()=="savedEdits") {
+            if(!pending_.contains("savedEdits")) pending_["savedEdits"]=Json::object();
+            pending_["savedEdits"].update(it.value());
+        } else pending_[it.key()]=std::move(it.value());
+    }
     if(!notified_) { notified_=true; PostMessageW(hwnd_,Update,0,0); }
 }
 void Application::apply_pending() {
     Json patch;
     { std::lock_guard<std::mutex> lock(mutex_); patch=std::move(pending_); pending_=Json::object(); notified_=false; }
+    VisualBatch visual(window_);
+    if(patch.contains("savedEdits")) {
+        auto drafts=page_value(page_,"drafts");
+        for(auto& edit:patch["savedEdits"]) {
+            auto id=edit["pointer"].get<std::string>();
+            if(!drafts.contains(id)) continue;
+            auto& draft=drafts[id];
+            auto submitted=edit["draft"];
+            if(draft==submitted) drafts.erase(id);
+            else if(draft["original"]==submitted["original"]) {
+                // A user may keep typing while the write completes. Keep those
+                // edits, advancing only the token written by our own save.
+                draft["original"]=edit["type"]=="string"?Json(edit["text"]).dump():edit["type"]=="boolean"?Json(edit["boolean"]).dump():edit["text"].get<std::string>();
+            }
+        }
+        auto encoded=drafts.dump(); ui_page_set_json(page_,"drafts",encoded.c_str());
+        patch.erase("savedEdits");
+    }
+    if(patch.contains("fields")) bind_choices(patch["fields"]);
     for(auto it=patch.begin();it!=patch.end();++it) {
         auto text=it.value().dump();
         if(ui_page_set_json(page_,it.key().c_str(),text.c_str())!=0) throw std::runtime_error("Core UI 数据绑定失败");
     }
+    if(patch.contains("fields")) {
+        auto drafts=page_value(page_,"drafts");
+        for(auto it=choices_.begin();it!=choices_.end();) {
+            bool exists=std::any_of(patch["fields"].begin(),patch["fields"].end(),[&](const Json& f){return f["id"]==it->first;});
+            if(!exists) {
+                auto host="choice-"+it->first;
+                ui_page_on_widget_mount(page_,host.c_str(),nullptr,nullptr);
+                ui_page_on_widget_unmount(page_,host.c_str(),nullptr,nullptr);
+                it=choices_.erase(it); continue;
+            }
+            auto widget=ui_widget_find_by_id(ui_page_root(page_),("select-"+it->first).c_str());
+            if(widget) {
+                if(!drafts.contains(it->first)) ui_combobox_set_selected(widget,it->second->field["choice"].get<int>());
+                ui_widget_destroy(widget);
+            }
+            ++it;
+        }
+    }
+    if(patch.contains("language")) {
+        auto language=patch["language"].get<std::string>();
+        ui_window_set_title(window_,wide(tr("title",language)).c_str());
+        rebuild_theme(language);
+    }
+}
+void Application::navigate(const std::string& tab) {
+    if(tab!="tasks" && tab!="config" && tab!="passwords") return;
+    if(page_value(page_,"tab")==tab) return;
+    VisualBatch visual(window_);
+    BOOL animations=TRUE;
+    SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION,0,&animations,0);
+    if(animations) {
+        // Start from a readable incoming view, never from a blank/transparent
+        // frame. Core UI owns the finite transition timer and stops it at rest.
+        auto incoming=ui_widget_find_by_id(ui_page_root(page_),("page-"+tab).c_str());
+        if(incoming) { ui_widget_set_opacity(incoming,0.82f); ui_widget_destroy(incoming); }
+        ui_page_set_float(page_,"pageOpacity",0.82f);
+    }
+    set_text(page_,"tab",tab);
+    ui_page_set_float(page_,"pageOpacity",1.0f);
+    set_text(page_,"actionError",""); set_text(page_,"cliResult","");
+}
+void Application::bind_choices(const Json& fields) {
+    for(auto& field:fields) {
+        auto editor=field.value("editor",std::string());
+        if(editor!="choice" && editor!="recursive") continue;
+        auto id=field["id"].get<std::string>();
+        auto& binding=choices_[id];
+        if(!binding) binding=std::make_unique<ChoiceBinding>(ChoiceBinding{this,field});
+        else binding->field=field;
+        auto host="choice-"+id;
+        ui_page_on_widget_mount(page_,host.c_str(),[](UiPage,UiWidget parent,void* context){
+            auto* binding=static_cast<ChoiceBinding*>(context); auto* self=binding->owner;
+            std::vector<std::wstring> labels; std::vector<const wchar_t*> texts;
+            for(auto& option:binding->field["options"]) labels.push_back(wide(option["label"].get<std::string>()));
+            for(auto& label:labels) texts.push_back(label.c_str());
+            auto combo=ui_combobox(texts.data(),int(texts.size()));
+            auto id=binding->field["id"].get<std::string>();
+            ui_widget_set_id(combo,("select-"+id).c_str()); ui_widget_set_expand(combo,true); ui_widget_set_height(combo,32);
+            auto drafts=page_value(self->page_,"drafts");
+            int selected=drafts.contains(id)?drafts[id].value("choice",binding->field["choice"].get<int>()):binding->field["choice"].get<int>();
+            ui_combobox_set_selected(combo,selected);
+            ui_combobox_on_changed(combo,[](UiWidget,int index,void* context){
+                auto* binding=static_cast<ChoiceBinding*>(context); auto* self=binding->owner;
+                try {
+                    auto id=binding->field["id"].get<std::string>();
+                    auto drafts=page_value(self->page_,"drafts");
+                    Json draft=drafts.contains(id)?drafts[id]:Json{{"original",binding->field["original"]},{"text",binding->field["text"]},{"boolean",binding->field["boolean"]},{"choice",binding->field["choice"]}};
+                    if(index<0 || size_t(index)>=binding->field["options"].size()) return;
+                    auto value=binding->field["options"][index]["value"].get<std::string>();
+                    draft["choice"]=index; draft["text"]=value=="#"?"1":value;
+                    drafts[id]=std::move(draft);
+                    auto encoded=drafts.dump(); ui_page_set_json(self->page_,"drafts",encoded.c_str());
+                    ui_page_set_json(self->page_,"settingError","{}"); set_text(self->page_,"savedField","");
+                } catch(const std::exception& e) { set_text(self->page_,"actionError",translated_error(e.what(),page_value(self->page_,"language").get<std::string>())); }
+            },binding);
+            ui_widget_add_child(parent,combo); ui_widget_destroy(combo);
+        },binding.get());
+        ui_page_on_widget_unmount(page_,host.c_str(),[](UiPage,UiWidget widget,void*){ui_widget_destroy(widget);},nullptr);
+    }
+}
+void Application::rebuild_theme(const std::string& language) {
+    auto host=ui_widget_find_by_id(ui_page_root(page_),"themeHost");
+    if(!host) return;
+    if(theme_widget_) { ui_widget_remove_child(host,theme_widget_); ui_widget_destroy(theme_widget_); theme_widget_=0; }
+    std::wstring labels[]={wide(tr("system",language)),wide(tr("light",language)),wide(tr("dark",language))};
+    const wchar_t* texts[]={labels[0].c_str(),labels[1].c_str(),labels[2].c_str()};
+    theme_widget_=ui_combobox(texts,3); ui_widget_set_id(theme_widget_,"themeSelector"); ui_widget_set_width(theme_widget_,180); ui_widget_set_height(theme_widget_,32);
+    ui_combobox_set_selected(theme_widget_,page_value(page_,"themeChoice").get<int>());
+    ui_combobox_on_changed(theme_widget_,[](UiWidget,int index,void* context){
+        auto* self=static_cast<Application*>(context);
+        ui_page_set_int(self->page_,"themeChoice",index);
+        set_text(self->page_,"theme",index==1?"light":index==2?"dark":"system");
+        apply_theme(self->page_,index==1?UI_THEME_LIGHT:index==2?UI_THEME_DARK:system_theme(),self->hwnd_);
+    },this);
+    ui_widget_add_child(host,theme_widget_); ui_widget_destroy(host);
+    host=ui_widget_find_by_id(ui_page_root(page_),"taskStatusHost");
+    if(!host) return;
+    if(status_widget_) { ui_widget_remove_child(host,status_widget_); ui_widget_destroy(status_widget_); }
+    std::vector<std::wstring> statuses={wide(tr("allStatus",language))};
+    for(auto& status:page_value(page_,"statusNames")) if(status!="") statuses.push_back(wide(tr(status.get<std::string>(),language)));
+    std::vector<const wchar_t*> status_texts; for(auto& status:statuses) status_texts.push_back(status.c_str());
+    status_widget_=ui_combobox(status_texts.data(),int(status_texts.size()));
+    ui_widget_set_id(status_widget_,"taskStatus"); ui_widget_set_expand(status_widget_,true); ui_widget_set_height(status_widget_,32);
+    ui_combobox_set_selected(status_widget_,page_value(page_,"taskStatus").get<int>());
+    ui_combobox_on_changed(status_widget_,[](UiWidget,int index,void* context){ui_page_set_int(static_cast<Application*>(context)->page_,"taskStatus",index);},this);
+    ui_widget_add_child(host,status_widget_); ui_widget_destroy(host);
 }
 void Application::dispatch() {
-    auto command=page_value(page_,"request");
+    auto commands=page_value(page_,"requests");
+    ui_page_set_json(page_,"requests","[]");
     ui_page_set_bool(page_,"dispatch",false);
+    if(commands.is_array()) for(auto& command:commands) {
+        try { handle_command(std::move(command)); }
+        catch(const std::exception& e) { set_text(page_,"actionError",translated_error(e.what(),page_value(page_,"language").get<std::string>())); }
+    }
+}
+void Application::handle_command(Json command) {
     if(!command.is_object()) return;
     auto op=command.value("op",std::string());
     auto p=command.value("payload",Json::object());
+    if(op=="navigate") { navigate(p.value("tab",std::string())); return; }
     if(op=="browse") {
         auto selected=choose_directory(hwnd_);
         if(!selected.empty()) {
@@ -100,7 +247,7 @@ void Application::dispatch() {
                 auto text=page_value(page_,"scopeText").get<std::string>();
                 if(!text.empty() && text.back()!='\n') text+='\n';
                 text+=utf8(selected.wstring()); set_text(page_,"scopeText",text);
-            } else if(target=="rootInput" || target=="rootOutput" || target=="configText") set_text(page_,target.c_str(),utf8(selected.wstring()));
+            } else if(target=="rootInput" || target=="rootOutput") set_text(page_,target.c_str(),utf8(selected.wstring()));
         }
         return;
     }
@@ -129,7 +276,7 @@ LRESULT CALLBACK Application::subclass(HWND hwnd,UINT message,WPARAM wparam,LPAR
         if(message==Update) { self->apply_pending(); return 0; }
         if(message==WM_ACTIVATE && LOWORD(wparam)!=WA_INACTIVE) self->changed(Startup);
         if(message==WM_SETTINGCHANGE && page_value(self->page_,"theme")=="system") apply_theme(self->page_,system_theme(),self->hwnd_);
-    } catch(const std::exception& e) { set_text(self->page_,"notice",e.what()); }
+    } catch(const std::exception& e) { set_text(self->page_,"actionError",translated_error(e.what(),page_value(self->page_,"language").get<std::string>())); }
     return DefSubclassProc(hwnd,message,wparam,lparam);
 }
 void Application::open() {
@@ -141,6 +288,7 @@ void Application::open() {
     stage="加载布局";
     page_=ui_page_load_string(kMainUix);
     if(!page_) throw std::runtime_error("无法加载管理面板布局");
+    auto texts=interface_texts("en").dump(); ui_page_set_json(page_,"texts",texts.c_str());
     apply_theme(page_,system_theme());
     stage="创建窗口";
     UiWindowConfig window_config{}; window_config.skip_animation=1;
@@ -164,25 +312,16 @@ void Application::open() {
     ui_page_on_widget_mount(page_,"taskDetails",[](UiPage,UiWidget widget,void*){
         ui_text_area_set_read_only(widget,true);
     },nullptr);
-    ui_page_on_widget_mount(page_,"themeSelector",[](UiPage,UiWidget widget,void* context){
-        // Core UI's QuickJS @change hook does not receive ComboBox selections.
-        ui_combobox_on_changed(widget,[](UiWidget,int index,void* context){
-            auto* self=static_cast<Application*>(context);
-            try {
-                ui_page_set_int(self->page_,"themeChoice",index);
-                set_text(self->page_,"theme",index==1?"light":index==2?"dark":"system");
-                apply_theme(self->page_,index==1?UI_THEME_LIGHT:index==2?UI_THEME_DARK:system_theme(),self->hwnd_);
-            } catch(const std::exception& e) { set_text(self->page_,"notice",e.what()); }
-        },context);
-    },this);
+    rebuild_theme("en");
     ui_window_on_close(window_,[](UiWindow,void* context){
         auto* self=static_cast<Application*>(context);
         { std::lock_guard<std::mutex> lock(self->mutex_); self->stopping_=true; }
         SetEvent(self->stop_); self->cv_.notify_all(); ui_quit(0);
     },this);
-    set_text(page_,"dataDirectory",utf8(options_.data_dir.wstring()));
     ui_page_set_bool(page_,"cliAllowed",options_.allow_cli);
     ui_window_show_immediate(window_);
+    // Keep native maximize/minimize transitions enabled after preparation/show.
+    style_frame(hwnd_,system_theme());
     stage="启动文件观察器";
     worker_=std::thread([this]{ work(); });
     registry_=std::thread([this]{
@@ -207,12 +346,15 @@ Application::~Application() {
     if(registry_.joinable()) registry_.join();
     if(hwnd_ && IsWindow(hwnd_)) { RemoveWindowSubclass(hwnd_,subclass,1); ui_window_destroy(window_); }
     if(page_) ui_page_destroy(page_);
+    if(theme_widget_) ui_widget_destroy(theme_widget_);
+    if(status_widget_) ui_widget_destroy(status_widget_);
     ui_shutdown();
 }
 void Application::work() {
     CoInitializeEx(nullptr,COINIT_MULTITHREADED);
     try {
         Json config=Json::object(), passwords={{"passwords",Json::array()}};
+        std::string language="en";
         WatchRoots roots; EventLog log; View view;
         Json errors=Json::object();
         auto dir=options_.data_dir;
@@ -275,6 +417,11 @@ void Application::work() {
                         Json replacement={{"value",p.value("value",std::string())}};
                         auto scopes=p.value("scopes",Json::array());
                         if(!scopes.empty()) replacement["scopes"]=scopes;
+                        if(p.at("operation")=="addMany") {
+                            Json batch=Json::array();
+                            for(auto& value:p.at("values")) { auto record=replacement; record["value"]=value; batch.push_back(std::move(record)); }
+                            replacement=std::move(batch);
+                        }
                         auto original=p.value("original",std::string());
                         edit_password(dir/"builtin_passwords.json",p.at("operation"),original.empty()?Json():parse_json(original),replacement,p.value("scope",std::string())); flags|=Passwords;
                     } else if(op=="root") {
@@ -286,15 +433,24 @@ void Application::work() {
                         if(action=="start" || action=="stop" || action=="reload" || action=="status") args.push_back(wide(action));
                         else if(action=="startupEnable" || action=="startupDisable") { args.push_back(L"startup"); args.push_back(action=="startupEnable"?L"enable":L"disable"); }
                         else throw std::runtime_error("不支持的 CLI 操作");
-                        publish({{"busy",true},{"notice","正在执行 CLI 命令…"}});
+                        publish({{"busy",true},{"actionError",""},{"cliResult",""}});
                         auto result=run_cli(options_.cli,args,stop_);
-                        auto message="CLI 退出码 "+std::to_string(result.code)+"\n"+result.output;
-                        // The CLI normally emits UTF-8; malformed output must not break the UI.
-                        try { wide(message); } catch(...) { message="CLI 退出码 "+std::to_string(result.code)+"（输出编码无效）"; }
-                        publish({{"busy",false},{"notice",message}}); flags|=Startup;
+                        try { wide(result.output); } catch(...) { result.output=tr("cliEncoding",language); }
+                        Json feedback={{"busy",false},{"lastCommand",{{"action",action},{"code",result.code}}}};
+                        if(result.code!=0) {
+                            auto message=tr("cliFailed",language); auto at=message.find("{code}"); message.replace(at,6,std::to_string(result.code));
+                            feedback["actionError"]=message+"\n"+result.output;
+                        } else if(action=="status") feedback["cliResult"]=result.output;
+                        publish(std::move(feedback)); flags|=Startup;
                     } else throw std::runtime_error("未知界面操作");
-                    if(op=="saveConfig" || op=="password" || op=="root") publish({{"notice","已保存；正在回读实际文件。"}});
-                } catch(const std::exception& e) { publish({{"busy",false},{"notice",e.what()}}); }
+                    if(op=="saveConfig") publish({{"savedField",p.at("pointer")},{"savedEdits",{{p.at("pointer").get<std::string>(),p}}},{"settingError",Json::object()}});
+                    if(op=="password") publish({{"passwordEditor",false},{"passwordValue",""},{"actionError",""}});
+                    if(op=="root") publish({{"rootEditor",false},{"actionError",""}});
+                } catch(const std::exception& e) {
+                    auto message=translated_error(e.what(),language);
+                    if(op=="saveConfig") publish({{"settingError",{{"id",p.value("pointer",std::string())},{"message",message}}}});
+                    else publish({{"busy",false},{"actionError",message}});
+                }
             }
             auto read=[&](unsigned bit,const char* file,std::string& previous,bool& loaded,auto apply) {
                 if(!(flags&bit)) return;
@@ -338,22 +494,28 @@ void Application::work() {
                 catch(const std::exception& e){ errors["events.jsonl"]=e.what(); }
             }
             Json patch=Json::object();
-            if(tasks_changed || !previous_patch.contains("tasks")) patch["tasks"]=task_rows(log,roots,view);
-            if(passwords_changed || !previous_patch.contains("passwords")) patch["passwords"]=password_rows(passwords,view);
-            if(config_changed || !previous_patch.contains("fields")) patch["fields"]=config_fields(config,last_config);
+            auto next_language=gui_language(config);
+            bool language_changed=language!=next_language || !previous_patch.contains("language");
+            language=std::move(next_language);
+            if(language_changed) { patch["language"]=language; patch["texts"]=interface_texts(language); }
+            if(tasks_changed || language_changed || !previous_patch.contains("tasks")) patch["tasks"]=task_rows(log,roots,view,language);
+            if(passwords_changed || language_changed || !previous_patch.contains("passwords")) patch["passwords"]=password_rows(passwords,view,language);
+            if(config_changed || language_changed || !previous_patch.contains("fields")) patch["fields"]=config_fields(config,last_config,language);
             if(dirs_changed || !previous_patch.contains("directories")) patch["directories"]=directory_rows(roots,passwords,config);
             if(flags&Startup || !previous_patch.contains("startup")) {
                 try { auto state=read_startup(); patch["startup"]={{"enabled",state.enabled},{"command",state.command}}; errors.erase("startup"); }
                 catch(const std::exception& e){errors["startup"]=e.what();}
             }
-            patch["errors"]=errors; patch["logPath"]=utf8(log.path().wstring()); patch["ready"]=true;
+            auto displayed_errors=Json::object();
+            for(auto it=errors.begin();it!=errors.end();++it) displayed_errors[tr(it.key(),language)]=translated_error(it.value().get<std::string>(),language);
+            patch["errors"]=std::move(displayed_errors); patch["logPath"]=utf8(log.path().wstring()); patch["ready"]=true;
             Json changed_patch=Json::object();
             for(auto it=patch.begin();it!=patch.end();++it) if(!previous_patch.contains(it.key()) || previous_patch[it.key()]!=it.value()) {
                 previous_patch[it.key()]=it.value(); changed_patch[it.key()]=std::move(it.value());
             }
             if(!changed_patch.empty()) publish(std::move(changed_patch));
         }
-    } catch(const std::exception& e) { publish({{"notice",std::string("文件观察器停止：")+e.what()},{"ready",true}}); }
+    } catch(const std::exception& e) { publish({{"actionError",translated_error(e.what(),"en")},{"ready",true}}); }
     CoUninitialize();
 }
 }

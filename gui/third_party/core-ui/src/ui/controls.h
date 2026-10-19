@@ -599,6 +599,7 @@ public:
     float estimatedHeight = 80;
     std::function<void()> onRangeChanged;
     void SetCount(size_t count);
+    void InvalidateHeights();
     const std::vector<size_t>& Indices() const { return indices_; }
     void RefreshViewport();
     void DoLayout() override;

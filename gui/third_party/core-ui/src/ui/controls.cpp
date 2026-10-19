@@ -2413,6 +2413,10 @@ void VirtualListWidget::MeasureRow(size_t index, float height) {
     for (size_t i = index + 1; i < sums_.size(); i += i & -i) sums_[i] += delta;
 }
 
+void VirtualListWidget::InvalidateHeights() {
+    heights_.clear(); sums_.clear();
+}
+
 void VirtualListWidget::SetCount(size_t count) {
     if (heights_.size() != count) {
         heights_.resize(count, std::max(1.0f, estimatedHeight + gap_));

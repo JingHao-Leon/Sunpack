@@ -56,6 +56,7 @@ public:
     void SetNumber(const std::string& name, double v);
     void SetString(const std::string& name, const std::string& v);
     void SetValue(const std::string& name, ui::expr::Value v);
+    bool CallJsonMethod(const std::string& name, const std::string& json);
 
     bool GetValue(const std::string& name, ui::expr::Value& out) const;
 
